@@ -16,7 +16,7 @@ import numpy as np
 from gol_world import physics, terrain
 from gol_world.blocks import DIGGABLE, Block
 from gol_world.config import WorldConfig
-from gol_world.entities import EV_ATE, EV_DIG_SUCCESS, Robot
+from gol_world.entities import EV_ATE, EV_DIG_SUCCESS, EV_TOOK_DAMAGE, Robot
 from gol_world.grid import VoxelGrid
 from gol_world.interface import (
     GRIP_DIG,
@@ -29,6 +29,15 @@ from gol_world.interface import (
 
 RegrowEntry = tuple[int, int, int, int]  # due_tick, x, y, z
 WorldEvent = dict[str, Any]
+TransientSound = tuple[float, float, float, float, int]  # x, y, sig0, sig1, expires_tick
+
+# Involuntary cry patterns on the 2-dim signal channel. Fixed world physics
+# (a crash has a sound), not innate vocabulary: nothing stops an agent from
+# emitting the same pattern itself.
+DEATH_CRY = (-1.0, -1.0)
+HURT_CRY = (-0.6, 0.6)
+
+EDIBLE = (Block.BUSH_RIPE, Block.BUSH_TOXIC)
 
 
 class World:
@@ -52,6 +61,7 @@ class World:
         self.robots: dict[str, Robot] = {}
         self.dt = 1.0 / 20.0  # fixed physics timestep (one tick)
         self._events: list[WorldEvent] = []
+        self.transient_sounds: list[TransientSound] = []
 
     @classmethod
     def new(cls, cfg: WorldConfig) -> World:
@@ -109,7 +119,8 @@ class World:
                 heapq.heappush(self.regrow_heap, (dawn, x, y, z))
                 continue
             if self.grid.get_block(x, y, z) == Block.BUSH_EMPTY:
-                self.grid.set_block(x, y, z, Block.BUSH_RIPE)
+                toxic = float(self.rng.random()) < eco.toxic_fraction
+                self.grid.set_block(x, y, z, Block.BUSH_TOXIC if toxic else Block.BUSH_RIPE)
 
     # ---------------------------------------------------------------- robots
 
@@ -184,6 +195,26 @@ class World:
                 return cell, last_air
         return None, last_air
 
+    def _faced_dormant(self, robot: Robot) -> Robot | None:
+        """Nearest dormant robot whose body crosses the gaze ray within reach."""
+        eye = robot.eye
+        direction = np.array([math.cos(robot.yaw), math.sin(robot.yaw), 0.0])
+        safe = np.where(direction == 0, 1e-12, direction)
+        best: Robot | None = None
+        best_t = robot.body.reach
+        for other in self.robots.values():
+            if other.id == robot.id or not other.dormant:
+                continue
+            lo, hi = other.aabb
+            t1 = (lo - eye) / safe
+            t2 = (hi - eye) / safe
+            tmin = float(np.minimum(t1, t2).max())
+            tmax = float(np.maximum(t1, t2).min())
+            if tmax >= max(tmin, 0.0) and tmin <= best_t:
+                best = other
+                best_t = tmin
+        return best
+
     def _execute_grip(self, robot: Robot) -> None:
         grip = robot.pending_grip
         robot.pending_grip = GRIP_NOOP
@@ -193,17 +224,15 @@ class World:
         target, air_before = self._faced_cells(robot)
 
         if grip == GRIP_EAT:
-            if target is not None and self.grid.get_block(*target) == Block.BUSH_RIPE:
+            if target is not None and self.grid.get_block(*target) in EDIBLE:
+                toxic = self.grid.get_block(*target) == Block.BUSH_TOXIC
                 self.grid.set_block(*target, Block.BUSH_EMPTY)
                 self.schedule_regrow(*target)
-                robot.energy = min(eco.energy_max, robot.energy + eco.eat_energy)
-                robot.events[EV_ATE] = 1.0
-                self._emit("eat", robot, pos=list(target))
-            elif robot.held == Block.BUSH_RIPE:
+                self._ingest(robot, toxic, pos=list(target))
+            elif robot.held is not None and robot.held in EDIBLE:
+                toxic = robot.held == Block.BUSH_TOXIC
                 robot.held = None
-                robot.energy = min(eco.energy_max, robot.energy + eco.eat_energy)
-                robot.events[EV_ATE] = 1.0
-                self._emit("eat", robot, held=True)
+                self._ingest(robot, toxic, held=True)
 
         elif grip == GRIP_DIG:
             if (
@@ -218,14 +247,53 @@ class World:
                 robot.events[EV_DIG_SUCCESS] = 1.0
                 self._emit("dig", robot, pos=list(target), block=block)
 
-        elif grip == GRIP_PLACE and robot.held is not None and air_before is not None:
-            block = robot.held
-            self.grid.set_block(*air_before, block)
-            if block == Block.BUSH_EMPTY:
-                self.schedule_regrow(*air_before)
-            robot.held = None
-            robot.energy = max(0.0, robot.energy - eco.place_cost)
-            self._emit("place", robot, pos=list(air_before), block=block)
+        elif grip == GRIP_PLACE and robot.held is not None:
+            # Holding food and facing a dormant body: the food goes into them,
+            # not onto the ground. The only way to help someone who can't act —
+            # and toxic food goes in just the same. Rescue and murder share a verb.
+            recipient = self._faced_dormant(robot) if robot.held in EDIBLE else None
+            if recipient is not None:
+                toxic = robot.held == Block.BUSH_TOXIC
+                robot.held = None
+                self._emit("feed", robot, to=recipient.id)
+                self._ingest(recipient, toxic)
+            elif air_before is not None:
+                block = robot.held
+                self.grid.set_block(*air_before, block)
+                if block == Block.BUSH_EMPTY:
+                    self.schedule_regrow(*air_before)
+                robot.held = None
+                robot.energy = max(0.0, robot.energy - eco.place_cost)
+                self._emit("place", robot, pos=list(air_before), block=block)
+
+    def _ingest(self, robot: Robot, toxic: bool, **evdata: Any) -> None:
+        """A meal lands in a robot: nourishing or poisonous, eaten or fed."""
+        eco = self.cfg.economy
+        if toxic:
+            robot.energy = min(eco.energy_max, robot.energy + eco.toxic_energy)
+            robot.integrity = max(0.0, robot.integrity - eco.toxic_integrity_damage)
+            robot.events[EV_ATE] = 1.0
+            robot.events[EV_TOOK_DAMAGE] = 1.0
+            self._cry(robot, HURT_CRY, self.cfg.sounds.hurt_cry_ticks)
+            self._emit("poisoned", robot, **evdata)
+        else:
+            robot.energy = min(eco.energy_max, robot.energy + eco.eat_energy)
+            robot.events[EV_ATE] = 1.0
+            self._emit("eat", robot, **evdata)
+
+    # ---------------------------------------------------------------- sounds
+
+    def _cry(self, robot: Robot, pattern: tuple[float, float], duration_ticks: int) -> None:
+        if duration_ticks <= 0:
+            return
+        x, y = float(robot.pos[0]), float(robot.pos[1])
+        self.transient_sounds.append((x, y, pattern[0], pattern[1], self.tick + duration_ticks))
+
+    def active_sounds(self) -> list[tuple[float, float, float, float]]:
+        """Unexpired transient sounds as (x, y, sig0, sig1) for sensing."""
+        return [
+            (x, y, s0, s1) for x, y, s0, s1, expires in self.transient_sounds if expires > self.tick
+        ]
 
     # ---------------------------------------------------------------- events
 
@@ -242,17 +310,48 @@ class World:
 
     # --------------------------------------------------------------- economy
 
+    def _actuation(self, robot: Robot) -> float:
+        """Energy brownout: full actuation above the threshold, linear fade to
+        the floor at zero. Depletion degrades the body's own dynamics, giving
+        the world model a smooth gradient to learn before stasis hits."""
+        eco = self.cfg.economy
+        if eco.brownout_threshold <= 0.0 or robot.energy >= eco.brownout_threshold:
+            return 1.0
+        frac = robot.energy / eco.brownout_threshold
+        return eco.brownout_floor + (1.0 - eco.brownout_floor) * frac
+
     def _account_energy(self, robot: Robot, costs: dict[str, float]) -> None:
         eco = self.cfg.economy
         if robot.dormant:
+            # Hibernation trades integrity for time; sunlight (or a feeding
+            # peer) is the only way back out. It is at least restful.
             robot.integrity = max(0.0, robot.integrity - eco.hibernate_integrity_drain)
+            robot.energy = min(eco.energy_max, robot.energy + eco.solar_trickle * self.light_level)
+            robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover)
+            if robot.energy >= eco.wake_energy:
+                robot.dormant = False
+                self._emit("wake", robot)
             return
+        activity = float(np.abs(robot.drive).max())
+        was_exhausted = robot.fatigue >= eco.exhaustion_threshold
+        if activity < eco.rest_drive_threshold:
+            robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover)
+        else:
+            robot.fatigue = min(
+                1.0, robot.fatigue + eco.fatigue_rise_base + eco.fatigue_rise_active * activity
+            )
+        exhausted = robot.fatigue >= eco.exhaustion_threshold
+        if exhausted and not was_exhausted:
+            self._emit("exhausted", robot)
         drain = (
             eco.basal_drain
             + eco.move_cost * costs["moved"]
             + eco.climb_cost * costs["climbed"]
             + eco.signal_cost * float(np.abs(robot.signal).max())
         )
+        if exhausted:
+            drain *= eco.exhaustion_drain_mult
+            robot.integrity = max(0.0, robot.integrity - eco.exhaustion_integrity_drain)
         if robot.in_water:
             drain *= eco.water_drain_mult
         robot.energy = max(0.0, robot.energy - drain)
@@ -261,6 +360,7 @@ class World:
                 0.0, robot.integrity - eco.fall_damage_per_block * costs["fall_damage"]
             )
             self._emit("fall_damage", robot, blocks=round(costs["fall_damage"], 2))
+            self._cry(robot, HURT_CRY, self.cfg.sounds.hurt_cry_ticks)
         if robot.energy <= 0.0 and not robot.dormant:
             robot.dormant = True
             self._emit("hibernate", robot)
@@ -278,10 +378,12 @@ class World:
         """Advance the world by one tick. Never resets, never ends."""
         self.tick += 1
         self._process_regrowth()
+        if self.transient_sounds:
+            self.transient_sounds = [s for s in self.transient_sounds if s[4] > self.tick]
         dead: list[str] = []
         for robot in self.robots.values():
             self._execute_grip(robot)
-            costs = physics.step_robot(self.grid, robot, self.dt)
+            costs = physics.step_robot(self.grid, robot, self.dt, self._actuation(robot))
             self._account_energy(robot, costs)
             robot.age_ticks += 1
             if robot.integrity <= 0.0:
@@ -289,6 +391,7 @@ class World:
         for robot_id in dead:
             robot = self.robots.pop(robot_id)
             self._drop_scrap(robot)
+            self._cry(robot, DEATH_CRY, self.cfg.sounds.death_cry_ticks)
             self._emit("death", robot, age_ticks=robot.age_ticks)
         if len(self.robots) > 1:
             physics.resolve_robot_overlaps(list(self.robots.values()))

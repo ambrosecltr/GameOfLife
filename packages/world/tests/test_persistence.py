@@ -46,6 +46,15 @@ def test_latest_and_pruning(tmp_path: Path) -> None:
     assert latest is not None and latest.name == f"ckpt_{world.tick:012d}"
 
 
+def test_transient_sounds_roundtrip(tmp_path: Path) -> None:
+    save, world = _fresh_save(tmp_path)
+    world.spawn_robot("bot_000", "test")  # entities.json must exist for sounds to load
+    world.transient_sounds = [(8.5, 9.5, -1.0, -1.0, world.tick + 40)]
+    persistence.save_checkpoint(save, world, brain_states={})
+    loaded = persistence.load_world(save)
+    assert loaded.transient_sounds == world.transient_sounds
+
+
 def test_brain_states_roundtrip(tmp_path: Path) -> None:
     save, world = _fresh_save(tmp_path)
     blobs = {"agent_001": b"weights-1", "agent_002": b"weights-2"}

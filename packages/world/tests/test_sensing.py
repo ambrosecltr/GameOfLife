@@ -3,6 +3,8 @@ from gol_world.blocks import Block
 from gol_world.entities import Robot
 from gol_world.grid import VoxelGrid
 from gol_world.interface import (
+    NUM_RAY_CLASSES,
+    PROPRIO_DIM,
     RAY_CLASS_NOTHING,
     RAY_CLASS_ROBOT,
 )
@@ -87,8 +89,8 @@ def test_observe_shapes_and_events_drain() -> None:
     robot = Robot(id="a", pos=np.array([8.5, 8.5, 1.0]), yaw=0.3, brain_name="t")
     robot.events[0] = 1.0
     obs = observe(grid.blocks, [robot], light_level=0.5)["a"]
-    assert obs["rays"].shape == (robot.body.num_rays, 16)
-    assert obs["proprio"].shape == (14,)
+    assert obs["rays"].shape == (robot.body.num_rays, 1 + NUM_RAY_CLASSES)
+    assert obs["proprio"].shape == (PROPRIO_DIM,)
     assert obs["sound"].shape == (4,)
     assert obs["events"].shape == (4,)
     assert obs["events"][0] == 1.0
@@ -117,6 +119,42 @@ def test_sound_carries_signal_and_bearing() -> None:
     # Bearing: shouter is at +y, hearer faces +x -> relative bearing +90 deg.
     np.testing.assert_allclose(obs["sound"][2], 1.0, atol=1e-6)
     np.testing.assert_allclose(obs["sound"][3], 0.0, atol=1e-6)
+
+
+def test_toxic_bush_visible_by_default_hidden_under_mimicry() -> None:
+    grid = scene()
+    grid.blocks[12, 8, 1] = Block.BUSH_TOXIC  # eye-height wall of one toxic bush
+    viewer = Robot(id="a", pos=np.array([8.5, 8.5, 1.0]), yaw=0.0, brain_name="t")
+    viewer.pos[2] = 0.5  # eye at z≈1.25, in the bush's cell layer
+
+    obs = observe(grid.blocks, [viewer], light_level=1.0)["a"]
+    classes = obs["rays"][:, 1:].argmax(axis=1)
+    assert (classes == Block.BUSH_TOXIC).any()
+    assert not (classes == Block.BUSH_RIPE).any()
+
+    obs = observe(grid.blocks, [viewer], light_level=1.0, toxic_mimic=True)["a"]
+    classes = obs["rays"][:, 1:].argmax(axis=1)
+    assert not (classes == Block.BUSH_TOXIC).any()
+    assert (classes == Block.BUSH_RIPE).any()
+
+
+def test_world_sound_is_heard_with_bearing() -> None:
+    grid = scene()
+    hearer = Robot(id="a", pos=np.array([8.5, 8.5, 1.0]), yaw=0.0, brain_name="t")
+    # A death cry 4 blocks ahead (+x): mix carries its pattern, bearing is 0.
+    cry = (12.5, 8.5, -1.0, -1.0)
+    obs = observe(grid.blocks, [hearer], light_level=1.0, world_sounds=[cry])["a"]
+    assert obs["sound"][0] < 0.0 and obs["sound"][1] < 0.0
+    np.testing.assert_allclose(obs["sound"][2], 0.0, atol=1e-6)
+    np.testing.assert_allclose(obs["sound"][3], 1.0, atol=1e-6)
+
+
+def test_world_sound_beyond_hear_radius_is_silent() -> None:
+    grid = scene()
+    hearer = Robot(id="a", pos=np.array([1.5, 1.5, 1.0]), yaw=0.0, brain_name="t")
+    cry = (14.5, 14.5, -1.0, -1.0)  # ~18 blocks away, radius is 12
+    obs = observe(grid.blocks, [hearer], light_level=1.0, world_sounds=[cry])["a"]
+    assert (obs["sound"] == 0).all()
 
 
 def test_silence_when_alone() -> None:

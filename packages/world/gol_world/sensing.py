@@ -8,6 +8,7 @@ O(robots x rays x range) Python loops.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import numpy as np
 import numpy.typing as npt
@@ -146,25 +147,33 @@ def _proprio(robot: Robot, light_level: float) -> npt.NDArray[np.float32]:
     out[8] = 0.0 if robot.held is None else robot.held / 16.0
     out[9:13] = robot.touch.astype(F32)
     out[13] = light_level
+    out[14] = robot.fatigue
     return out
 
 
-def _sound(robot: Robot, others: list[Robot]) -> npt.NDArray[np.float32]:
+def _sound(
+    robot: Robot,
+    others: list[Robot],
+    world_sounds: Sequence[tuple[float, float, float, float]] = (),
+) -> npt.NDArray[np.float32]:
     out = np.zeros(SOUND_DIM, dtype=F32)
     radius = robot.body.hear_radius
     total_w = 0.0
     mix = np.zeros(2)
     loudest = 0.0
     loudest_bearing: float | None = None
-    for other in others:
-        d = other.pos[:2] - robot.pos[:2]
+    # Robot signals and transient world sounds (cries) mix identically.
+    sources = [(other.pos[:2], other.signal) for other in others]
+    sources += [(np.array([x, y]), np.array([s0, s1])) for x, y, s0, s1 in world_sounds]
+    for pos, signal in sources:
+        d = pos - robot.pos[:2]
         dist = float(np.hypot(d[0], d[1]))
         if dist > radius:
             continue
         w = 1.0 - dist / radius
-        mix += w * other.signal
+        mix += w * signal
         total_w += w
-        volume = w * float(np.abs(other.signal).max())
+        volume = w * float(np.abs(signal).max())
         if volume > loudest:
             loudest = volume
             loudest_bearing = math.atan2(d[1], d[0]) - robot.yaw
@@ -180,6 +189,8 @@ def observe(
     blocks: npt.NDArray[np.uint8],
     robots: list[Robot],
     light_level: float,
+    world_sounds: Sequence[tuple[float, float, float, float]] = (),
+    toxic_mimic: bool = False,
 ) -> dict[str, Observation]:
     """Build observations for every awake robot (one batched raycast)."""
     awake = [r for r in robots if not r.dormant]
@@ -200,6 +211,10 @@ def observe(
     dirs = np.concatenate(all_dirs)
     max_range = max(r.body.ray_range for r in awake)
     depth, hit = cast_rays(blocks, origins, dirs, max_range)
+    if toxic_mimic:
+        # Ablation: perfect mimicry — toxic bushes are indistinguishable by
+        # sight, learnable only through consequence and place memory.
+        hit[hit == Block.BUSH_TOXIC] = Block.BUSH_RIPE
 
     obs: dict[str, Observation] = {}
     offset = 0
@@ -219,7 +234,7 @@ def observe(
         obs[robot.id] = Observation(
             rays=rays,
             proprio=_proprio(robot, light_level),
-            sound=_sound(robot, others),
+            sound=_sound(robot, others, world_sounds),
             events=robot.drain_events().astype(F32),
         )
     return obs

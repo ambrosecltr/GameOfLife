@@ -91,7 +91,10 @@ def save_checkpoint(save_dir: Path, world: World, brain_states: dict[str, bytes]
         regrow_heap=heap,
         rng_state=np.frombuffer(json.dumps(world.rng.bit_generator.state).encode(), dtype=np.uint8),
     )
-    entities = {"robots": [robot.to_dict() for robot in world.robots.values()]}
+    entities = {
+        "robots": [robot.to_dict() for robot in world.robots.values()],
+        "transient_sounds": [list(s) for s in world.transient_sounds],
+    }
     (tmp / "entities.json").write_text(json.dumps(entities, indent=2))
     if brain_states:
         brains_dir = tmp / "brains"
@@ -144,6 +147,10 @@ def load_world(save_dir: Path, ckpt: Path | None = None) -> World:
         for robot_data in entities.get("robots", []):
             robot = Robot.from_dict(robot_data)
             world.robots[robot.id] = robot
+        world.transient_sounds = [
+            (float(x), float(y), float(s0), float(s1), int(expires))
+            for x, y, s0, s1, expires in entities.get("transient_sounds", [])
+        ]
     return world
 
 

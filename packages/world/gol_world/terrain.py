@@ -123,7 +123,11 @@ def generate(cfg: WorldConfig) -> VoxelGrid:
                     and blocks[bx, by, bz - 1] == Block.GRASS
                     and blocks[bx, by, bz] == Block.AIR
                 ):
-                    ripe = rng.random() > 0.3
-                    blocks[bx, by, bz] = Block.BUSH_RIPE if ripe else Block.BUSH_EMPTY
+                    if rng.random() < 0.3:
+                        blocks[bx, by, bz] = Block.BUSH_EMPTY
+                    elif rng.random() < cfg.ecology.toxic_fraction:
+                        blocks[bx, by, bz] = Block.BUSH_TOXIC
+                    else:
+                        blocks[bx, by, bz] = Block.BUSH_RIPE
 
     return VoxelGrid(blocks)

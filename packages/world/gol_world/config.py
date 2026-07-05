@@ -33,6 +33,8 @@ class EcologyConfig:
     regrow_ticks: int = 12000
     regrow_jitter: int = 3000
     regrow_daytime_only: bool = True
+    toxic_fraction: float = 0.15  # chance a bush (generated or regrown) is toxic
+    toxic_mimic: bool = False  # ablation: toxic bushes look identical to ripe ones
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,33 @@ class EconomyConfig:
     water_speed_mult: float = 0.5
     water_drain_mult: float = 3.0
     fall_damage_per_block: float = 8.0
-    hibernate_integrity_drain: float = 0.005
+    hibernate_integrity_drain: float = 0.0012
+    solar_trickle: float = 0.003  # energy/tick at full light, dormant robots only
+    wake_energy: float = 15.0  # dormant robots wake above this
+    toxic_energy: float = 10.0  # poison berries still hold some charge
+    toxic_integrity_damage: float = 12.0
+    # Fatigue: a 0..1 homeostat. Builds while active, clears while still;
+    # past the exhaustion threshold, energy costs multiply and integrity bleeds.
+    fatigue_rise_base: float = 0.000015  # per awake tick above the rest threshold
+    fatigue_rise_active: float = 0.00004  # additional per tick at full drive
+    fatigue_recover: float = 0.000125  # per tick while resting (or dormant)
+    rest_drive_threshold: float = 0.1  # |drive| below this counts as resting
+    exhaustion_threshold: float = 0.9
+    exhaustion_drain_mult: float = 1.5
+    exhaustion_integrity_drain: float = 0.002
+    # Brownout: a starving body sags. Below the threshold, actuation (speed and
+    # turn rate) fades linearly to the floor at zero energy, so depletion is
+    # felt in the body's own dynamics before stasis. 0 disables (ablation).
+    brownout_threshold: float = 25.0  # energy units, matches wake_energy scale
+    brownout_floor: float = 0.35  # actuation fraction remaining at zero energy
+
+
+@dataclass(frozen=True)
+class SoundConfig:
+    """Involuntary world sounds — physics, not messaging (0 ticks disables)."""
+
+    death_cry_ticks: int = 40
+    hurt_cry_ticks: int = 10
 
 
 @dataclass(frozen=True)
@@ -61,6 +89,7 @@ class WorldConfig:
     terrain: TerrainConfig = field(default_factory=TerrainConfig)
     ecology: EcologyConfig = field(default_factory=EcologyConfig)
     economy: EconomyConfig = field(default_factory=EconomyConfig)
+    sounds: SoundConfig = field(default_factory=SoundConfig)
 
 
 def dataclass_from_dict(cls: type[T], data: dict[str, Any]) -> T:

@@ -1,0 +1,30 @@
+# Local social round: several learning minds among scripted peers, on the
+# M1. Small enough to run overnight, social enough that dreamers have each
+# other as their most unpredictable objects.
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7301
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/dreamer.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: true
+  rerun_fps: 10
+  metrics_every_ticks: 100
+  rrd_rotate_sim_hours: 6

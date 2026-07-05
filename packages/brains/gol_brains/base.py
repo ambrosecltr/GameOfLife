@@ -39,7 +39,8 @@ class Brain(ABC):
         del state  # nothing to restore by default
 
     def reset_stream(self) -> None:  # noqa: B027 - optional hook, no-op by default
-        """Called when this brain wakes up in a new body (lineage respawn).
+        """Called when the stream of experience breaks: lineage respawn into a
+        new body, or waking from dormancy (the dormant gap is never observed).
 
         Weights and memory persist; only the live recurrent state resets.
         """

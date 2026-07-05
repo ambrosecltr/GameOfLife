@@ -23,6 +23,7 @@ class Block(IntEnum):
     BUSH_RIPE = 8
     ORE = 9
     SCRAP = 10
+    BUSH_TOXIC = 11
 
 
 NUM_BLOCKS = len(Block)
@@ -45,6 +46,7 @@ DIGGABLE[
         Block.SCRAP,
         Block.BUSH_EMPTY,
         Block.BUSH_RIPE,
+        Block.BUSH_TOXIC,
     ]
 ] = True
 
@@ -62,6 +64,7 @@ COLOR: npt.NDArray[np.uint8] = np.array(
         [196, 74, 60],  # BUSH_RIPE (red berries)
         [186, 150, 62],  # ORE
         [210, 120, 34],  # SCRAP (robot-orange debris)
+        [148, 70, 168],  # BUSH_TOXIC (purple berries)
     ],
     dtype=np.uint8,
 )

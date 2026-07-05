@@ -15,17 +15,18 @@ import numpy.typing as npt
 
 from gol_world.blocks import NUM_BLOCKS
 
-OBS_VERSION = 1
+# v2: BUSH_TOXIC block (widens the ray one-hot) + fatigue appended to proprio.
+OBS_VERSION = 2
 
 # Ray hit classes: one per block id (AIR's slot is unused — a miss is NOTHING),
 # then entities, then "no hit within range".
-RAY_CLASS_ROBOT = NUM_BLOCKS  # 11
-RAY_CLASS_DORMANT = NUM_BLOCKS + 1  # 12
-RAY_CLASS_ITEM = NUM_BLOCKS + 2  # 13
-RAY_CLASS_NOTHING = NUM_BLOCKS + 3  # 14
-NUM_RAY_CLASSES = NUM_BLOCKS + 4  # 15
+RAY_CLASS_ROBOT = NUM_BLOCKS  # 12
+RAY_CLASS_DORMANT = NUM_BLOCKS + 1  # 13
+RAY_CLASS_ITEM = NUM_BLOCKS + 2  # 14
+RAY_CLASS_NOTHING = NUM_BLOCKS + 3  # 15
+NUM_RAY_CLASSES = NUM_BLOCKS + 4  # 16
 
-PROPRIO_DIM = 14
+PROPRIO_DIM = 15
 SOUND_DIM = 4
 EVENTS_DIM = 4
 SIGNAL_DIM = 2

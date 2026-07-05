@@ -78,18 +78,13 @@ def main(argv: list[str] | None = None) -> int:
 
     population = Population(world, run_cfg)
     heatmap = VisitHeatmap(world.cfg.size)
-    logs = RunLogs(
-        save_dir,
-        run_cfg.observability.metrics_every_ticks,
-        introspection=population.introspection,
-        heatmap=heatmap,
-    )
     if exists:
         ckpt = persistence.latest_checkpoint(save_dir)
         if ckpt is not None:
             population.restore_brain_states(persistence.load_brain_states(ckpt))
 
     log_frame = None
+    event_sink = None
     if run_cfg.observability.rerun and (not args.headless or args.rrd):
         from gol_obs.rerun_log import RerunLogger
 
@@ -100,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
             save_path=args.rrd,
             rotate_ticks=run_cfg.observability.rrd_rotate_sim_hours * 3600 * run_cfg.tick_rate,
         )
+        event_sink = logger.log_events
 
         def log_frame(w: World) -> None:
             logger.log_frame(
@@ -108,6 +104,14 @@ def main(argv: list[str] | None = None) -> int:
                 introspection=population.introspection(),
                 heatmap=heatmap.image(),
             )
+
+    logs = RunLogs(
+        save_dir,
+        run_cfg.observability.metrics_every_ticks,
+        introspection=population.introspection,
+        heatmap=heatmap,
+        event_sink=event_sink,
+    )
 
     def act_step(w: World) -> None:
         population.act_step(w)

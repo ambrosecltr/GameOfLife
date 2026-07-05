@@ -88,11 +88,15 @@ def feet_block(grid: VoxelGrid, robot: Robot) -> int:
     return grid.get_block(x, y, z)
 
 
-def step_robot(grid: VoxelGrid, robot: Robot, dt: float) -> dict[str, float]:
+def step_robot(
+    grid: VoxelGrid, robot: Robot, dt: float, actuation: float = 1.0
+) -> dict[str, float]:
     """Advance one robot one tick. Returns physics costs for the economy layer.
 
     Costs: climbed (blocks stepped up), moved (fraction of full drive), fall
-    damage is applied directly to integrity here.
+    damage is applied directly to integrity here. `actuation` scales speed and
+    turn rate (energy brownout); costs charge the commanded effort, not the
+    achieved motion — a browned-out body pays full price for less movement.
     """
     costs = {"climbed": 0.0, "moved": 0.0, "fall_damage": 0.0}
     if robot.dormant:
@@ -105,8 +109,8 @@ def step_robot(grid: VoxelGrid, robot: Robot, dt: float) -> dict[str, float]:
     # --- steering
     forward_cmd = float(np.clip(robot.drive[0], -1.0, 1.0))
     turn_cmd = float(np.clip(robot.drive[1], -1.0, 1.0))
-    robot.yaw = (robot.yaw + turn_cmd * body.max_turn * dt) % (2 * math.pi)
-    speed = forward_cmd * body.max_speed
+    robot.yaw = (robot.yaw + turn_cmd * body.max_turn * actuation * dt) % (2 * math.pi)
+    speed = forward_cmd * body.max_speed * actuation
     if robot.in_water:
         speed *= 0.5
     vx = math.cos(robot.yaw) * speed

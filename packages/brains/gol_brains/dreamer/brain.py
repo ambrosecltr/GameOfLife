@@ -19,6 +19,7 @@ from gol_world.interface import (
     EVENTS_DIM,
     NUM_GRIP_MODES,
     NUM_RAY_CLASSES,
+    OBS_VERSION,
     PROPRIO_DIM,
     SIGNAL_DIM,
     SOUND_DIM,
@@ -129,6 +130,7 @@ class DreamerBrain(Brain):
         self.w_homeostasis = float(rw.get("w_homeostasis", 1.0))
         self.low_energy_threshold = float(rw.get("low_energy_threshold", 0.25))
         self.low_energy_penalty = float(rw.get("low_energy_penalty", 0.02))
+        self.low_energy_graded = bool(rw.get("low_energy_graded", True))
         # Ablation (research question 2): mask other robots out of the
         # curiosity target so agents aren't intrinsically drawn to each other.
         self.curiosity_mask_agents = bool(rw.get("curiosity_mask_agents", False))
@@ -234,7 +236,14 @@ class DreamerBrain(Brain):
 
     def _homeostasis(self, events: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
         ate, damage = events[..., 0], events[..., 1]
-        low = (proprio[..., 5] < self.low_energy_threshold).float()
+        energy = proprio[..., 5]
+        if self.low_energy_graded:
+            # Ramp, not cliff: penalty grows as energy falls, so the reward
+            # head sees a gradient pointing away from zero everywhere below
+            # the threshold. Binary variant kept as an ablation.
+            low = ((self.low_energy_threshold - energy) / self.low_energy_threshold).clamp(0.0, 1.0)
+        else:
+            low = (energy < self.low_energy_threshold).float()
         return ate - damage - self.low_energy_penalty * low
 
     def learn(self) -> dict[str, float] | None:
@@ -411,7 +420,7 @@ class DreamerBrain(Brain):
         return dict(self._metrics)
 
     def reset_stream(self) -> None:
-        """New body, same mind: reset the live recurrent state only."""
+        """The stream broke (respawn or wake): reset live recurrent state only."""
         self.h, self.z = self.wm.rssm.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
 
@@ -419,7 +428,7 @@ class DreamerBrain(Brain):
 
     def state_dict(self) -> dict[str, Any]:
         return {
-            "obs_version": 1,
+            "obs_version": OBS_VERSION,
             "wm": self.wm.state_dict(),
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
@@ -438,8 +447,6 @@ class DreamerBrain(Brain):
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        from gol_world.interface import OBS_VERSION
-
         if state.get("obs_version") != OBS_VERSION:
             raise ValueError(
                 f"brain checkpoint has obs_version {state.get('obs_version')}, "

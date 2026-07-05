@@ -11,6 +11,7 @@ reward:
   w_homeostasis: 1.0
   low_energy_threshold: 0.25
   low_energy_penalty: 0.02
+  low_energy_graded: true
   curiosity_mask_agents: true   # <-- the ablation
 
 world_model:

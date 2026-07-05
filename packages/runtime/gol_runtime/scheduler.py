@@ -37,13 +37,18 @@ class Population:
         }
         self._next_idx = 0
         self._respawn_queue: list[tuple[int, str]] = []  # (due_tick, brain kind)
+        # Waking from dormancy breaks the stream of experience (the gap is
+        # never observed); those brains get reset_stream() before their next
+        # act so a days-long discontinuity isn't stitched into one RSSM step.
+        self._dormant_ids: set[str] = set()
+        self._pending_stream_reset: set[str] = set()
         # inherit_weights == "lineage": dead learning brains wait here for a
         # new body — weights and replay memory persist across deaths.
         self._lineage_stash: dict[str, list[Brain]] = {}
         if world.robots:
             self._rebuild_brains()
             self._next_idx = (
-                max(int(rid.split("_")[1]) for rid in world.robots) + 1 if world.robots else 0
+                max(int(rid.rsplit("_", 1)[1]) for rid in world.robots) + 1 if world.robots else 0
             )
         else:
             self._spawn_initial()
@@ -114,6 +119,8 @@ class Population:
                 self._lineage_stash.setdefault(kind, []).append(brain)
             self.locks.pop(rid, None)
             self.last_obs.pop(rid, None)
+            self._dormant_ids.discard(rid)
+            self._pending_stream_reset.discard(rid)
             self._respawn_queue.append((world.tick + self.cfg.population.respawn_delay_ticks, kind))
         if len(world.robots) < self.cfg.population.target:
             due = [entry for entry in self._respawn_queue if entry[0] <= world.tick]
@@ -123,7 +130,10 @@ class Population:
                 self._spawn(kind)
 
     def _spawn(self, kind: str) -> None:
-        robot_id = f"bot_{self._next_idx:03d}"
+        # Ids carry the kind so every surface (labels, charts, events) reads
+        # meaningfully: dreamer_000, forager_001, walker_002.
+        prefix = kind.rsplit("_", 1)[-1] if kind else "bot"
+        robot_id = f"{prefix}_{self._next_idx:03d}"
         self._next_idx += 1
         self.world.spawn_robot(robot_id, brain_name=kind)
         mode = self.cfg.population.inherit_weights
@@ -156,13 +166,25 @@ class Population:
         now, the robot simply keeps its previously latched command this cycle.
         """
         self._process_lifecycle(world)
-        obs = observe(world.grid.blocks, list(world.robots.values()), world.light_level)
+        obs = observe(
+            world.grid.blocks,
+            list(world.robots.values()),
+            world.light_level,
+            world.active_sounds(),
+            toxic_mimic=world.cfg.ecology.toxic_mimic,
+        )
         self.last_obs = obs
+        # Robots observable again after a dormant spell just woke up.
+        self._pending_stream_reset |= self._dormant_ids & set(obs)
+        self._dormant_ids = {r.id for r in world.robots.values() if r.dormant}
         for robot_id, o in obs.items():
             lock = self.locks[robot_id]
             if not lock.acquire(blocking=False):
                 continue
             try:
+                if robot_id in self._pending_stream_reset:
+                    self.brains[robot_id].reset_stream()
+                    self._pending_stream_reset.discard(robot_id)
                 action = self.brains[robot_id].act(o)
             finally:
                 lock.release()

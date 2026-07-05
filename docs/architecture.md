@@ -63,18 +63,21 @@ Files: `blocks.py`, `grid.py`, `terrain.py`, `physics.py`, `entities.py`, `sensi
 
 - **Robot**: `id, pos, yaw, vel, energy, integrity, held, dormant, age_ticks, brain_name, rng_seed`. Body = 0.8×0.8×0.9-block AABB; `BodySpec` dataclass carries tunables (rays, FOV, speed, energy caps) so variants are config, not code.
 - **Physics**: gravity + axis-by-axis AABB-vs-voxel sweep (`move_and_collide`). Auto-climb 1-block steps (energy surcharge); 2+ blocked; falls >3 blocks damage integrity; water halves speed, triples drain. Touch flags feed proprioception.
-- **Energy**: basal drain + movement/dig/climb costs; eating restores. Energy ≤ 0 → **hibernate** (dormant, slow integrity decay — lootable/nudgeable, emergence bait); integrity 0 → **death**, drops SCRAP (death feeds the world).
+- **Energy**: basal drain + movement/dig/climb costs; eating restores. Below `brownout_threshold`, actuation (speed, turn) fades linearly to `brownout_floor` at zero — a starving body sags, so depletion is felt in the body's own dynamics before stasis; costs still charge the commanded effort, so a browned-out robot pays full price for less motion. Energy ≤ 0 → **hibernate** (dormant, slow integrity decay). Two ways back: a solar trickle recharges dormant bodies in daylight (wake at `wake_energy`), or a peer feeds them — `place` while holding food and facing a dormant body transfers the meal (`feed` event; the world's first prosocial affordance — and it works with toxic food too, so rescue and murder share a verb). Integrity 0 → **death**, drops SCRAP (death feeds the world).
+- **Poison**: `toxic_fraction` of bushes are BUSH_TOXIC (purple; a distinct ray class). Eating one gives reduced energy but costs integrity, fires `took_damage`, and emits a hurt cry — avoidance must be learned from consequence. `ecology.toxic_mimic` ablation makes toxic bushes visually identical to ripe ones (consequence + place memory only).
+- **Fatigue**: 0..1 homeostat in proprio. Builds while driving, clears while still (or dormant); past `exhaustion_threshold` energy costs multiply and integrity bleeds. No hardcoded sleep — night scarcity plus fatigue should make resting at night *emerge*, or not (that's the experiment).
+- **Involuntary sounds**: death leaves a loud transient cry at the spot (~2 s, pattern (-1,-1) on the signal channel); fall damage a quieter distinct one. World physics, not vocabulary — agents can mimic them, and witnesses get cause-and-effect material (sound → body stops → scrap). Transient sounds checkpoint with the world.
 - **Population**: respawn budget, not evolution. `target_population`; on death, delayed respawn at a spawn pad with a fresh brain; `inherit_weights: random_living` flag enables cultural-transmission experiments (research question 4). No fitness scoring anywhere.
 
 ## Sensing/action contract — `interface.py` (the stable wall between world and brains)
 
 ```python
 Observation (TypedDict):
-  rays:    float32 (R, 16)   # ray fan: depth + 15-way class one-hot (blocks/robot/item/dormant/none)
+  rays:    float32 (R, 17)   # ray fan: depth + 16-way class one-hot (blocks/robot/item/dormant/none)
                              # default R=32 (2 pitch rows × 16 over 144°); config option: ray-GRID
                              # "semantic camera" (16×16=256 rays) for richer vision at cloud scale
-  proprio: float32 (14)      # body-frame vel, yaw sin/cos, energy, integrity, held, touch(4), light
-  sound:   float32 (4)       # distance-weighted neighbor signals (r=12) + bearing of loudest
+  proprio: float32 (15)      # body-frame vel, yaw sin/cos, energy, integrity, held, touch(4), light, fatigue
+  sound:   float32 (4)       # distance-weighted neighbor signals + world cries (r=12), bearing of loudest
   events:  float32 (4)       # ate, took_damage, dig_success, bumped_robot
 
 Action (frozen dataclass):

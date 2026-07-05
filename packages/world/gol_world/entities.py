@@ -35,6 +35,7 @@ class Robot:
     integrity: float = 100.0
     held: int | None = None  # block id being carried
     dormant: bool = False
+    fatigue: float = 0.0  # 0..1; builds with activity, clears with rest
     age_ticks: int = 0
     # Commanded controls; persist between act-steps (grip is one-shot).
     drive: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(2))
@@ -73,6 +74,7 @@ class Robot:
             "integrity": self.integrity,
             "held": self.held,
             "dormant": self.dormant,
+            "fatigue": self.fatigue,
             "age_ticks": self.age_ticks,
             "drive": self.drive.tolist(),
             "signal": self.signal.tolist(),
@@ -93,6 +95,7 @@ class Robot:
             integrity=float(data["integrity"]),
             held=data["held"],
             dormant=bool(data["dormant"]),
+            fatigue=float(data.get("fatigue", 0.0)),
             age_ticks=int(data["age_ticks"]),
             drive=np.array(data["drive"], dtype=np.float64),
             signal=np.array(data["signal"], dtype=np.float64),

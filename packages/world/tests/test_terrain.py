@@ -32,10 +32,21 @@ def test_structure() -> None:
 
 def test_bushes_sit_on_grass() -> None:
     grid = generate(SMALL)
-    for x, y, z in np.argwhere(
-        (grid.blocks == Block.BUSH_RIPE) | (grid.blocks == Block.BUSH_EMPTY)
-    ):
+    bush = (
+        (grid.blocks == Block.BUSH_RIPE)
+        | (grid.blocks == Block.BUSH_EMPTY)
+        | (grid.blocks == Block.BUSH_TOXIC)
+    )
+    for x, y, z in np.argwhere(bush):
         assert grid.blocks[x, y, z - 1] == Block.GRASS
+
+
+def test_toxic_bushes_generated_at_default_fraction() -> None:
+    grid = generate(SMALL)
+    assert (grid.blocks == Block.BUSH_TOXIC).any()
+    ripe = int((grid.blocks == Block.BUSH_RIPE).sum())
+    toxic = int((grid.blocks == Block.BUSH_TOXIC).sum())
+    assert toxic < ripe  # minority food source
 
 
 def test_no_floating_water() -> None:

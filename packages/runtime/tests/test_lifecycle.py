@@ -31,17 +31,38 @@ def test_death_triggers_respawn(tmp_path: Path) -> None:
     persistence.create_save(save, CFG, run_config=dataclasses.asdict(RUN))
     world = World.new(CFG)
     population = Population(world, RUN)
-    assert set(world.robots) == {"bot_000", "bot_001", "bot_002"}
+    assert set(world.robots) == {"walker_000", "walker_001", "walker_002"}
 
     # Starve one robot to death.
-    world.robots["bot_001"].energy = 0.0
-    world.robots["bot_001"].integrity = 0.5
+    world.robots["walker_001"].energy = 0.0
+    world.robots["walker_001"].integrity = 0.5
 
     loop = SimLoop(world, save, RUN, act_step=population.act_step)
     loop.run(max_ticks=300, paced=False)
 
-    assert "bot_001" not in world.robots
-    assert "bot_003" in world.robots, "a replacement should have spawned"
+    assert "walker_001" not in world.robots
+    assert "walker_003" in world.robots, "a replacement should have spawned"
     assert len(world.robots) == 3
-    assert "bot_003" in population.brains
-    assert "bot_001" not in population.brains
+    assert "walker_003" in population.brains
+    assert "walker_001" not in population.brains
+
+
+def test_wake_from_dormancy_resets_brain_stream() -> None:
+    world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, RUN)
+    rid = "walker_000"
+    calls: list[str] = []
+    population.brains[rid].reset_stream = lambda: calls.append(rid)  # type: ignore[method-assign]
+
+    population.act_step(world)  # awake baseline: no reset
+    assert calls == []
+    robot = world.robots[rid]
+    robot.dormant = True
+    population.act_step(world)  # dormant: unobserved, still no reset
+    assert calls == []
+    robot.dormant = False
+    robot.energy = 50.0
+    population.act_step(world)  # first awake cycle after the gap
+    assert calls == [rid]
+    population.act_step(world)  # reset fires once, not every cycle
+    assert calls == [rid]

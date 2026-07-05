@@ -20,6 +20,7 @@ from gol_world.world import World
 from gol_obs.heatmap import VisitHeatmap
 
 IntrospectionFn = Callable[[], dict[str, dict[str, float]]]
+EventSink = Callable[[list[dict[str, Any]]], None]
 
 
 class NdjsonWriter:
@@ -42,16 +43,21 @@ class RunLogs:
         metrics_every_ticks: int,
         introspection: IntrospectionFn | None = None,
         heatmap: VisitHeatmap | None = None,
+        event_sink: EventSink | None = None,
     ) -> None:
         self.events = NdjsonWriter(save_dir / "events.ndjson")
         self.metrics = NdjsonWriter(save_dir / "metrics.ndjson")
         self.metrics_every = metrics_every_ticks
         self.introspection = introspection
         self.heatmap = heatmap
+        self.event_sink = event_sink
 
     def on_tick(self, world: World) -> None:
-        for event in world.consume_events():
+        events = world.consume_events()
+        for event in events:
             self.events.write(event)
+        if self.event_sink is not None and events:
+            self.event_sink(events)
         if self.heatmap is not None:
             self.heatmap.on_tick(world)
         if world.tick % self.metrics_every == 0:
@@ -63,11 +69,13 @@ class RunLogs:
             "light": round(world.light_level, 3),
             "population": len(world.robots),
             "ripe_bushes": int((world.grid.blocks == Block.BUSH_RIPE).sum()),
+            "toxic_bushes": int((world.grid.blocks == Block.BUSH_TOXIC).sum()),
             "robots": {
                 r.id: {
                     "pos": [round(float(p), 1) for p in r.pos],
                     "energy": round(r.energy, 2),
                     "integrity": round(r.integrity, 2),
+                    "fatigue": round(r.fatigue, 4),
                     "dormant": r.dormant,
                     "age": r.age_ticks,
                     "brain": r.brain_name,
