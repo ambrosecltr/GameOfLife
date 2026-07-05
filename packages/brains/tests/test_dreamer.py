@@ -151,3 +151,42 @@ def test_obs_version_mismatch_rejected() -> None:
     state["obs_version"] = 999
     with pytest.raises(ValueError, match="obs_version"):
         brain.load_state_dict(state)
+
+
+def test_curiosity_masking_erases_agents() -> None:
+    cfg = dict(TINY, reward={"curiosity_mask_agents": True})
+    brain = DreamerBrain(cfg, seed=6)
+    from gol_world.interface import RAY_CLASS_NOTHING, RAY_CLASS_ROBOT
+
+    body = BodySpec()
+    n = body.num_rays
+    depth = torch.rand(2, 3, n)
+    onehot = torch.zeros(2, 3, n, NUM_RAY_CLASSES)
+    onehot[..., RAY_CLASS_ROBOT] = 1.0  # every ray sees a robot
+    obs = {
+        "depth": depth,
+        "class_onehot": onehot,
+        "proprio": torch.rand(2, 3, PROPRIO_DIM),
+        "sound": torch.rand(2, 3, SOUND_DIM),
+        "events": torch.zeros(2, 3, EVENTS_DIM),
+    }
+    masked = brain._mask_agents(obs)
+    assert (masked["class_onehot"][..., RAY_CLASS_ROBOT] == 0).all()
+    assert (masked["class_onehot"][..., RAY_CLASS_NOTHING] == 1).all()
+    assert (masked["depth"] == 1.0).all()
+    # Non-agent rays pass through untouched.
+    onehot2 = torch.zeros(2, 3, n, NUM_RAY_CLASSES)
+    onehot2[..., 2] = 1.0  # ROCK
+    obs2 = dict(obs, class_onehot=onehot2)
+    masked2 = brain._mask_agents(obs2)
+    torch.testing.assert_close(masked2["depth"], depth)
+
+
+def test_masked_brain_learns() -> None:
+    cfg = dict(TINY, reward={"curiosity_mask_agents": True})
+    brain = DreamerBrain(cfg, seed=7)
+    rng = np.random.default_rng(4)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    metrics = brain.learn()
+    assert metrics is not None and np.isfinite(metrics["loss_model"])

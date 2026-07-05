@@ -1,0 +1,39 @@
+# Ablation brain for research question 2 (intrinsic motivation in a shared
+# world): identical to dreamer.yaml except other robots are masked out of the
+# curiosity target — their unpredictability generates no curiosity, so any
+# social behavior that remains is not curiosity-driven.
+
+kind: dreamer
+preset: nano
+
+reward:
+  w_curiosity: 1.0
+  w_homeostasis: 1.0
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  curiosity_mask_agents: true   # <-- the ablation
+
+world_model:
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  replay_ac: false
+
+replay:
+  capacity: 500000
+  batch_size: 16
+  seq_len: 64
+  warmup_steps: 500
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  train_ratio: 0.25

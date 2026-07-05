@@ -1,0 +1,37 @@
+# Experiment: research question 4 — does warm-starting newborns from living
+# agents' weights propagate behaviors?
+#
+# Protocol: three arms on the same world seed and duration, differing only in
+# inherit_weights: none (fresh minds), lineage (minds survive their own
+# deaths), random_living (newborns copy a random living robot of their kind).
+# Compare: time-to-first-eat for newborns, foraging-route overlap between
+# "generations" (visit heatmap), lifespan distributions per arm.
+#
+#   uv run gol-run saves/exp_ct_none    --new --config configs/run/exp_cultural_transmission.yaml --set population.inherit_weights=none
+#   uv run gol-run saves/exp_ct_lineage --new --config configs/run/exp_cultural_transmission.yaml --set population.inherit_weights=lineage
+#   uv run gol-run saves/exp_ct_copy    --new --config configs/run/exp_cultural_transmission.yaml --set population.inherit_weights=random_living
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7301
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 8
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/dreamer.yaml
+      count: 8
+
+observability:
+  rerun: true
+  rerun_fps: 10
+  metrics_every_ticks: 100
+  rrd_rotate_sim_hours: 6

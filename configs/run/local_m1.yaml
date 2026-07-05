@@ -7,9 +7,12 @@ act_every: 5                  # brains act every N ticks (4 Hz)
 checkpoint_interval_ticks: 30000
 control_port: 7301
 
+# Benchmarked on M1 Pro: nano learns fastest on cpu (474ms vs 568ms/update);
+# small+ presets win on mps (655ms vs 1009ms). Learning brains live entirely
+# on the learning device.
 devices:
-  inference: cpu              # tiny per-agent forwards; CPU beats MPS at this size
-  learning: mps               # falls back to cpu if MPS is unavailable or slower
+  inference: cpu
+  learning: cpu
 
 population:
   target: 8

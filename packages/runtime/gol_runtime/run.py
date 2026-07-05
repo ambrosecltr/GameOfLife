@@ -73,13 +73,16 @@ def main(argv: list[str] | None = None) -> int:
         world = World.new(world_cfg)
         print(f"created {save_dir} (seed {world_cfg.seed}, size {world_cfg.size})")
 
+    from gol_obs.heatmap import VisitHeatmap
     from gol_obs.logs import RunLogs
 
     population = Population(world, run_cfg)
+    heatmap = VisitHeatmap(world.cfg.size)
     logs = RunLogs(
         save_dir,
         run_cfg.observability.metrics_every_ticks,
         introspection=population.introspection,
+        heatmap=heatmap,
     )
     if exists:
         ckpt = persistence.latest_checkpoint(save_dir)
@@ -95,10 +98,16 @@ def main(argv: list[str] | None = None) -> int:
             tick_rate=run_cfg.tick_rate,
             spawn=not args.headless and args.rrd is None,
             save_path=args.rrd,
+            rotate_ticks=run_cfg.observability.rrd_rotate_sim_hours * 3600 * run_cfg.tick_rate,
         )
 
         def log_frame(w: World) -> None:
-            logger.log_frame(w, obs=population.last_obs, introspection=population.introspection())
+            logger.log_frame(
+                w,
+                obs=population.last_obs,
+                introspection=population.introspection(),
+                heatmap=heatmap.image(),
+            )
 
     def act_step(w: World) -> None:
         population.act_step(w)

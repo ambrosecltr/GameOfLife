@@ -17,6 +17,8 @@ from typing import IO, Any
 from gol_world.blocks import Block
 from gol_world.world import World
 
+from gol_obs.heatmap import VisitHeatmap
+
 IntrospectionFn = Callable[[], dict[str, dict[str, float]]]
 
 
@@ -39,15 +41,19 @@ class RunLogs:
         save_dir: Path,
         metrics_every_ticks: int,
         introspection: IntrospectionFn | None = None,
+        heatmap: VisitHeatmap | None = None,
     ) -> None:
         self.events = NdjsonWriter(save_dir / "events.ndjson")
         self.metrics = NdjsonWriter(save_dir / "metrics.ndjson")
         self.metrics_every = metrics_every_ticks
         self.introspection = introspection
+        self.heatmap = heatmap
 
     def on_tick(self, world: World) -> None:
         for event in world.consume_events():
             self.events.write(event)
+        if self.heatmap is not None:
+            self.heatmap.on_tick(world)
         if world.tick % self.metrics_every == 0:
             self._sample(world)
 

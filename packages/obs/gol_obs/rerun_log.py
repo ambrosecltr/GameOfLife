@@ -49,15 +49,38 @@ class RerunLogger:
         tick_rate: int,
         spawn: bool = True,
         save_path: Path | None = None,
+        rotate_ticks: int = 0,
     ) -> None:
         self.tick_rate = tick_rate
+        self.save_path = save_path
+        # Rotation only makes sense when recording to files: each .rrd is a
+        # self-contained scrubbable slice of the run.
+        self.rotate_ticks = rotate_ticks if save_path is not None else 0
+        self._rotation_index = 0
+        self._sun_radius = max(world.cfg.size[0], world.cfg.size[1]) * 0.6
         rr.init(APP_ID, spawn=spawn)
         if save_path is not None:
-            rr.save(str(save_path))
+            rr.save(str(self._rotation_path(world.tick)))
+        self._log_scene_base(world)
+
+    def _rotation_path(self, tick: int) -> Path:
+        assert self.save_path is not None
+        return self.save_path.with_name(f"{self.save_path.stem}_{tick:012d}.rrd")
+
+    def _log_scene_base(self, world: World) -> None:
+        """Everything a fresh recording needs to stand alone."""
         rr.log("/", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         self._set_time(world)
         self._log_all_chunks(world)
-        self._sun_radius = max(world.cfg.size[0], world.cfg.size[1]) * 0.6
+
+    def _maybe_rotate(self, world: World) -> None:
+        if not self.rotate_ticks:
+            return
+        index = world.tick // self.rotate_ticks
+        if index > self._rotation_index:
+            self._rotation_index = index
+            rr.save(str(self._rotation_path(world.tick)))
+            self._log_scene_base(world)
 
     def _set_time(self, world: World) -> None:
         rr.set_time("tick", sequence=world.tick)
@@ -145,8 +168,12 @@ class RerunLogger:
         world: World,
         obs: dict[str, Observation] | None = None,
         introspection: dict[str, dict[str, float]] | None = None,
+        heatmap: np.ndarray | None = None,
     ) -> None:
+        self._maybe_rotate(world)
         self._set_time(world)
+        if heatmap is not None:
+            rr.log("charts/visit_heatmap", rr.Image(heatmap))
         for cx, cy in world.grid.consume_dirty_chunks():
             self._log_chunk(world, cx, cy)
         self._log_sun(world)

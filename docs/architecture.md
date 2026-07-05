@@ -154,3 +154,25 @@ Files: `rerun_log.py`, `metrics.py`, `events.py`, `export.py`.
 ## Implementation scope for this session
 
 Initialize the repo (git, uv, pyproject, tooling, CLAUDE.md with invariants + research questions, docs/architecture.md + docs/research-questions.md distilled from this plan) and build **M0 end-to-end**, then continue into M1 as far as the session allows. Each milestone is verified by its demo + tests before moving on.
+
+---
+
+## Implementation deviations (as built, 2026-07-05)
+
+The build followed this plan with four evidence-driven changes:
+
+1. **Plan2Explore ensemble predicts the next observation *embedding***, not the
+   next stochastic latent — closer to the original paper, and it enables the
+   `curiosity_mask_agents` ablation (other robots erased from the curiosity
+   target).
+2. **`inherit_weights: lineage` added and made the default**: a learning brain
+   (weights + replay) survives its body's death and continues in the respawn;
+   only the recurrent state resets. Motivated by newborn dreamers starving
+   before learning could accumulate. `none` / `random_living` remain for the
+   cultural-transmission experiments.
+3. **Warmup cut 2000 → 500 act-steps** (same starvation reason).
+4. **Devices by benchmark (M1 Pro)**: nano learns fastest on cpu
+   (474 vs 568 ms/update); small+ wins on mps (655 vs 1009). Learning brains
+   live wholly on `devices.learning`. Batched multi-agent training via
+   torch.func/vmap over stacked per-agent params remains the future perf lever;
+   sequential round-robin is comfortably within budget on a 4090 at 16 agents.

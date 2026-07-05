@@ -13,10 +13,13 @@ is watching what emerges.
 
 ```bash
 uv sync
-uv run gol-run --new saves/alpha          # create a world and watch it in Rerun
-uv run gol-run --resume saves/alpha       # continue where it left off
-uv run gol-ctl pause                      # control a running world
+uv run gol-run saves/alpha --new          # create a world and watch it in Rerun
+uv run gol-run saves/alpha --resume       # continue where it left off
+uv run gol-ctl pause                      # control a running world (speed/checkpoint too)
 uv run gol-stats saves/alpha              # dig through metrics and events
+uv run gol-stats saves/alpha --compare    # are the dreamers pulling ahead of chance?
+scripts/soak.sh saves/soak_001            # overnight run, restart-on-crash
+scripts/provision_runpod.sh root@gpu-box saves/alpha   # ship a world to a cloud GPU
 ```
 
 ## The shape of the thing
@@ -35,6 +38,13 @@ uv run gol-stats saves/alpha              # dig through metrics and events
   (energy, curiosity, prediction error), scrubbable timelines, recordings.
 - **Compute tiers**: 1–2 learning robots locally (Apple Silicon); populations of 8–16
   on a single rented cloud GPU. Worlds checkpoint atomically and resume anywhere.
+- **Minds outlive bodies**: with `inherit_weights: lineage` (default), a learning
+  brain's weights and memory carry over to its respawned body — death is costly,
+  but the lineage keeps learning. `none` and `random_living` exist for the
+  cultural-transmission experiments.
+- **Experiments**: `configs/run/exp_*.yaml` are pre-registered protocols for the
+  research questions (social curiosity with/without agent-masked curiosity,
+  cultural transmission across inheritance modes).
 
 ## Docs
 

@@ -15,7 +15,7 @@ import zlib
 from typing import Any
 
 from gol_brains.base import Brain
-from gol_brains.registry import build_brain, resolve_brain_config
+from gol_brains.registry import build_brain, is_learning_kind, resolve_brain_config
 from gol_world.interface import Observation
 from gol_world.sensing import observe
 from gol_world.world import World
@@ -27,7 +27,6 @@ class Population:
     def __init__(self, world: World, run_cfg: RunConfig) -> None:
         self.world = world
         self.cfg = run_cfg
-        self.device = run_cfg.devices.inference
         self.brains: dict[str, Brain] = {}
         self.kinds: dict[str, str] = {}
         self.locks: dict[str, threading.Lock] = {}
@@ -54,6 +53,12 @@ class Population:
         # reseed anything derive the same stream.
         return (self.world.cfg.seed * 100003 + zlib.crc32(robot_id.encode())) % (2**31)
 
+    def _device_for(self, spec: str | dict[str, Any]) -> str:
+        """Learning brains live on the learning device (act runs there too;
+        a few ms of act latency at 4 Hz is nothing next to update speed).
+        Benchmarked on M1 Pro: nano is fastest on cpu, small+ on mps."""
+        return self.cfg.devices.learning if is_learning_kind(spec) else self.cfg.devices.inference
+
     def _spawn_initial(self) -> None:
         for entry in self.cfg.population.mix:
             kind = str(resolve_brain_config(entry["brain"]).get("kind"))
@@ -65,7 +70,7 @@ class Population:
         for robot in self.world.robots.values():
             spec = self._specs_by_kind.get(robot.brain_name, {"kind": robot.brain_name})
             self.brains[robot.id] = build_brain(
-                spec, seed=self._seed_for(robot.id), device=self.device
+                spec, seed=self._seed_for(robot.id), device=self._device_for(spec)
             )
             self.kinds[robot.id] = robot.brain_name
             self.locks[robot.id] = threading.Lock()
@@ -79,7 +84,7 @@ class Population:
             elif robot_id.startswith("__lineage__"):
                 kind = robot_id.split("__")[2]
                 spec = self._specs_by_kind.get(kind, {"kind": kind})
-                brain = build_brain(spec, seed=0, device=self.device)
+                brain = build_brain(spec, seed=0, device=self._device_for(spec))
                 brain.load_state_dict(pickle.loads(blob))
                 self._lineage_stash.setdefault(kind, []).append(brain)
             elif robot_id in self.brains:
@@ -129,7 +134,7 @@ class Population:
             brain.reset_stream()
         else:
             spec = self._specs_by_kind.get(kind, {"kind": kind})
-            brain = build_brain(spec, seed=self._seed_for(robot_id), device=self.device)
+            brain = build_brain(spec, seed=self._seed_for(robot_id), device=self._device_for(spec))
             if mode == "random_living":
                 donors = [
                     b

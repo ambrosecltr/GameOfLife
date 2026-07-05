@@ -69,9 +69,12 @@ class WorldModel(nn.Module):
         self.head_proprio = mlp(feat, units, PROPRIO_DIM, layers=2)
         self.head_reward = mlp(feat, units, 41, layers=2)  # twohot homeostasis
         self.head_cont = mlp(feat, units, 1, layers=2)
+        # Plan2Explore: each ensemble member predicts the NEXT observation
+        # embedding from (state, action); their disagreement is epistemic
+        # uncertainty, which is the curiosity signal.
         k = int(wm_cfg.get("ensemble_size", 8))
         self.ensemble = nn.ModuleList(
-            mlp(feat + ACTION_DIM, units, self.rssm_cfg.stoch_dim, layers=1) for _ in range(k)
+            mlp(feat + ACTION_DIM, units, units, layers=1) for _ in range(k)
         )
 
     def embed(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -126,6 +129,9 @@ class DreamerBrain(Brain):
         self.w_homeostasis = float(rw.get("w_homeostasis", 1.0))
         self.low_energy_threshold = float(rw.get("low_energy_threshold", 0.25))
         self.low_energy_penalty = float(rw.get("low_energy_penalty", 0.02))
+        # Ablation (research question 2): mask other robots out of the
+        # curiosity target so agents aren't intrinsically drawn to each other.
+        self.curiosity_mask_agents = bool(rw.get("curiosity_mask_agents", False))
         self.curiosity_norm = RunningMeanStd()
 
         replay = dict(cfg.get("replay", {}))
@@ -213,6 +219,19 @@ class DreamerBrain(Brain):
 
     # ----------------------------------------------------------------- learn
 
+    def _mask_agents(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Rays that hit a robot read as 'nothing at max range' instead."""
+        from gol_world.interface import RAY_CLASS_DORMANT, RAY_CLASS_NOTHING, RAY_CLASS_ROBOT
+
+        class_onehot = obs["class_onehot"]
+        is_agent = (class_onehot[..., RAY_CLASS_ROBOT] + class_onehot[..., RAY_CLASS_DORMANT]) > 0.5
+        masked_class = class_onehot.clone()
+        masked_class[is_agent] = 0.0
+        masked_class[..., RAY_CLASS_NOTHING][is_agent] = 1.0
+        masked_depth = obs["depth"].clone()
+        masked_depth[is_agent] = 1.0
+        return {**obs, "depth": masked_depth, "class_onehot": masked_class}
+
     def _homeostasis(self, events: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
         ate, damage = events[..., 0], events[..., 1]
         low = (proprio[..., 5] < self.low_energy_threshold).float()
@@ -266,11 +285,17 @@ class DreamerBrain(Brain):
         )
         loss_kl = self.wm.rssm.kl_loss(post, prior)
 
-        # --- Plan2Explore ensemble: predict next stochastic latent
-        z_seq = post.flatten(-2)  # (B, L, stoch) probs as targets (stable)
+        # --- Plan2Explore ensemble: predict the next observation embedding.
+        # With curiosity_mask_agents, other robots are erased from the target
+        # (their rays read as "nothing at max range"), so their unpredictability
+        # generates no curiosity.
+        with torch.no_grad():
+            if self.curiosity_mask_agents:
+                ens_target = self.wm.embed(self._mask_agents(obs))[:, 1:]
+            else:
+                ens_target = embed.detach()[:, 1:]
         ens_in_feat = feat[:, :-1].detach()
-        ens_action = b["action"][:, 1:]  # action taken at t leads to z_{t+1}
-        ens_target = z_seq[:, 1:].detach()
+        ens_action = b["action"][:, 1:]  # action taken at t leads to obs_{t+1}
         x = torch.cat([ens_in_feat, ens_action], dim=-1)
         ens_losses = [
             F.mse_loss(net(x), ens_target, reduction="none").mean(-1) for net in self.wm.ensemble
