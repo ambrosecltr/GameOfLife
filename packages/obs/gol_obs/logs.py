@@ -79,6 +79,7 @@ class RunLogs:
                     "dormant": r.dormant,
                     "age": r.age_ticks,
                     "brain": r.brain_name,
+                    "ledger": {k: round(v, 2) for k, v in r.ledger.items()},
                 }
                 for r in world.robots.values()
             },

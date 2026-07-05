@@ -36,9 +36,9 @@ economy:
   water_speed_mult: 0.5
   water_drain_mult: 3.0
   fall_damage_per_block: 8.0  # per block beyond 3
-  hibernate_integrity_drain: 0.0012  # per tick while dormant (~4 sim-days to death)
-  solar_trickle: 0.003        # energy/tick at full light, dormant robots only
-  wake_energy: 15.0           # dormant robots wake above this (~half a day of sun)
+  hibernate_integrity_drain: 0.0003  # per dormant tick; a coma is survivable, not free
+  solar_trickle: 0.006        # energy/tick at full light, dormant robots only
+  wake_energy: 40.0           # wake above the brownout threshold, at full actuation
   toxic_energy: 10.0          # poison berries still hold some charge
   toxic_integrity_damage: 12.0
   fatigue_rise_base: 0.000015 # nonstop full drive -> exhausted in ~3/4 sim-day
@@ -50,6 +50,15 @@ economy:
   exhaustion_integrity_drain: 0.002
   brownout_threshold: 25.0    # below this energy, speed/turn fade linearly (0 disables)
   brownout_floor: 0.35        # actuation fraction left at zero energy
+  # Wear and repair: integrity is condition, not a countdown. Energy surplus
+  # funds repair, faster at rest, at an efficiency that halves per senescence
+  # half-life of age — lifespan is the integral of how well the robot lived.
+  awake_wear: 0.0002          # integrity/tick while awake (~4.8/sim-day of chronic wear)
+  repair_threshold: 60.0      # energy above this funds repair (never drains below it)
+  repair_rate: 0.002          # integrity/tick at full youth (0 disables repair)
+  rest_repair_mult: 3.0       # sleep heals: repair speed multiplier while resting
+  repair_energy_per_point: 1.0  # energy cost per integrity point repaired
+  senescence_halflife: 150000 # age ticks per halving of repair efficiency (0 disables)
 
 sounds:                       # involuntary cries; transient world sounds (0 disables)
   death_cry_ticks: 40         # 2 s burst at the point of death

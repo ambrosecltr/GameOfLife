@@ -70,6 +70,8 @@ class ScriptedForagerBrain(Brain):
         self._wander_turn = 0.0
         self._steps = 0
         self._backing_off = 0
+        self._eat_fails = 0
+        self._last_grip_eat = False
         n = self.body.rays_per_row
         half_fov = np.radians(self.body.fov_deg) / 2
         # Azimuth (relative to heading) of each ray, tiled across pitch rows.
@@ -86,6 +88,16 @@ class ScriptedForagerBrain(Brain):
         energy = float(proprio[5])
         light = float(proprio[13])
         touch_front = proprio[9] > 0.5
+
+        # Stall-breaker: if bites keep missing (a bush the rays see but the
+        # gripper can't land on), stop deadlocking and reapproach. The probe
+        # must never wedge — a stuck instrument reads as a broken economy.
+        ate = float(obs["events"][0]) > 0.5  # events[0] = ate
+        self._eat_fails = self._eat_fails + 1 if self._last_grip_eat and not ate else 0
+        self._last_grip_eat = False
+        if self._eat_fails >= 6:
+            self._eat_fails = 0
+            self._backing_off = int(self.rng.integers(3, 7))
 
         if self._backing_off > 0:
             self._backing_off -= 1
@@ -104,6 +116,7 @@ class ScriptedForagerBrain(Brain):
             idx = int(np.flatnonzero(bush)[np.argmin(depths[bush])])
             azimuth = float(self._azimuths[idx])
             if depths[idx] < self.body.reach and abs(azimuth) < 0.45:
+                self._last_grip_eat = True
                 return Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_EAT)
             turn = float(np.clip(azimuth * 2.0, -1.0, 1.0))
             forward = 0.9 if abs(azimuth) < 0.8 else 0.3
@@ -126,6 +139,8 @@ class ScriptedForagerBrain(Brain):
             "steps": self._steps,
             "wander_turn": self._wander_turn,
             "backing_off": self._backing_off,
+            "eat_fails": self._eat_fails,
+            "last_grip_eat": self._last_grip_eat,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -133,3 +148,5 @@ class ScriptedForagerBrain(Brain):
         self._steps = state["steps"]
         self._wander_turn = state["wander_turn"]
         self._backing_off = state["backing_off"]
+        self._eat_fails = int(state.get("eat_fails", 0))
+        self._last_grip_eat = bool(state.get("last_grip_eat", False))

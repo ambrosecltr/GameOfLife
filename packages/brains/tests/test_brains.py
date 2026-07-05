@@ -67,3 +67,34 @@ def test_brain_state_roundtrip_is_deterministic(kind: str) -> None:
 def test_unknown_kind_rejected() -> None:
     with pytest.raises(ValueError, match="unknown brain kind"):
         build_brain({"kind": "psychic"}, seed=0)
+
+
+def bush_in_reach_obs(body: BodySpec) -> Observation:
+    """Daylight, low energy, a ripe bush dead ahead within reach — eat bait."""
+    from gol_world.blocks import Block
+
+    rays = np.zeros((body.num_rays, 1 + NUM_RAY_CLASSES), dtype=np.float32)
+    rays[:, 0] = 1.0
+    rays[:, 1 + NUM_RAY_CLASSES - 1] = 1.0  # everything else: no hit
+    center = body.rays_per_row // 2  # azimuth ~4.8 deg: inside the eat cone
+    rays[center, 1:] = 0.0
+    rays[center, 0] = 1.0 / body.ray_range  # 1 block away, inside reach
+    rays[center, 1 + Block.BUSH_RIPE] = 1.0
+    proprio = np.zeros(PROPRIO_DIM, dtype=np.float32)
+    proprio[5] = 0.3  # hungry
+    proprio[13] = 1.0  # daylight
+    return Observation(
+        rays=rays,
+        proprio=proprio,
+        sound=np.zeros(SOUND_DIM, dtype=np.float32),
+        events=np.zeros(EVENTS_DIM, dtype=np.float32),
+    )
+
+
+def test_forager_breaks_out_of_a_failing_eat_loop() -> None:
+    """If GRIP_EAT never lands (no ate event), the probe must not wedge."""
+    brain = build_brain({"kind": "scripted_forager"}, seed=3)
+    obs = bush_in_reach_obs(BodySpec())
+    actions = [brain.act(obs) for _ in range(12)]
+    assert actions[0].gripper == 3  # it does try to eat first
+    assert any(a.drive[0] < 0.0 for a in actions)  # ...then backs off the bush

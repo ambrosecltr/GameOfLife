@@ -52,9 +52,9 @@ class EconomyConfig:
     water_speed_mult: float = 0.5
     water_drain_mult: float = 3.0
     fall_damage_per_block: float = 8.0
-    hibernate_integrity_drain: float = 0.0012
-    solar_trickle: float = 0.003  # energy/tick at full light, dormant robots only
-    wake_energy: float = 15.0  # dormant robots wake above this
+    hibernate_integrity_drain: float = 0.0003  # per dormant tick; a coma is survivable, not free
+    solar_trickle: float = 0.006  # energy/tick at full light, dormant robots only
+    wake_energy: float = 40.0  # dormant robots wake above this (clears the brownout threshold)
     toxic_energy: float = 10.0  # poison berries still hold some charge
     toxic_integrity_damage: float = 12.0
     # Fatigue: a 0..1 homeostat. Builds while active, clears while still;
@@ -69,8 +69,19 @@ class EconomyConfig:
     # Brownout: a starving body sags. Below the threshold, actuation (speed and
     # turn rate) fades linearly to the floor at zero energy, so depletion is
     # felt in the body's own dynamics before stasis. 0 disables (ablation).
-    brownout_threshold: float = 25.0  # energy units, matches wake_energy scale
+    brownout_threshold: float = 25.0  # below wake_energy: robots wake at full actuation
     brownout_floor: float = 0.35  # actuation fraction remaining at zero energy
+    # Wear and repair: integrity is condition, not a countdown. Awake bodies
+    # wear slowly; energy surplus above repair_threshold funds repair, faster
+    # at rest, at an efficiency that halves every senescence_halflife ticks of
+    # age. Lifespan becomes the integral of how well the robot lived.
+    # repair_rate 0 disables repair; senescence_halflife 0 disables aging (ablations).
+    awake_wear: float = 0.0002  # integrity/tick while awake
+    repair_threshold: float = 60.0  # energy above this funds repair (never drains below it)
+    repair_rate: float = 0.002  # integrity/tick at full youth, before the rest multiplier
+    rest_repair_mult: float = 3.0  # repair speed multiplier while resting (sleep heals)
+    repair_energy_per_point: float = 1.0  # energy cost per integrity point repaired
+    senescence_halflife: float = 150000.0  # age ticks per halving of repair efficiency
 
 
 @dataclass(frozen=True)

@@ -22,6 +22,15 @@ TOUCH_LEFT = 1
 TOUCH_RIGHT = 2
 TOUCH_GROUND = 3
 
+# Lifetime integrity ledger: cumulative damage by cause, plus repair. Answers
+# "what killed this robot" (death events) and "what is wearing them down"
+# (metrics) — the observability half of the wear/repair economy.
+LEDGER_KEYS = ("wear", "hibernation", "exhaustion", "fall", "poison", "repaired")
+
+
+def new_ledger() -> dict[str, float]:
+    return dict.fromkeys(LEDGER_KEYS, 0.0)
+
 
 @dataclass
 class Robot:
@@ -37,6 +46,7 @@ class Robot:
     dormant: bool = False
     fatigue: float = 0.0  # 0..1; builds with activity, clears with rest
     age_ticks: int = 0
+    ledger: dict[str, float] = field(default_factory=new_ledger)
     # Commanded controls; persist between act-steps (grip is one-shot).
     drive: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(2))
     signal: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(SIGNAL_DIM))
@@ -76,6 +86,7 @@ class Robot:
             "dormant": self.dormant,
             "fatigue": self.fatigue,
             "age_ticks": self.age_ticks,
+            "ledger": self.ledger,
             "drive": self.drive.tolist(),
             "signal": self.signal.tolist(),
             "pending_grip": self.pending_grip,
@@ -97,6 +108,7 @@ class Robot:
             dormant=bool(data["dormant"]),
             fatigue=float(data.get("fatigue", 0.0)),
             age_ticks=int(data["age_ticks"]),
+            ledger={**new_ledger(), **data.get("ledger", {})},
             drive=np.array(data["drive"], dtype=np.float64),
             signal=np.array(data["signal"], dtype=np.float64),
             pending_grip=int(data.get("pending_grip", 0)),

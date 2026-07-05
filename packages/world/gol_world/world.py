@@ -195,6 +195,37 @@ class World:
                 return cell, last_air
         return None, last_air
 
+    def _faced_edible(self, robot: Robot) -> tuple[int, int, int] | None:
+        """First edible cell along the gaze within reach, also checking one
+        block below and above eye level — a mouth can dip to a bush at the
+        feet. The eye-height-only scan of _faced_cells left robots starving in
+        front of downhill bushes their pitched rays could plainly see.
+        A solid non-edible block at eye level still blocks the reach."""
+        eye = robot.eye
+        dx, dy = math.cos(robot.yaw), math.sin(robot.yaw)
+        z_eye = int(eye[2])
+        steps = max(2, int(robot.body.reach * 4))
+        prev_xy: tuple[int, int] | None = None
+        for i in range(1, steps + 1):
+            t = robot.body.reach * i / steps
+            xy = (int(eye[0] + dx * t), int(eye[1] + dy * t))
+            if xy == prev_xy:
+                continue
+            prev_xy = xy
+            blocked = False
+            for dz in (0, -1, 1):
+                cell = (xy[0], xy[1], z_eye + dz)
+                if not self.grid.in_bounds(*cell):
+                    continue
+                block = self.grid.get_block(*cell)
+                if block in EDIBLE:
+                    return cell
+                if dz == 0 and block != Block.AIR:
+                    blocked = True
+            if blocked:
+                return None
+        return None
+
     def _faced_dormant(self, robot: Robot) -> Robot | None:
         """Nearest dormant robot whose body crosses the gaze ray within reach."""
         eye = robot.eye
@@ -224,11 +255,12 @@ class World:
         target, air_before = self._faced_cells(robot)
 
         if grip == GRIP_EAT:
-            if target is not None and self.grid.get_block(*target) in EDIBLE:
-                toxic = self.grid.get_block(*target) == Block.BUSH_TOXIC
-                self.grid.set_block(*target, Block.BUSH_EMPTY)
-                self.schedule_regrow(*target)
-                self._ingest(robot, toxic, pos=list(target))
+            meal = self._faced_edible(robot)
+            if meal is not None:
+                toxic = self.grid.get_block(*meal) == Block.BUSH_TOXIC
+                self.grid.set_block(*meal, Block.BUSH_EMPTY)
+                self.schedule_regrow(*meal)
+                self._ingest(robot, toxic, pos=list(meal))
             elif robot.held is not None and robot.held in EDIBLE:
                 toxic = robot.held == Block.BUSH_TOXIC
                 robot.held = None
@@ -272,6 +304,7 @@ class World:
         if toxic:
             robot.energy = min(eco.energy_max, robot.energy + eco.toxic_energy)
             robot.integrity = max(0.0, robot.integrity - eco.toxic_integrity_damage)
+            robot.ledger["poison"] += eco.toxic_integrity_damage
             robot.events[EV_ATE] = 1.0
             robot.events[EV_TOOK_DAMAGE] = 1.0
             self._cry(robot, HURT_CRY, self.cfg.sounds.hurt_cry_ticks)
@@ -326,6 +359,7 @@ class World:
             # Hibernation trades integrity for time; sunlight (or a feeding
             # peer) is the only way back out. It is at least restful.
             robot.integrity = max(0.0, robot.integrity - eco.hibernate_integrity_drain)
+            robot.ledger["hibernation"] += eco.hibernate_integrity_drain
             robot.energy = min(eco.energy_max, robot.energy + eco.solar_trickle * self.light_level)
             robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover)
             if robot.energy >= eco.wake_energy:
@@ -333,8 +367,9 @@ class World:
                 self._emit("wake", robot)
             return
         activity = float(np.abs(robot.drive).max())
+        resting = activity < eco.rest_drive_threshold
         was_exhausted = robot.fatigue >= eco.exhaustion_threshold
-        if activity < eco.rest_drive_threshold:
+        if resting:
             robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover)
         else:
             robot.fatigue = min(
@@ -352,15 +387,41 @@ class World:
         if exhausted:
             drain *= eco.exhaustion_drain_mult
             robot.integrity = max(0.0, robot.integrity - eco.exhaustion_integrity_drain)
+            robot.ledger["exhaustion"] += eco.exhaustion_integrity_drain
         if robot.in_water:
             drain *= eco.water_drain_mult
         robot.energy = max(0.0, robot.energy - drain)
         if costs["fall_damage"] > 0:
-            robot.integrity = max(
-                0.0, robot.integrity - eco.fall_damage_per_block * costs["fall_damage"]
-            )
+            fall = eco.fall_damage_per_block * costs["fall_damage"]
+            robot.integrity = max(0.0, robot.integrity - fall)
+            robot.ledger["fall"] += fall
             self._emit("fall_damage", robot, blocks=round(costs["fall_damage"], 2))
             self._cry(robot, HURT_CRY, self.cfg.sounds.hurt_cry_ticks)
+        # Chronic wear, and repair funded by energy surplus. Repair efficiency
+        # halves per senescence half-life of age: young bodies mend, old ones
+        # can no longer keep up with their own wear — death arrives when the
+        # curves cross, sooner for lives that banked more unrepaired damage.
+        robot.integrity = max(0.0, robot.integrity - eco.awake_wear)
+        robot.ledger["wear"] += eco.awake_wear
+        if (
+            eco.repair_rate > 0.0
+            and robot.integrity < eco.integrity_max
+            and robot.energy > eco.repair_threshold
+        ):
+            efficiency = (
+                0.5 ** (robot.age_ticks / eco.senescence_halflife)
+                if eco.senescence_halflife > 0
+                else 1.0
+            )
+            rate = eco.repair_rate * efficiency * (eco.rest_repair_mult if resting else 1.0)
+            amount = min(rate, eco.integrity_max - robot.integrity)
+            if eco.repair_energy_per_point > 0:
+                surplus = robot.energy - eco.repair_threshold
+                amount = min(amount, surplus / eco.repair_energy_per_point)
+            if amount > 0.0:
+                robot.integrity += amount
+                robot.energy -= amount * eco.repair_energy_per_point
+                robot.ledger["repaired"] += amount
         if robot.energy <= 0.0 and not robot.dormant:
             robot.dormant = True
             self._emit("hibernate", robot)
@@ -392,6 +453,11 @@ class World:
             robot = self.robots.pop(robot_id)
             self._drop_scrap(robot)
             self._cry(robot, DEATH_CRY, self.cfg.sounds.death_cry_ticks)
-            self._emit("death", robot, age_ticks=robot.age_ticks)
+            self._emit(
+                "death",
+                robot,
+                age_ticks=robot.age_ticks,
+                ledger={k: round(v, 2) for k, v in robot.ledger.items()},
+            )
         if len(self.robots) > 1:
             physics.resolve_robot_overlaps(list(self.robots.values()))

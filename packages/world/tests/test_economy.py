@@ -238,6 +238,7 @@ def test_exhaustion_bleeds_integrity_and_multiplies_drain() -> None:
     world = make_world()
     rid = world.spawn_robot("bot_000", "test").id
     robot = world.robots[rid]
+    robot.energy = 50.0  # below repair_threshold so repair can't mask the bleed
     robot.fatigue = CFG.economy.exhaustion_threshold - 1e-5
     start_integrity = robot.integrity
     for _ in range(100):
@@ -290,11 +291,159 @@ def test_brownout_threshold_zero_disables() -> None:
     assert abs(travel_at(10.0) - travel_at(eco.energy_max)) < 1e-9
 
 
+def test_eat_reaches_bush_below_eye_level() -> None:
+    """A bush one block downhill sits below the eye row; the mouth dips to it."""
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    x = int(robot.pos[0] + np.cos(robot.yaw) * 1.2)
+    y = int(robot.pos[1] + np.sin(robot.yaw) * 1.2)
+    world.grid.set_block(x, y, int(robot.eye[2]), Block.AIR)  # clear the eye row
+    world.grid.set_block(x, y, int(robot.eye[2]) - 1, Block.BUSH_RIPE)
+    robot.energy = 40.0
+    world.apply_action(rid, Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_EAT))
+    world.step()
+    assert robot.events[EV_ATE] == 1.0
+    assert abs(robot.energy - (40.0 + CFG.economy.eat_energy)) < 0.01
+
+
+def test_eat_blocked_by_wall_at_eye_level() -> None:
+    """A solid non-edible block in the gaze still blocks the bite."""
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    x = int(robot.pos[0] + np.cos(robot.yaw) * 1.2)
+    y = int(robot.pos[1] + np.sin(robot.yaw) * 1.2)
+    world.grid.set_block(x, y, int(robot.eye[2]), Block.ROCK)
+    bx = int(robot.pos[0] + np.cos(robot.yaw) * 1.5)
+    by = int(robot.pos[1] + np.sin(robot.yaw) * 1.5)
+    if (bx, by) != (x, y):  # a bush behind the wall must be unreachable
+        world.grid.set_block(bx, by, int(robot.eye[2]), Block.BUSH_RIPE)
+    world.apply_action(rid, Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_EAT))
+    world.step()
+    assert robot.events[EV_ATE] == 0.0
+
+
+def test_repair_from_energy_surplus_while_resting() -> None:
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.integrity = 50.0
+    start_energy = robot.energy
+    for _ in range(200):
+        world.step()
+    eco = CFG.economy
+    expected_rate = eco.repair_rate * eco.rest_repair_mult  # young, resting
+    gained = robot.integrity - 50.0
+    assert abs(gained - 200 * (expected_rate - eco.awake_wear)) < 0.01
+    # Repair is paid for in energy, on top of basal drain.
+    spent = start_energy - robot.energy
+    assert spent > 200 * eco.basal_drain
+    assert abs(robot.ledger["repaired"] - 200 * expected_rate) < 0.01
+    assert abs(robot.ledger["wear"] - 200 * eco.awake_wear) < 1e-9
+
+
+def test_no_repair_below_energy_threshold() -> None:
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.integrity = 50.0
+    robot.energy = CFG.economy.repair_threshold - 5.0
+    for _ in range(200):
+        world.step()
+    # Only chronic wear moves integrity; nothing is repaired.
+    assert robot.ledger["repaired"] == 0.0
+    assert abs((50.0 - robot.integrity) - 200 * CFG.economy.awake_wear) < 1e-9
+
+
+def test_repair_never_spends_energy_below_threshold() -> None:
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.integrity = 10.0
+    robot.energy = CFG.economy.repair_threshold + 1.0
+    for _ in range(500):
+        world.step()
+    # Repair may spend the 1.0 surplus at most; basal drain took its share too.
+    assert 0.5 < robot.ledger["repaired"] <= 1.0
+    frozen = robot.ledger["repaired"]
+    for _ in range(200):  # energy is under the threshold now: repair has stopped
+        world.step()
+    assert robot.ledger["repaired"] == frozen
+
+
+def test_senescence_halves_repair_efficiency() -> None:
+    def repaired_at(age: int) -> float:
+        world = make_world()
+        rid = world.spawn_robot("bot_000", "test").id
+        robot = world.robots[rid]
+        robot.integrity = 50.0
+        robot.age_ticks = age
+        for _ in range(100):
+            world.step()
+        return robot.ledger["repaired"]
+
+    young = repaired_at(0)
+    old = repaired_at(int(CFG.economy.senescence_halflife))
+    assert abs(old / young - 0.5) < 0.01
+
+
+def test_rest_repairs_faster_than_activity() -> None:
+    def repaired(drive: Action | None) -> float:
+        world = make_world()
+        rid = world.spawn_robot("bot_000", "test").id
+        robot = world.robots[rid]
+        robot.integrity = 50.0
+        if drive is not None:
+            world.apply_action(rid, drive)  # drive persists between act-steps
+        for _ in range(100):
+            world.step()
+        return robot.ledger["repaired"]
+
+    resting = repaired(None)
+    turning = repaired(Action(drive=np.array([0.0, 1.0], dtype=np.float32)))
+    assert abs(resting / turning - CFG.economy.rest_repair_mult) < 0.05
+
+
+def test_repair_rate_zero_disables() -> None:
+    eco = EconomyConfig(repair_rate=0.0)
+    cfg = WorldConfig(seed=5, size=(48, 48, 40), day_length_ticks=2000, economy=eco)
+    world = World.new(cfg)
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.integrity = 50.0
+    for _ in range(100):
+        world.step()
+    assert robot.ledger["repaired"] == 0.0
+    assert robot.integrity < 50.0
+
+
+def test_ledger_attributes_damage_and_rides_the_death_event() -> None:
+    world = make_world()
+    rid = place_robot_before_bush(world)
+    robot = world.robots[rid]
+    bx = int(robot.pos[0] + np.cos(robot.yaw) * 1.2)
+    by = int(robot.pos[1] + np.sin(robot.yaw) * 1.2)
+    world.grid.set_block(bx, by, int(robot.eye[2]), Block.BUSH_TOXIC)
+    world.apply_action(rid, Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_EAT))
+    world.step()
+    assert abs(robot.ledger["poison"] - CFG.economy.toxic_integrity_damage) < 1e-9
+    robot.integrity = 0.05  # ~170 dormant ticks from death
+    robot.energy = 0.0
+    robot.dormant = True
+    world.tick = CFG.day_length_ticks * 3 // 4  # midnight: no solar rescue
+    for _ in range(300):
+        world.step()
+    death = next(e for e in world.consume_events() if e["kind"] == "death")
+    assert death["ledger"]["poison"] == CFG.economy.toxic_integrity_damage
+    assert death["ledger"]["hibernation"] > 0.0
+
+
 def test_death_leaves_a_cry_that_expires() -> None:
     world = make_world()
     rid = world.spawn_robot("bot_000", "test").id
     robot = world.robots[rid]
-    robot.integrity = 0.001
+    robot.integrity = 0.0001
     robot.dormant = True  # drain finishes it off this tick
     world.step()
     assert rid not in world.robots
