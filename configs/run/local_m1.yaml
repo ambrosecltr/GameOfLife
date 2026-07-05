@@ -15,10 +15,12 @@ population:
   target: 8
   respawn_delay_ticks: 1200
   inherit_weights: none       # none | random_living (cultural transmission experiments)
-  # M2 adds scripted_forager entries; M3 adds configs/brain/dreamer.yaml learners.
+  # M3 adds configs/brain/dreamer.yaml learners to this mix.
   mix:
+    - brain: { kind: scripted_forager }
+      count: 5
     - brain: { kind: random_walker }
-      count: 4
+      count: 3
 
 observability:
   rerun: true

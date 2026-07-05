@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 
 from gol_brains.base import Brain
-from gol_brains.scripted import RandomWalkerBrain
+from gol_brains.scripted import RandomWalkerBrain, ScriptedForagerBrain
 
 
 def resolve_brain_config(spec: str | dict[str, Any]) -> dict[str, Any]:
@@ -30,7 +30,7 @@ def build_brain(spec: str | dict[str, Any], seed: int) -> Brain:
     if kind == "random_walker":
         return RandomWalkerBrain(seed=seed)
     if kind == "scripted_forager":
-        raise NotImplementedError("scripted_forager arrives with milestone M2")
+        return ScriptedForagerBrain(seed=seed)
     if kind == "dreamer":
         raise NotImplementedError("the dreamer brain arrives with milestone M3")
     raise ValueError(f"unknown brain kind: {kind!r}")

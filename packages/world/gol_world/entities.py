@@ -36,9 +36,10 @@ class Robot:
     held: int | None = None  # block id being carried
     dormant: bool = False
     age_ticks: int = 0
-    # Commanded controls; persist between act-steps.
+    # Commanded controls; persist between act-steps (grip is one-shot).
     drive: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(2))
     signal: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(SIGNAL_DIM))
+    pending_grip: int = 0
     # Set by physics each tick.
     touch: npt.NDArray[np.bool_] = field(default_factory=lambda: np.zeros(4, dtype=np.bool_))
     in_water: bool = False
@@ -75,6 +76,7 @@ class Robot:
             "age_ticks": self.age_ticks,
             "drive": self.drive.tolist(),
             "signal": self.signal.tolist(),
+            "pending_grip": self.pending_grip,
             "fall_peak_z": self.fall_peak_z,
         }
 
@@ -94,5 +96,6 @@ class Robot:
             age_ticks=int(data["age_ticks"]),
             drive=np.array(data["drive"], dtype=np.float64),
             signal=np.array(data["signal"], dtype=np.float64),
+            pending_grip=int(data.get("pending_grip", 0)),
             fall_peak_z=float(data.get("fall_peak_z", data["pos"][2])),
         )

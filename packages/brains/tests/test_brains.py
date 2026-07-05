@@ -14,7 +14,7 @@ from gol_world.interface import (
     Observation,
 )
 
-AVAILABLE_KINDS = ["random_walker"]  # extended at M2 (forager) and M3 (dreamer)
+AVAILABLE_KINDS = ["random_walker", "scripted_forager"]  # M3 adds "dreamer"
 
 
 def fake_obs(rng: np.random.Generator) -> Observation:

@@ -23,15 +23,15 @@ ecology:
 economy:
   energy_max: 100.0
   integrity_max: 100.0
-  basal_drain: 0.002          # per tick, just existing
-  move_cost: 0.008            # per tick at full drive
+  basal_drain: 0.0015         # per tick, just existing
+  move_cost: 0.005            # per tick at full drive
   turn_cost: 0.002            # per tick at full turn rate
   climb_cost: 0.15            # per 1-block step climbed
   dig_cost: 0.5               # per dig action
   place_cost: 0.1
   signal_cost: 0.01           # per act-step at full signal amplitude
-  eat_energy: 35.0            # energy restored per BUSH_RIPE / fruit
+  eat_energy: 40.0            # energy restored per BUSH_RIPE / fruit
   water_speed_mult: 0.5
   water_drain_mult: 3.0
   fall_damage_per_block: 8.0  # per block beyond 3
-  hibernate_integrity_drain: 0.001  # per tick while dormant
+  hibernate_integrity_drain: 0.005  # per tick while dormant (~1 sim-day to death)

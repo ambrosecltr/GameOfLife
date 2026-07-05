@@ -39,18 +39,18 @@ class EcologyConfig:
 class EconomyConfig:
     energy_max: float = 100.0
     integrity_max: float = 100.0
-    basal_drain: float = 0.002
-    move_cost: float = 0.008
+    basal_drain: float = 0.0015
+    move_cost: float = 0.005
     turn_cost: float = 0.002
     climb_cost: float = 0.15
     dig_cost: float = 0.5
     place_cost: float = 0.1
     signal_cost: float = 0.01
-    eat_energy: float = 35.0
+    eat_energy: float = 40.0
     water_speed_mult: float = 0.5
     water_drain_mult: float = 3.0
     fall_damage_per_block: float = 8.0
-    hibernate_integrity_drain: float = 0.001
+    hibernate_integrity_drain: float = 0.005
 
 
 @dataclass(frozen=True)

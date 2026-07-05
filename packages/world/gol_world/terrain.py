@@ -102,16 +102,28 @@ def generate(cfg: WorldConfig) -> VoxelGrid:
             if 0 <= ox < sx and 0 <= oy < sy and 1 <= oz < sz and blocks[ox, oy, oz] == Block.ROCK:
                 blocks[ox, oy, oz] = Block.ORE
 
-    # Bushes on grass. A fraction start depleted so regrowth is visible from tick 0.
+    # Bushes on grass, in clumps: a lone 1-block bush slips between sensor
+    # rays at range, so food grows in patches a robot can actually spot.
+    # A fraction start depleted so regrowth is visible from tick 0.
     grass_x, grass_y = np.nonzero(blocks[surf_idx] == Block.GRASS)
-    count = int(len(grass_x) * t.bush_density)
-    if count and len(grass_x):
-        picks = rng.choice(len(grass_x), size=min(count, len(grass_x)), replace=False)
-        for i in picks:
-            bx, by = int(grass_x[i]), int(grass_y[i])
-            bz = int(heights[bx, by]) + 1
-            if bz < sz:
-                ripe = rng.random() > 0.3
-                blocks[bx, by, bz] = Block.BUSH_RIPE if ripe else Block.BUSH_EMPTY
+    total = int(len(grass_x) * t.bush_density)
+    n_clumps = max(1, total // 4)
+    if len(grass_x):
+        centers = rng.choice(len(grass_x), size=min(n_clumps, len(grass_x)), replace=False)
+        for ci in centers:
+            cx, cy = int(grass_x[ci]), int(grass_y[ci])
+            for _ in range(int(rng.integers(3, 7))):
+                bx = cx + int(rng.integers(-2, 3))
+                by = cy + int(rng.integers(-2, 3))
+                if not (0 <= bx < sx and 0 <= by < sy):
+                    continue
+                bz = int(heights[bx, by]) + 1
+                if (
+                    bz < sz
+                    and blocks[bx, by, bz - 1] == Block.GRASS
+                    and blocks[bx, by, bz] == Block.AIR
+                ):
+                    ripe = rng.random() > 0.3
+                    blocks[bx, by, bz] = Block.BUSH_RIPE if ripe else Block.BUSH_EMPTY
 
     return VoxelGrid(blocks)

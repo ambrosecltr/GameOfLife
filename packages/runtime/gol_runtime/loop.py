@@ -30,6 +30,7 @@ class SimLoop:
         log_frame: FrameLogger | None = None,
         brain_states: BrainStateFn | None = None,
         act_step: ActStepFn | None = None,
+        on_tick: ActStepFn | None = None,
     ) -> None:
         self.world = world
         self.save_dir = save_dir
@@ -37,6 +38,7 @@ class SimLoop:
         self.log_frame = log_frame
         self.brain_states: BrainStateFn = brain_states or dict
         self.act_step = act_step
+        self.on_tick = on_tick
         # Live controls (mutated by the control API from another thread).
         self.speed = 1.0
         self.paused = False
@@ -65,6 +67,9 @@ class SimLoop:
 
             if self.act_step is not None and self.world.tick % self.cfg.act_every == 0:
                 self.act_step(self.world)
+
+            if self.on_tick is not None:
+                self.on_tick(self.world)
 
             if (
                 self.world.tick % self.cfg.checkpoint_interval_ticks == 0

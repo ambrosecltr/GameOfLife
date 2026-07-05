@@ -68,7 +68,10 @@ def main(argv: list[str] | None = None) -> int:
         world = World.new(world_cfg)
         print(f"created {save_dir} (seed {world_cfg.seed}, size {world_cfg.size})")
 
+    from gol_obs.logs import RunLogs
+
     population = Population(world, run_cfg)
+    logs = RunLogs(save_dir, run_cfg.observability.metrics_every_ticks)
     if exists:
         ckpt = persistence.latest_checkpoint(save_dir)
         if ckpt is not None:
@@ -95,6 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         log_frame=log_frame,
         brain_states=population.brain_states,
         act_step=population.act_step,
+        on_tick=logs.on_tick,
     )
     ControlServer(loop, port=run_cfg.control_port).start()
     try:

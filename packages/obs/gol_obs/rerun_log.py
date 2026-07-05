@@ -154,6 +154,7 @@ class RerunLogger:
         if obs:
             self._log_rays(world, obs)
         rr.log("charts/light_level", rr.Scalars([world.light_level]))
+        rr.log("charts/population", rr.Scalars([float(len(world.robots))]))
         rr.log(
             "charts/ripe_bushes",
             rr.Scalars([float((world.grid.blocks == Block.BUSH_RIPE).sum())]),
