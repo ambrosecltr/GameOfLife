@@ -42,7 +42,6 @@ target-version = "py311"
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.11"
 strict = true
 mypy_path = "packages/world:packages/brains:packages/runtime:packages/obs"
 
