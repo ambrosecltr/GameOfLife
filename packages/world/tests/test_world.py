@@ -52,6 +52,89 @@ def test_regrowth_waits_for_daytime() -> None:
     assert world.grid.get_block(x, y, z) == Block.BUSH_RIPE
 
 
+def _bush_count(world: World) -> int:
+    from gol_world.world import BUSH_BLOCKS
+
+    return int(np.isin(world.grid.blocks, BUSH_BLOCKS).sum())
+
+
+def _bush_sites(world: World) -> set[tuple[int, int, int]]:
+    from gol_world.world import BUSH_BLOCKS
+
+    return {
+        (int(p[0]), int(p[1]), int(p[2]))
+        for p in np.argwhere(np.isin(world.grid.blocks, BUSH_BLOCKS))
+    }
+
+
+def test_wither_conserves_stock_and_drifts_the_food_map() -> None:
+    cfg = WorldConfig(
+        seed=5,
+        size=(48, 48, 40),
+        day_length_ticks=1000,
+        ecology=EcologyConfig(
+            regrow_ticks=10,
+            regrow_jitter=0,
+            regrow_daytime_only=False,
+            bush_lifespan_ticks=50,
+            bush_lifespan_jitter=0,
+        ),
+    )
+    world = World.new(cfg)
+    start = _bush_count(world)
+    original_sites = _bush_sites(world)
+    assert start > 0
+    # standing + queued replacements is invariant, tick by tick
+    for _ in range(400):
+        world.step()
+        assert _bush_count(world) + len(world.sprout_heap) == start
+    kinds = {e["kind"] for e in world.consume_events()}
+    assert "wither" in kinds and "sprout" in kinds
+    # ~8 lifespans in: the bushes live somewhere else now
+    assert _bush_sites(world) != original_sites
+
+
+def test_wither_unwinds_a_toxic_ratchet() -> None:
+    cfg = WorldConfig(
+        seed=5,
+        size=(48, 48, 40),
+        day_length_ticks=1000,
+        ecology=EcologyConfig(
+            regrow_ticks=10,
+            regrow_jitter=0,
+            regrow_daytime_only=False,
+            toxic_fraction=0.0,
+            bush_lifespan_ticks=50,
+            bush_lifespan_jitter=0,
+        ),
+    )
+    world = World.new(cfg)
+    # Force a poisoned world: every standing bush turns toxic.
+    for x, y, z in _bush_sites(world):
+        world.grid.set_block(x, y, z, Block.BUSH_TOXIC)
+    assert (world.grid.blocks == Block.BUSH_TOXIC).sum() > 0
+    for _ in range(400):  # several lifespans; replacements re-roll toxicity (0%)
+        world.step()
+    assert (world.grid.blocks == Block.BUSH_TOXIC).sum() == 0
+    assert (world.grid.blocks == Block.BUSH_RIPE).sum() > 0
+
+
+def test_bush_lifespan_zero_disables_withering() -> None:
+    cfg = WorldConfig(
+        seed=5,
+        size=(48, 48, 40),
+        day_length_ticks=1000,
+        ecology=EcologyConfig(bush_lifespan_ticks=0),
+    )
+    world = World.new(cfg)
+    assert world.wither_heap == []
+    sites = _bush_sites(world)
+    for _ in range(500):
+        world.step()
+    assert sites <= _bush_sites(world)  # nothing withered (regrowth may add)
+    assert not any(e["kind"] == "wither" for e in world.consume_events())
+
+
 def test_step_never_resets() -> None:
     world = World.new(CFG)
     ticks = [world.tick]

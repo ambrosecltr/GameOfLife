@@ -439,6 +439,76 @@ def test_ledger_attributes_damage_and_rides_the_death_event() -> None:
     assert death["ledger"]["hibernation"] > 0.0
 
 
+def test_hand_eaten_bush_schedules_a_replacement_sprout() -> None:
+    """Eating from the gripper must not permanently delete a food site."""
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.held = int(Block.BUSH_RIPE)
+    queued = len(world.sprout_heap)
+    world.apply_action(rid, Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_EAT))
+    world.step()
+    assert robot.held is None
+    assert len(world.sprout_heap) == queued + 1
+
+
+def test_feeding_a_sleeper_schedules_a_replacement_sprout() -> None:
+    world = make_world()
+    feeder = world.robots[world.spawn_robot("bot_000", "test").id]
+    feeder.held = int(Block.BUSH_RIPE)
+    pos = feeder.pos + np.array([np.cos(feeder.yaw), np.sin(feeder.yaw), 0.0]) * 1.2
+    sleeper = world.spawn_robot("bot_001", "test")
+    sleeper.pos[:] = pos
+    sleeper.energy = 0.0
+    sleeper.dormant = True
+    queued = len(world.sprout_heap)
+    world.apply_action(
+        feeder.id, Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_PLACE)
+    )
+    world.step()
+    assert len(world.sprout_heap) == queued + 1
+
+
+def test_carried_bush_spoils_and_returns_its_slot() -> None:
+    eco = EcologyConfig(held_spoil_ticks=5)
+    cfg = WorldConfig(seed=5, size=(48, 48, 40), day_length_ticks=2000, ecology=eco)
+    world = World.new(cfg)
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.held = int(Block.BUSH_RIPE)
+    queued = len(world.sprout_heap)
+    for _ in range(6):
+        world.step()
+    assert robot.held is None
+    assert len(world.sprout_heap) == queued + 1
+    assert any(e["kind"] == "spoil" for e in world.consume_events())
+
+
+def test_held_spoil_zero_disables_spoilage() -> None:
+    eco = EcologyConfig(held_spoil_ticks=0)
+    cfg = WorldConfig(seed=5, size=(48, 48, 40), day_length_ticks=2000, ecology=eco)
+    world = World.new(cfg)
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.held = int(Block.BUSH_RIPE)
+    for _ in range(200):
+        world.step()
+    assert robot.held == Block.BUSH_RIPE
+
+
+def test_dying_with_a_bush_returns_its_slot() -> None:
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.held = int(Block.BUSH_TOXIC)
+    robot.integrity = 0.0001
+    robot.dormant = True
+    queued = len(world.sprout_heap)
+    world.step()
+    assert rid not in world.robots
+    assert len(world.sprout_heap) == queued + 1
+
+
 def test_death_leaves_a_cry_that_expires() -> None:
     world = make_world()
     rid = world.spawn_robot("bot_000", "test").id

@@ -43,6 +43,7 @@ class Robot:
     energy: float = 100.0
     integrity: float = 100.0
     held: int | None = None  # block id being carried
+    held_age_ticks: int = 0  # ticks the current bush has been carried (spoilage clock)
     dormant: bool = False
     fatigue: float = 0.0  # 0..1; builds with activity, clears with rest
     age_ticks: int = 0
@@ -83,6 +84,7 @@ class Robot:
             "energy": self.energy,
             "integrity": self.integrity,
             "held": self.held,
+            "held_age_ticks": self.held_age_ticks,
             "dormant": self.dormant,
             "fatigue": self.fatigue,
             "age_ticks": self.age_ticks,
@@ -105,6 +107,7 @@ class Robot:
             energy=float(data["energy"]),
             integrity=float(data["integrity"]),
             held=data["held"],
+            held_age_ticks=int(data.get("held_age_ticks", 0)),
             dormant=bool(data["dormant"]),
             fatigue=float(data.get("fatigue", 0.0)),
             age_ticks=int(data["age_ticks"]),

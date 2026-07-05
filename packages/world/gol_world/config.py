@@ -35,6 +35,16 @@ class EcologyConfig:
     regrow_daytime_only: bool = True
     toxic_fraction: float = 0.15  # chance a bush (generated or regrown) is toxic
     toxic_mimic: bool = False  # ablation: toxic bushes look identical to ripe ones
+    # Bush lifespan: plants senesce too. A standing bush withers after roughly
+    # a lifespan and a replacement sprouts elsewhere with toxicity re-rolled —
+    # so the toxic share can't ratchet up (grazed ripe bushes regrow 15% toxic
+    # but avoided toxic bushes never recycled) and the food map slowly drifts.
+    # The bush stock is conserved: hand-eaten, spoiled, and died-carrying
+    # bushes all schedule replacement sprouts. 0 disables withering (ablation).
+    bush_lifespan_ticks: int = 120000  # ~5 sim-days standing, whatever its state
+    bush_lifespan_jitter: int = 24000  # +/- uniform, so patches don't die in waves
+    sprout_clump_bias: float = 0.7  # chance a sprout roots near an existing bush
+    held_spoil_ticks: int = 24000  # a carried bush perishes after ~a sim-day (0 disables)
 
 
 @dataclass(frozen=True)

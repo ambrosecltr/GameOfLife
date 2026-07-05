@@ -38,6 +38,7 @@ DEATH_CRY = (-1.0, -1.0)
 HURT_CRY = (-0.6, 0.6)
 
 EDIBLE = (Block.BUSH_RIPE, Block.BUSH_TOXIC)
+BUSH_BLOCKS = (Block.BUSH_RIPE, Block.BUSH_TOXIC, Block.BUSH_EMPTY)
 
 
 class World:
@@ -48,12 +49,21 @@ class World:
         tick: int = 0,
         regrow_heap: list[RegrowEntry] | None = None,
         rng: np.random.Generator | None = None,
+        wither_heap: list[RegrowEntry] | None = None,
+        sprout_heap: list[int] | None = None,
     ) -> None:
         self.cfg = cfg
         self.grid = grid
         self.tick = tick
         self.regrow_heap: list[RegrowEntry] = regrow_heap if regrow_heap is not None else []
         heapq.heapify(self.regrow_heap)
+        # Bush senescence: standing sites die on the wither heap; each loss
+        # (and every held bush that leaves the system) queues a sprout, so
+        # standing + held + pending is a conserved bush budget.
+        self.wither_heap: list[RegrowEntry] = wither_heap if wither_heap is not None else []
+        heapq.heapify(self.wither_heap)
+        self.sprout_heap: list[int] = sprout_heap if sprout_heap is not None else []
+        heapq.heapify(self.sprout_heap)
         # World-event randomness (regrow jitter, future weather). Seeded off the
         # world seed but separate from terrain generation, which already consumed
         # the plain seed.
@@ -72,7 +82,18 @@ class World:
         for x, y, z in empties:
             due = int(world.rng.integers(1, cfg.day_length_ticks))
             heapq.heappush(world.regrow_heap, (due, int(x), int(y), int(z)))
+        world.seed_wither_entries()
         return world
+
+    def seed_wither_entries(self) -> None:
+        """Give every standing bush site a death date, uniform across a full
+        lifespan so the generation-0 bushes don't all die in one wave."""
+        eco = self.cfg.ecology
+        if eco.bush_lifespan_ticks <= 0:
+            return
+        for x, y, z in np.argwhere(np.isin(self.grid.blocks, BUSH_BLOCKS)):
+            due = self.tick + int(self.rng.integers(1, eco.bush_lifespan_ticks + 1))
+            heapq.heappush(self.wither_heap, (due, int(x), int(y), int(z)))
 
     # ------------------------------------------------------------------ time
 
@@ -121,6 +142,97 @@ class World:
             if self.grid.get_block(x, y, z) == Block.BUSH_EMPTY:
                 toxic = float(self.rng.random()) < eco.toxic_fraction
                 self.grid.set_block(x, y, z, Block.BUSH_TOXIC if toxic else Block.BUSH_RIPE)
+
+    def schedule_wither(self, x: int, y: int, z: int) -> None:
+        """Stamp a new bush site with its death date."""
+        eco = self.cfg.ecology
+        if eco.bush_lifespan_ticks <= 0:
+            return
+        jitter = int(self.rng.integers(-eco.bush_lifespan_jitter, eco.bush_lifespan_jitter + 1))
+        due = self.tick + max(1, eco.bush_lifespan_ticks + jitter)
+        heapq.heappush(self.wither_heap, (due, x, y, z))
+
+    def schedule_sprout(self) -> None:
+        """Queue a replacement bush for one that left the world for good
+        (withered, eaten from the hand, spoiled, or died with its carrier)."""
+        eco = self.cfg.ecology
+        jitter = int(self.rng.integers(-eco.regrow_jitter, eco.regrow_jitter + 1))
+        heapq.heappush(self.sprout_heap, self.tick + max(1, eco.regrow_ticks + jitter))
+
+    def _process_wither(self) -> None:
+        eco = self.cfg.ecology
+        if eco.bush_lifespan_ticks <= 0:
+            return
+        while self.wither_heap and self.wither_heap[0][0] <= self.tick:
+            due, x, y, z = heapq.heappop(self.wither_heap)
+            # Stale entries (the bush was dug up, or died early to an older
+            # stamp on a replanted cell) just drop; the site travels as a
+            # held item and is accounted for when it leaves the system.
+            if self.grid.get_block(x, y, z) in BUSH_BLOCKS:
+                self.grid.set_block(x, y, z, Block.AIR)
+                self._emit("wither", pos=[x, y, z])
+                self.schedule_sprout()
+
+    def _process_sprouts(self) -> None:
+        eco = self.cfg.ecology
+        while self.sprout_heap and self.sprout_heap[0] <= self.tick:
+            if eco.regrow_daytime_only and not self.is_day:
+                heapq.heappop(self.sprout_heap)
+                morning = max(1, self.cfg.day_length_ticks // 4)
+                dawn = self.next_dawn_tick() + int(self.rng.integers(0, morning))
+                heapq.heappush(self.sprout_heap, dawn)
+                continue
+            heapq.heappop(self.sprout_heap)
+            site = self._find_sprout_site()
+            if site is None:  # nowhere to grow right now; try again tomorrow
+                heapq.heappush(self.sprout_heap, self.tick + self.cfg.day_length_ticks)
+                continue
+            x, y, z = site
+            toxic = float(self.rng.random()) < eco.toxic_fraction
+            self.grid.set_block(x, y, z, Block.BUSH_TOXIC if toxic else Block.BUSH_RIPE)
+            self.schedule_wither(x, y, z)
+            self._emit("sprout", pos=[x, y, z])
+
+    def _find_sprout_site(self) -> tuple[int, int, int] | None:
+        """A grass column with air above: near an existing bush (patches stay
+        spottable by ray fans) or anywhere, per sprout_clump_bias."""
+        eco = self.cfg.ecology
+        sx, sy, sz = self.cfg.size
+        near: tuple[int, int] | None = None
+        if float(self.rng.random()) < eco.sprout_clump_bias:
+            bushes = np.argwhere(np.isin(self.grid.blocks, BUSH_BLOCKS))
+            if len(bushes):
+                bx, by, _ = bushes[int(self.rng.integers(0, len(bushes)))]
+                near = (int(bx), int(by))
+        for _ in range(64):
+            if near is not None:
+                x = near[0] + int(self.rng.integers(-2, 3))
+                y = near[1] + int(self.rng.integers(-2, 3))
+                if not (0 <= x < sx and 0 <= y < sy):
+                    continue
+            else:
+                x = int(self.rng.integers(1, sx - 1))
+                y = int(self.rng.integers(1, sy - 1))
+            h = self.grid.column_height(x, y)
+            z = h + 1
+            if (
+                h > 0
+                and z < sz
+                and self.grid.get_block(x, y, h) == Block.GRASS
+                and self.grid.get_block(x, y, z) == Block.AIR
+                and not self._cell_overlaps_robot(x, y, z)
+            ):
+                return (x, y, z)
+            near = None  # clump spot failed; fall back to anywhere
+        return None
+
+    def _cell_overlaps_robot(self, x: int, y: int, z: int) -> bool:
+        cell_lo = np.array([x, y, z], dtype=np.float64)
+        for robot in self.robots.values():
+            lo, hi = robot.aabb
+            if bool(np.all(lo < cell_lo + 1.0) and np.all(hi > cell_lo)):
+                return True
+        return False
 
     # ---------------------------------------------------------------- robots
 
@@ -264,6 +376,7 @@ class World:
             elif robot.held is not None and robot.held in EDIBLE:
                 toxic = robot.held == Block.BUSH_TOXIC
                 robot.held = None
+                self.schedule_sprout()  # the carried bush leaves the system
                 self._ingest(robot, toxic, held=True)
 
         elif grip == GRIP_DIG:
@@ -287,6 +400,7 @@ class World:
             if recipient is not None:
                 toxic = robot.held == Block.BUSH_TOXIC
                 robot.held = None
+                self.schedule_sprout()  # eaten by the sleeper: leaves the system
                 self._emit("feed", robot, to=recipient.id)
                 self._ingest(recipient, toxic)
             elif air_before is not None:
@@ -294,6 +408,8 @@ class World:
                 self.grid.set_block(*air_before, block)
                 if block == Block.BUSH_EMPTY:
                     self.schedule_regrow(*air_before)
+                if block in BUSH_BLOCKS:
+                    self.schedule_wither(*air_before)  # a transplant restarts its clock
                 robot.held = None
                 robot.energy = max(0.0, robot.energy - eco.place_cost)
                 self._emit("place", robot, pos=list(air_before), block=block)
@@ -439,11 +555,24 @@ class World:
         """Advance the world by one tick. Never resets, never ends."""
         self.tick += 1
         self._process_regrowth()
+        self._process_wither()
+        self._process_sprouts()
         if self.transient_sounds:
             self.transient_sounds = [s for s in self.transient_sounds if s[4] > self.tick]
+        eco = self.cfg.ecology
         dead: list[str] = []
         for robot in self.robots.values():
             self._execute_grip(robot)
+            # A carried bush perishes; the slot goes back to the world.
+            if robot.held is not None and robot.held in BUSH_BLOCKS:
+                robot.held_age_ticks += 1
+                if 0 < eco.held_spoil_ticks <= robot.held_age_ticks:
+                    robot.held = None
+                    robot.held_age_ticks = 0
+                    self.schedule_sprout()
+                    self._emit("spoil", robot)
+            else:
+                robot.held_age_ticks = 0
             costs = physics.step_robot(self.grid, robot, self.dt, self._actuation(robot))
             self._account_energy(robot, costs)
             robot.age_ticks += 1
@@ -451,6 +580,8 @@ class World:
                 dead.append(robot.id)
         for robot_id in dead:
             robot = self.robots.pop(robot_id)
+            if robot.held is not None and robot.held in BUSH_BLOCKS:
+                self.schedule_sprout()  # the carried bush dies with its carrier
             self._drop_scrap(robot)
             self._cry(robot, DEATH_CRY, self.cfg.sounds.death_cry_ticks)
             self._emit(

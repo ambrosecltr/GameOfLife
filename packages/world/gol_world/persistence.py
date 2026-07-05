@@ -84,11 +84,14 @@ def save_checkpoint(save_dir: Path, world: World, brain_states: dict[str, bytes]
     tmp.mkdir(parents=True)
 
     heap = np.array(sorted(world.regrow_heap), dtype=np.int64).reshape(-1, 4)
+    wither = np.array(sorted(world.wither_heap), dtype=np.int64).reshape(-1, 4)
     np.savez_compressed(
         tmp / "world.npz",
         blocks=world.grid.blocks,
         tick=np.int64(world.tick),
         regrow_heap=heap,
+        wither_heap=wither,
+        sprout_heap=np.array(sorted(world.sprout_heap), dtype=np.int64),
         rng_state=np.frombuffer(json.dumps(world.rng.bit_generator.state).encode(), dtype=np.uint8),
     )
     entities = {
@@ -138,9 +141,21 @@ def load_world(save_dir: Path, ckpt: Path | None = None) -> World:
         heap = [
             (int(a), int(b), int(c), int(d)) for a, b, c, d in data["regrow_heap"].reshape(-1, 4)
         ]
+        wither = (
+            [(int(a), int(b), int(c), int(d)) for a, b, c, d in data["wither_heap"].reshape(-1, 4)]
+            if "wither_heap" in data
+            else None
+        )
+        sprouts = [int(t) for t in data["sprout_heap"]] if "sprout_heap" in data else []
         rng = np.random.default_rng()
         rng.bit_generator.state = json.loads(data["rng_state"].tobytes().decode())
-    world = World(cfg, grid, tick=tick, regrow_heap=heap, rng=rng)
+    world = World(
+        cfg, grid, tick=tick, regrow_heap=heap, rng=rng, wither_heap=wither, sprout_heap=sprouts
+    )
+    if wither is None:
+        # Checkpoint predates bush senescence: stamp the standing bushes now
+        # so an upgraded resume gets the full ecology.
+        world.seed_wither_entries()
     entities_file = ckpt / "entities.json"
     if entities_file.exists():
         entities = json.loads(entities_file.read_text())

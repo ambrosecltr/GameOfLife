@@ -24,6 +24,8 @@ def test_checkpoint_roundtrip_is_exact(tmp_path: Path) -> None:
     assert loaded.tick == world.tick
     assert np.array_equal(loaded.grid.blocks, world.grid.blocks)
     assert sorted(loaded.regrow_heap) == sorted(world.regrow_heap)
+    assert sorted(loaded.wither_heap) == sorted(world.wither_heap)
+    assert sorted(loaded.sprout_heap) == sorted(world.sprout_heap)
     assert loaded.rng.bit_generator.state == world.rng.bit_generator.state
 
     # And the resumed world evolves identically to the original.
@@ -44,6 +46,24 @@ def test_latest_and_pruning(tmp_path: Path) -> None:
     assert len(ckpts) == persistence.KEEP_CHECKPOINTS
     latest = persistence.latest_checkpoint(save)
     assert latest is not None and latest.name == f"ckpt_{world.tick:012d}"
+
+
+def test_legacy_checkpoint_without_wither_heaps_bootstraps(tmp_path: Path) -> None:
+    """Pre-senescence checkpoints resume with fresh death dates for all bushes."""
+    from gol_world.world import BUSH_BLOCKS
+
+    save, world = _fresh_save(tmp_path)
+    persistence.save_checkpoint(save, world, brain_states={})
+    ckpt = persistence.latest_checkpoint(save)
+    assert ckpt is not None
+    data = dict(np.load(ckpt / "world.npz"))
+    del data["wither_heap"]
+    del data["sprout_heap"]
+    np.savez_compressed(ckpt / "world.npz", **data)
+    loaded = persistence.load_world(save)
+    n_bushes = int(np.isin(loaded.grid.blocks, BUSH_BLOCKS).sum())
+    assert n_bushes > 0
+    assert len(loaded.wither_heap) == n_bushes
 
 
 def test_transient_sounds_roundtrip(tmp_path: Path) -> None:

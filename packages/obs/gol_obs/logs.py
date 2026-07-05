@@ -70,6 +70,7 @@ class RunLogs:
             "population": len(world.robots),
             "ripe_bushes": int((world.grid.blocks == Block.BUSH_RIPE).sum()),
             "toxic_bushes": int((world.grid.blocks == Block.BUSH_TOXIC).sum()),
+            "empty_bushes": int((world.grid.blocks == Block.BUSH_EMPTY).sum()),
             "robots": {
                 r.id: {
                     "pos": [round(float(p), 1) for p in r.pos],
