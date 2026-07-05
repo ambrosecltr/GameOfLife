@@ -27,6 +27,7 @@ from typing import Any
 import numpy as np
 
 from gol_world.config import WorldConfig, dataclass_from_dict
+from gol_world.entities import Robot
 from gol_world.grid import VoxelGrid
 from gol_world.world import World
 
@@ -90,6 +91,8 @@ def save_checkpoint(save_dir: Path, world: World, brain_states: dict[str, bytes]
         regrow_heap=heap,
         rng_state=np.frombuffer(json.dumps(world.rng.bit_generator.state).encode(), dtype=np.uint8),
     )
+    entities = {"robots": [robot.to_dict() for robot in world.robots.values()]}
+    (tmp / "entities.json").write_text(json.dumps(entities, indent=2))
     if brain_states:
         brains_dir = tmp / "brains"
         brains_dir.mkdir()
@@ -134,7 +137,14 @@ def load_world(save_dir: Path, ckpt: Path | None = None) -> World:
         ]
         rng = np.random.default_rng()
         rng.bit_generator.state = json.loads(data["rng_state"].tobytes().decode())
-    return World(cfg, grid, tick=tick, regrow_heap=heap, rng=rng)
+    world = World(cfg, grid, tick=tick, regrow_heap=heap, rng=rng)
+    entities_file = ckpt / "entities.json"
+    if entities_file.exists():
+        entities = json.loads(entities_file.read_text())
+        for robot_data in entities.get("robots", []):
+            robot = Robot.from_dict(robot_data)
+            world.robots[robot.id] = robot
+    return world
 
 
 def load_brain_states(ckpt: Path) -> dict[str, bytes]:

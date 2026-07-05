@@ -10,7 +10,7 @@ def test_load_local_m1_config() -> None:
     run_cfg, world_cfg = load_run_config(REPO / "configs/run/local_m1.yaml")
     assert run_cfg.tick_rate == 20
     assert run_cfg.population.target == 8
-    assert len(run_cfg.population.mix) == 3
+    assert len(run_cfg.population.mix) == 1
     assert world_cfg.size == (256, 256, 64)
     assert world_cfg.economy.eat_energy == 35.0
 

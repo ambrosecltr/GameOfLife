@@ -18,6 +18,7 @@ from gol_runtime.config import RunConfig
 
 FrameLogger = Callable[[World], None]
 BrainStateFn = Callable[[], dict[str, bytes]]
+ActStepFn = Callable[[World], None]
 
 
 class SimLoop:
@@ -28,16 +29,19 @@ class SimLoop:
         run_cfg: RunConfig,
         log_frame: FrameLogger | None = None,
         brain_states: BrainStateFn | None = None,
+        act_step: ActStepFn | None = None,
     ) -> None:
         self.world = world
         self.save_dir = save_dir
         self.cfg = run_cfg
         self.log_frame = log_frame
         self.brain_states: BrainStateFn = brain_states or dict
+        self.act_step = act_step
         # Live controls (mutated by the control API from another thread).
         self.speed = 1.0
         self.paused = False
         self.stop_requested = False
+        self.checkpoint_requested = False
 
     def checkpoint(self) -> Path:
         return persistence.save_checkpoint(self.save_dir, self.world, self.brain_states())
@@ -59,7 +63,14 @@ class SimLoop:
 
             self.world.step()
 
-            if self.world.tick % self.cfg.checkpoint_interval_ticks == 0:
+            if self.act_step is not None and self.world.tick % self.cfg.act_every == 0:
+                self.act_step(self.world)
+
+            if (
+                self.world.tick % self.cfg.checkpoint_interval_ticks == 0
+                or self.checkpoint_requested
+            ):
+                self.checkpoint_requested = False
                 self.checkpoint()
 
             now = time.monotonic()

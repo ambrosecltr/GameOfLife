@@ -18,7 +18,9 @@ from gol_world import persistence
 from gol_world.world import World
 
 from gol_runtime.config import load_run_config
+from gol_runtime.control import ControlServer
 from gol_runtime.loop import SimLoop
+from gol_runtime.scheduler import Population
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -66,6 +68,12 @@ def main(argv: list[str] | None = None) -> int:
         world = World.new(world_cfg)
         print(f"created {save_dir} (seed {world_cfg.seed}, size {world_cfg.size})")
 
+    population = Population(world, run_cfg)
+    if exists:
+        ckpt = persistence.latest_checkpoint(save_dir)
+        if ckpt is not None:
+            population.restore_brain_states(persistence.load_brain_states(ckpt))
+
     log_frame = None
     if run_cfg.observability.rerun and (not args.headless or args.rrd):
         from gol_obs.rerun_log import RerunLogger
@@ -76,9 +84,19 @@ def main(argv: list[str] | None = None) -> int:
             spawn=not args.headless and args.rrd is None,
             save_path=args.rrd,
         )
-        log_frame = logger.log_frame
 
-    loop = SimLoop(world, save_dir, run_cfg, log_frame=log_frame)
+        def log_frame(w: World) -> None:
+            logger.log_frame(w, obs=population.last_obs, introspection=population.introspection())
+
+    loop = SimLoop(
+        world,
+        save_dir,
+        run_cfg,
+        log_frame=log_frame,
+        brain_states=population.brain_states,
+        act_step=population.act_step,
+    )
+    ControlServer(loop, port=run_cfg.control_port).start()
     try:
         loop.run(max_ticks=args.ticks, paced=not args.headless)
     except KeyboardInterrupt:
