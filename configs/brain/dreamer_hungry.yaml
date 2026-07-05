@@ -1,0 +1,45 @@
+# DreamerV3 brain with a rebalanced homeostat — the beta_05 "hunger" experiment.
+#
+# beta_04 finding: as the world model converges, curiosity (the dominant reward)
+# collapses ~20x and behavior goes aimless; the homeostatic term was ~1000x
+# smaller than early curiosity, so hunger never took over as a drive. This
+# config makes the body louder without touching curiosity: hunger is felt
+# earlier (before brownout starts to sag the body), the penalty ramp is an
+# order of magnitude steeper, and meals/damage count double. Compare against
+# configs/brain/dreamer.yaml as the ablation baseline.
+
+kind: dreamer
+preset: nano
+
+reward:
+  w_curiosity: 1.0            # untouched: the question is what happens *after* it fades
+  w_homeostasis: 2.0          # meals and damage count double
+  low_energy_threshold: 0.4   # hunger starts above the brownout knee (0.25)
+  low_energy_penalty: 0.25    # dense pressure that rivals residual curiosity
+  low_energy_graded: true
+  curiosity_mask_agents: false
+
+world_model:
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  replay_ac: false
+
+replay:
+  capacity: 500000
+  batch_size: 16
+  seq_len: 64
+  warmup_steps: 500
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  train_ratio: 0.25
