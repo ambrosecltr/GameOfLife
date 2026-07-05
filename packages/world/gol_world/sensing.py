@@ -3,6 +3,12 @@
 Raycasting is Amanatides–Woo DDA stepped simultaneously for every ray of every
 robot in one set of numpy ops — the sim's hottest path stays O(range), not
 O(robots x rays x range) Python loops.
+
+Vision is color (obs v3): each ray returns depth plus the shaded RGB of what
+it struck — block palette color x face shade x per-voxel grain x daylight —
+and a small hit-kind one-hot (block / robot / dormant / nothing). Block
+identity is carried only by appearance; misses see the sky. Gaze offsets aim
+the whole fan without turning the body.
 """
 
 from __future__ import annotations
@@ -13,20 +19,21 @@ from collections.abc import Sequence
 import numpy as np
 import numpy.typing as npt
 
-from gol_world.blocks import Block
-from gol_world.entities import Robot
+from gol_world.blocks import COLOR, FACE_SHADE, Block, light_factor, sky_color, tint_factors
+from gol_world.entities import DORMANT_DIM, Robot, robot_color
 from gol_world.interface import (
-    NUM_RAY_CLASSES,
     PROPRIO_DIM,
-    RAY_CLASS_DORMANT,
-    RAY_CLASS_NOTHING,
-    RAY_CLASS_ROBOT,
+    RAY_DIM,
+    RAY_KIND_BLOCK,
+    RAY_KIND_DORMANT,
+    RAY_KIND_NOTHING,
+    RAY_KIND_ROBOT,
     SOUND_DIM,
     Observation,
 )
 
 F32 = np.float32
-MISS = -1  # internal marker before one-hot encoding
+MISS = -1  # internal marker for "no block hit"
 
 
 def ray_directions(
@@ -45,17 +52,35 @@ def ray_directions(
     return np.concatenate(dirs)
 
 
+def robot_ray_dirs(robot: Robot) -> npt.NDArray[np.float64]:
+    """The robot's current fan: body frame plus its gaze offset (eyes/head)."""
+    body = robot.body
+    yaw = robot.yaw + math.radians(body.gaze_yaw_max_deg) * float(robot.gaze[1])
+    pitch_off = body.gaze_pitch_max_deg * float(robot.gaze[0])
+    pitches = tuple(p + pitch_off for p in body.ray_pitches_deg)
+    return ray_directions(yaw, pitches, body.rays_per_row, body.fov_deg)
+
+
 def cast_rays(
     blocks: npt.NDArray[np.uint8],
     origins: npt.NDArray[np.float64],
     dirs: npt.NDArray[np.float64],
     max_range: float,
-) -> tuple[npt.NDArray[np.float64], npt.NDArray[np.int64]]:
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.int64],
+    npt.NDArray[np.int64],
+    npt.NDArray[np.int64],
+    npt.NDArray[np.int64],
+]:
     """March all rays through the grid at once.
 
-    Returns (depth, hit) where hit is a block id, or MISS (-1) beyond range.
-    Rays leaving the world sideways hit ROCK (the unbreakable border); leaving
-    vertically is a miss (sky / the void below bedrock is empty).
+    Returns (depth, hit, hit_cell, normal_axis, normal_sign) where hit is a
+    block id or MISS (-1) beyond range; hit_cell is the struck voxel (only
+    meaningful for block hits; may be out of bounds for border hits) and the
+    normal is the face the ray entered through. Rays leaving the world
+    sideways hit ROCK (the unbreakable border); leaving vertically is a miss
+    (sky / the void below bedrock is empty).
     """
     n = len(origins)
     sx, sy, sz = blocks.shape
@@ -68,42 +93,87 @@ def cast_rays(
 
     depth = np.full(n, max_range, dtype=np.float64)
     hit = np.full(n, MISS, dtype=np.int64)
-    active = np.ones(n, dtype=np.bool_)
+    hit_cell = np.zeros((n, 3), dtype=np.int64)
+    normal_axis = np.zeros(n, dtype=np.int64)
+    normal_sign = np.ones(n, dtype=np.int64)
 
+    # Active-set compaction: each iteration works only on rays still flying,
+    # so per-step cost shrinks as rays land (most terminate within a few
+    # steps — ground below, walls, nearby terrain).
+    idx = np.arange(n)
     max_steps = int(max_range * 3) + 3
     for _ in range(max_steps):
-        if not active.any():
+        if idx.size == 0:
             break
-        axis = np.argmin(t_max, axis=1)
-        idx = np.arange(n)
+        axis = np.argmin(t_max[idx], axis=1)
         t = t_max[idx, axis]
-        over = active & (t > max_range)
-        active &= ~over
+        # Past max range: those rays end as misses at full depth.
+        live = t <= max_range
+        idx, axis, t = idx[live], axis[live], t[live]
+        if idx.size == 0:
+            break
 
-        move = active
-        cell[move, axis[move]] += step[move, axis[move]]
-        cx, cy, cz = cell[:, 0], cell[:, 1], cell[:, 2]
+        cell[idx, axis] += step[idx, axis]
+        cx, cy, cz = cell[idx, 0], cell[idx, 1], cell[idx, 2]
 
-        oob_side = move & ((cx < 0) | (cx >= sx) | (cy < 0) | (cy >= sy))
-        hit[oob_side] = int(Block.ROCK)
-        depth[oob_side] = t[oob_side]
-        active &= ~oob_side
+        oob_side = (cx < 0) | (cx >= sx) | (cy < 0) | (cy >= sy)
+        if oob_side.any():
+            g = idx[oob_side]
+            hit[g] = int(Block.ROCK)
+            depth[g] = t[oob_side]
+            hit_cell[g] = cell[g]
+            normal_axis[g] = axis[oob_side]
+            normal_sign[g] = -step[g, axis[oob_side]]
 
-        oob_vert = move & ~oob_side & ((cz < 0) | (cz >= sz))
-        active &= ~oob_vert  # miss: stays MISS at max_range
+        oob_vert = ~oob_side & ((cz < 0) | (cz >= sz))  # miss: stays MISS at max_range
 
-        inb = active & move & ~oob_side & ~oob_vert
+        struck = np.zeros(idx.size, dtype=np.bool_)
+        inb = ~oob_side & ~oob_vert
         if inb.any():
-            solid = np.zeros(n, dtype=np.bool_)
+            solid = np.zeros(idx.size, dtype=np.bool_)
             solid[inb] = blocks[cx[inb], cy[inb], cz[inb]] != Block.AIR
             struck = inb & solid
-            hit[struck] = blocks[cx[struck], cy[struck], cz[struck]]
-            depth[struck] = t[struck]
-            active &= ~struck
+            if struck.any():
+                g = idx[struck]
+                hit[g] = blocks[cx[struck], cy[struck], cz[struck]]
+                depth[g] = t[struck]
+                hit_cell[g] = cell[g]
+                normal_axis[g] = axis[struck]
+                normal_sign[g] = -step[g, axis[struck]]
 
+        flying = ~oob_side & ~oob_vert & ~struck
+        idx, axis = idx[flying], axis[flying]
         t_max[idx, axis] += t_delta[idx, axis]
 
-    return depth, hit
+    return depth, hit, hit_cell, normal_axis, normal_sign
+
+
+def _block_appearance(
+    hit: npt.NDArray[np.int64],
+    hit_cell: npt.NDArray[np.int64],
+    normal_axis: npt.NDArray[np.int64],
+    normal_sign: npt.NDArray[np.int64],
+    light_level: float,
+) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.int64]]:
+    """Shaded, tinted, daylight-scaled RGB (n, 3) + hit kind (n,) for all rays."""
+    n = len(hit)
+    rgb = np.empty((n, 3), dtype=F32)
+    kind = np.full(n, RAY_KIND_BLOCK, dtype=np.int64)
+
+    miss = hit == MISS
+    kind[miss] = RAY_KIND_NOTHING
+    rgb[miss] = sky_color(light_level)
+
+    struck = ~miss
+    if struck.any():
+        base = COLOR[hit[struck]].astype(F32) / 255.0
+        shade = FACE_SHADE[normal_axis[struck], (normal_sign[struck] > 0).astype(np.int64)]
+        # Border hits carry out-of-bounds cells; the grain hash is total, so
+        # clipping isn't needed for correctness — the wall just has grain too.
+        tint = tint_factors(hit_cell[struck])
+        factor = shade * tint * light_factor(light_level)
+        rgb[struck] = np.clip(base * factor[:, None], 0.0, 1.0)
+    return rgb, kind
 
 
 def _overlay_robots(
@@ -112,9 +182,12 @@ def _overlay_robots(
     origins: npt.NDArray[np.float64],
     dirs: npt.NDArray[np.float64],
     depth: npt.NDArray[np.float64],
-    hit_class: npt.NDArray[np.int64],
+    rgb: npt.NDArray[np.float32],
+    kind: npt.NDArray[np.int64],
+    light_level: float,
 ) -> None:
     """Replace block hits with robot hits where a body is closer along the ray."""
+    lit = light_factor(light_level)
     for other in others:
         lo, hi = other.aabb
         d = other.pos[:2] - viewer.pos[:2]
@@ -126,9 +199,14 @@ def _overlay_robots(
         tmin = np.minimum(t1, t2).max(axis=1)
         tmax = np.maximum(t1, t2).min(axis=1)
         hits = (tmax >= tmin) & (tmax >= 0) & (tmin < depth) & (tmin > 0)
-        cls = RAY_CLASS_DORMANT if other.dormant else RAY_CLASS_ROBOT
+        if not hits.any():
+            continue
+        color = robot_color(other.id).astype(F32) / 255.0
+        if other.dormant:
+            color = color * DORMANT_DIM
         depth[hits] = tmin[hits]
-        hit_class[hits] = cls
+        kind[hits] = RAY_KIND_DORMANT if other.dormant else RAY_KIND_ROBOT
+        rgb[hits] = np.clip(color * lit, 0.0, 1.0)
 
 
 def _proprio(robot: Robot, light_level: float) -> npt.NDArray[np.float32]:
@@ -148,6 +226,8 @@ def _proprio(robot: Robot, light_level: float) -> npt.NDArray[np.float32]:
     out[9:13] = robot.touch.astype(F32)
     out[13] = light_level
     out[14] = robot.fatigue
+    out[15] = robot.gaze[0]  # head pitch, fraction of gaze_pitch_max
+    out[16] = robot.gaze[1]  # head yaw, fraction of gaze_yaw_max
     return out
 
 
@@ -201,20 +281,19 @@ def observe(
     all_dirs = []
     counts = []
     for robot in awake:
-        dirs = ray_directions(
-            robot.yaw, robot.body.ray_pitches_deg, robot.body.rays_per_row, robot.body.fov_deg
-        )
+        dirs = robot_ray_dirs(robot)
         all_origins.append(np.repeat(robot.eye[None, :], len(dirs), axis=0))
         all_dirs.append(dirs)
         counts.append(len(dirs))
     origins = np.concatenate(all_origins)
     dirs = np.concatenate(all_dirs)
     max_range = max(r.body.ray_range for r in awake)
-    depth, hit = cast_rays(blocks, origins, dirs, max_range)
+    depth, hit, hit_cell, normal_axis, normal_sign = cast_rays(blocks, origins, dirs, max_range)
     if toxic_mimic:
-        # Ablation: perfect mimicry — toxic bushes are indistinguishable by
-        # sight, learnable only through consequence and place memory.
+        # Ablation: perfect mimicry — toxic bushes wear ripe-red, learnable
+        # only through consequence and place memory.
         hit[hit == Block.BUSH_TOXIC] = Block.BUSH_RIPE
+    all_rgb, all_kind = _block_appearance(hit, hit_cell, normal_axis, normal_sign, light_level)
 
     obs: dict[str, Observation] = {}
     offset = 0
@@ -222,14 +301,17 @@ def observe(
         sl = slice(offset, offset + count)
         offset += count
         r_depth = depth[sl].copy()
-        r_hit = hit[sl].copy()
+        r_rgb = all_rgb[sl].copy()
+        r_kind = all_kind[sl].copy()
         others = [o for o in robots if o.id != robot.id]
-        _overlay_robots(robot, others, origins[sl], dirs[sl], r_depth, r_hit)
+        _overlay_robots(
+            robot, others, origins[sl], dirs[sl], r_depth, r_rgb, r_kind, light_level
+        )
 
-        rays = np.zeros((count, 1 + NUM_RAY_CLASSES), dtype=F32)
+        rays = np.zeros((count, RAY_DIM), dtype=F32)
         rays[:, 0] = (r_depth / robot.body.ray_range).astype(F32)
-        classes = np.where(r_hit == MISS, RAY_CLASS_NOTHING, r_hit)
-        rays[np.arange(count), 1 + classes] = 1.0
+        rays[:, 1:4] = r_rgb
+        rays[np.arange(count), 4 + r_kind] = 1.0
 
         obs[robot.id] = Observation(
             rays=rays,

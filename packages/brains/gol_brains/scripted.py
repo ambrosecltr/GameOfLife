@@ -10,10 +10,34 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-from gol_world.blocks import Block
-from gol_world.interface import GRIP_EAT, Action, BodySpec, Observation
+import numpy.typing as npt
+from gol_world.blocks import COLOR, Block
+from gol_world.interface import GRIP_EAT, RAY_KIND_BLOCK, Action, BodySpec, Observation
 
 from gol_brains.base import Brain
+
+
+def _chroma(rgb: npt.NDArray[np.float32]) -> npt.NDArray[np.float32]:
+    """Brightness-invariant color coordinates (r, g fractions of the sum).
+
+    Shading, per-voxel grain, and daylight are all luminance-only multipliers
+    in obs v3, so chromaticity survives them exactly — a scripted eye can
+    recognize a berry at dusk the way the palette painted it at noon.
+    """
+    s = rgb.sum(axis=-1, keepdims=True)
+    s = np.where(s <= 1e-6, 1.0, s)
+    out: npt.NDArray[np.float32] = (rgb / s)[..., :2].astype(np.float32)
+    return out
+
+
+# AIR (black, degenerate chroma) is excluded; classified ids start at 1.
+_PALETTE_CHROMA = _chroma(COLOR[1:].astype(np.float32) / 255.0)
+
+
+def classify_blocks(rgb: npt.NDArray[np.float32]) -> npt.NDArray[np.int64]:
+    """Nearest-palette-chroma block id for each observed ray color (N, 3)."""
+    d = ((_chroma(rgb)[:, None, :] - _PALETTE_CHROMA[None, :, :]) ** 2).sum(axis=-1)
+    return d.argmin(axis=1) + 1
 
 
 class RandomWalkerBrain(Brain):
@@ -83,7 +107,10 @@ class ScriptedForagerBrain(Brain):
         self._steps += 1
         rays = obs["rays"]
         depths = rays[:, 0] * self.body.ray_range
-        classes = rays[:, 1:].argmax(axis=1)
+        # Sight is color now: block identity by nearest palette chroma, valid
+        # only where the ray actually struck a block (kind channel).
+        is_block = rays[:, 4:].argmax(axis=1) == RAY_KIND_BLOCK
+        classes = np.where(is_block, classify_blocks(rays[:, 1:4]), -1)
         proprio = obs["proprio"]
         energy = float(proprio[5])
         light = float(proprio[13])

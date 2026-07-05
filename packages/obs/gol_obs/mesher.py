@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 import numpy.typing as npt
-from gol_world.blocks import COLOR, Block
+from gol_world.blocks import COLOR, Block, tint_factors
 from gol_world.grid import CHUNK
 
 # Per-direction data: (offset, four CCW-from-outside corners, shade).
@@ -92,10 +92,16 @@ def chunk_mesh(blocks: npt.NDArray[np.uint8], chunk_x: int, chunk_y: int) -> Chu
         if not visible.any():
             continue
         cx, cy, cz = np.nonzero(visible)
-        base = np.stack([cx + x0, cy + y0, cz], axis=1).astype(np.float32)
+        cells = np.stack([cx + x0, cy + y0, cz], axis=1)
+        base = cells.astype(np.float32)
         quads = base[:, None, :] + corners[None, :, :]  # (N, 4, 3)
         vert_parts.append(quads.reshape(-1, 3))
-        shaded = (COLOR[core[cx, cy, cz]].astype(np.float32) * shade).astype(np.uint8)
+        # Same per-voxel grain the agents' rays see: the viewer's world and
+        # the sensed world share one appearance.
+        tint = tint_factors(cells)
+        shaded = np.clip(
+            COLOR[core[cx, cy, cz]].astype(np.float32) * shade * tint[:, None], 0, 255
+        ).astype(np.uint8)
         color_parts.append(np.repeat(shaded, 4, axis=0))
 
     if not vert_parts:

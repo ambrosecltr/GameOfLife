@@ -6,8 +6,11 @@ from gol_brains.base import Brain
 from gol_brains.registry import build_brain
 from gol_world.interface import (
     EVENTS_DIM,
-    NUM_RAY_CLASSES,
+    NUM_RAY_KINDS,
     PROPRIO_DIM,
+    RAY_DIM,
+    RAY_KIND_BLOCK,
+    RAY_KIND_NOTHING,
     SOUND_DIM,
     Action,
     BodySpec,
@@ -19,9 +22,10 @@ AVAILABLE_KINDS = ["random_walker", "scripted_forager", "dreamer"]
 
 def fake_obs(rng: np.random.Generator) -> Observation:
     body = BodySpec()
-    rays = np.zeros((body.num_rays, 1 + NUM_RAY_CLASSES), dtype=np.float32)
+    rays = np.zeros((body.num_rays, RAY_DIM), dtype=np.float32)
     rays[:, 0] = rng.random(body.num_rays)
-    rays[np.arange(body.num_rays), 1 + rng.integers(0, NUM_RAY_CLASSES, body.num_rays)] = 1.0
+    rays[:, 1:4] = rng.random((body.num_rays, 3)).astype(np.float32)
+    rays[np.arange(body.num_rays), 4 + rng.integers(0, NUM_RAY_KINDS, body.num_rays)] = 1.0
     return Observation(
         rays=rays,
         proprio=rng.random(PROPRIO_DIM).astype(np.float32),
@@ -69,17 +73,35 @@ def test_unknown_kind_rejected() -> None:
         build_brain({"kind": "psychic"}, seed=0)
 
 
-def bush_in_reach_obs(body: BodySpec) -> Observation:
-    """Daylight, low energy, a ripe bush dead ahead within reach — eat bait."""
-    from gol_world.blocks import Block
+def test_body_from_config_overrides() -> None:
+    brain = build_brain(
+        {"kind": "scripted_forager", "body": {"rays_per_row": 8, "ray_pitches_deg": [0.0]}},
+        seed=0,
+    )
+    assert brain.body.num_rays == 8  # type: ignore[attr-defined]
 
-    rays = np.zeros((body.num_rays, 1 + NUM_RAY_CLASSES), dtype=np.float32)
+
+def _shaded(block_color: np.ndarray, factor: float) -> np.ndarray:
+    """A block color as sensing would deliver it: luminance-scaled."""
+    return (block_color.astype(np.float32) / 255.0) * factor
+
+
+def bush_in_reach_obs(body: BodySpec) -> Observation:
+    """Daylight, low energy, a ripe bush dead ahead within reach — eat bait.
+
+    Colors arrive shaded and grained like the real sensor: the forager must
+    recognize the berry by chroma, not by exact palette value.
+    """
+    from gol_world.blocks import COLOR, Block
+
+    rays = np.zeros((body.num_rays, RAY_DIM), dtype=np.float32)
     rays[:, 0] = 1.0
-    rays[:, 1 + NUM_RAY_CLASSES - 1] = 1.0  # everything else: no hit
-    center = body.rays_per_row // 2  # azimuth ~4.8 deg: inside the eat cone
-    rays[center, 1:] = 0.0
+    rays[:, 4 + RAY_KIND_NOTHING] = 1.0  # everything else: no hit (sky)
+    center = body.rays_per_row // 2  # azimuth a few degrees off-axis: inside the eat cone
+    rays[center] = 0.0
     rays[center, 0] = 1.0 / body.ray_range  # 1 block away, inside reach
-    rays[center, 1 + Block.BUSH_RIPE] = 1.0
+    rays[center, 1:4] = _shaded(COLOR[Block.BUSH_RIPE], 0.8 * 1.07)
+    rays[center, 4 + RAY_KIND_BLOCK] = 1.0
     proprio = np.zeros(PROPRIO_DIM, dtype=np.float32)
     proprio[5] = 0.3  # hungry
     proprio[13] = 1.0  # daylight

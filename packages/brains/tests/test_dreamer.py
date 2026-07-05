@@ -3,13 +3,14 @@
 import numpy as np
 import pytest
 import torch
-from gol_brains.dreamer.brain import ACTION_DIM, DreamerBrain
+from gol_brains.dreamer.brain import ACTION_DIM, CONT_DIM, DreamerBrain
 from gol_brains.dreamer.networks import TwoHot, symexp, symlog
 from gol_brains.dreamer.rssm import RSSM, RSSMConfig
 from gol_world.interface import (
     EVENTS_DIM,
-    NUM_RAY_CLASSES,
+    NUM_RAY_KINDS,
     PROPRIO_DIM,
+    RAY_DIM,
     SOUND_DIM,
     Action,
     BodySpec,
@@ -27,9 +28,10 @@ TINY = {
 
 def fake_obs(rng: np.random.Generator, bias: float = 0.0) -> Observation:
     body = BodySpec()
-    rays = np.zeros((body.num_rays, 1 + NUM_RAY_CLASSES), dtype=np.float32)
+    rays = np.zeros((body.num_rays, RAY_DIM), dtype=np.float32)
     rays[:, 0] = np.clip(rng.random(body.num_rays) + bias, 0, 1)
-    rays[np.arange(body.num_rays), 1 + rng.integers(0, NUM_RAY_CLASSES, body.num_rays)] = 1.0
+    rays[:, 1:4] = rng.random((body.num_rays, 3)).astype(np.float32)
+    rays[np.arange(body.num_rays), 4 + rng.integers(0, NUM_RAY_KINDS, body.num_rays)] = 1.0
     proprio = rng.random(PROPRIO_DIM).astype(np.float32)
     return Observation(
         rays=rays,
@@ -84,12 +86,15 @@ def test_ensemble_disagreement_positive_on_random() -> None:
 
 
 def test_act_contract_and_warmup() -> None:
+    assert ACTION_DIM == CONT_DIM + 4  # drive+signal+gaze, then gripper one-hot
     brain = DreamerBrain(TINY, seed=1)
     rng = np.random.default_rng(0)
     for _ in range(10):
         action = brain.act(fake_obs(rng))
         assert isinstance(action, Action)
         assert action.drive.shape == (2,) and np.abs(action.drive).max() <= 1.0
+        assert action.gaze is not None and action.gaze.shape == (2,)
+        assert np.abs(action.gaze).max() <= 1.0
         assert 0 <= action.gripper < 4
     assert len(brain.buffer) == 10
     assert brain.learn() is None, "no learning before warmup"
@@ -156,30 +161,39 @@ def test_obs_version_mismatch_rejected() -> None:
 def test_curiosity_masking_erases_agents() -> None:
     cfg = dict(TINY, reward={"curiosity_mask_agents": True})
     brain = DreamerBrain(cfg, seed=6)
-    from gol_world.interface import RAY_CLASS_NOTHING, RAY_CLASS_ROBOT
+    from gol_world.blocks import SKY_DAY
+    from gol_world.interface import RAY_KIND_BLOCK, RAY_KIND_NOTHING, RAY_KIND_ROBOT
 
     body = BodySpec()
     n = body.num_rays
     depth = torch.rand(2, 3, n)
-    onehot = torch.zeros(2, 3, n, NUM_RAY_CLASSES)
-    onehot[..., RAY_CLASS_ROBOT] = 1.0  # every ray sees a robot
+    rgb = torch.rand(2, 3, n, 3)
+    onehot = torch.zeros(2, 3, n, NUM_RAY_KINDS)
+    onehot[..., RAY_KIND_ROBOT] = 1.0  # every ray sees a robot
+    proprio = torch.rand(2, 3, PROPRIO_DIM)
+    proprio[..., 13] = 1.0  # full daylight
     obs = {
         "depth": depth,
-        "class_onehot": onehot,
-        "proprio": torch.rand(2, 3, PROPRIO_DIM),
+        "rgb": rgb,
+        "kind_onehot": onehot,
+        "proprio": proprio,
         "sound": torch.rand(2, 3, SOUND_DIM),
         "events": torch.zeros(2, 3, EVENTS_DIM),
     }
     masked = brain._mask_agents(obs)
-    assert (masked["class_onehot"][..., RAY_CLASS_ROBOT] == 0).all()
-    assert (masked["class_onehot"][..., RAY_CLASS_NOTHING] == 1).all()
+    assert (masked["kind_onehot"][..., RAY_KIND_ROBOT] == 0).all()
+    assert (masked["kind_onehot"][..., RAY_KIND_NOTHING] == 1).all()
     assert (masked["depth"] == 1.0).all()
+    # Masked rays wear the daytime sky, like a real miss would.
+    sky = torch.as_tensor(SKY_DAY)
+    torch.testing.assert_close(masked["rgb"], sky.expand_as(masked["rgb"]), atol=1e-5, rtol=0)
     # Non-agent rays pass through untouched.
-    onehot2 = torch.zeros(2, 3, n, NUM_RAY_CLASSES)
-    onehot2[..., 2] = 1.0  # ROCK
-    obs2 = dict(obs, class_onehot=onehot2)
+    onehot2 = torch.zeros(2, 3, n, NUM_RAY_KINDS)
+    onehot2[..., RAY_KIND_BLOCK] = 1.0
+    obs2 = dict(obs, kind_onehot=onehot2)
     masked2 = brain._mask_agents(obs2)
     torch.testing.assert_close(masked2["depth"], depth)
+    torch.testing.assert_close(masked2["rgb"], rgb)
 
 
 def test_masked_brain_learns() -> None:

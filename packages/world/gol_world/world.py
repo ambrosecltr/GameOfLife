@@ -19,12 +19,14 @@ from gol_world.config import WorldConfig
 from gol_world.entities import EV_ATE, EV_DIG_SUCCESS, EV_TOOK_DAMAGE, Robot
 from gol_world.grid import VoxelGrid
 from gol_world.interface import (
+    GAZE_DIM,
     GRIP_DIG,
     GRIP_EAT,
     GRIP_NOOP,
     GRIP_PLACE,
     SIGNAL_DIM,
     Action,
+    BodySpec,
 )
 
 RegrowEntry = tuple[int, int, int, int]  # due_tick, x, y, z
@@ -252,13 +254,14 @@ class World:
             return (x + 0.5, y + 0.5, float(h + 1))
         raise RuntimeError("no spawnable grass found (world all water/rock?)")
 
-    def spawn_robot(self, robot_id: str, brain_name: str) -> Robot:
+    def spawn_robot(self, robot_id: str, brain_name: str, body: BodySpec | None = None) -> Robot:
         pos = self.find_spawn()
         robot = Robot(
             id=robot_id,
             pos=np.array(pos, dtype=np.float64),
             yaw=float(self.rng.uniform(0, 2 * math.pi)),
             brain_name=brain_name,
+            body=body or BodySpec(),
             energy=self.cfg.economy.energy_max,
             integrity=self.cfg.economy.integrity_max,
         )
@@ -280,6 +283,10 @@ class World:
             )
         else:
             robot.signal[:] = 0.0
+        if action.gaze is not None:
+            robot.gaze[:] = np.clip(np.asarray(action.gaze, dtype=np.float64)[:GAZE_DIM], -1.0, 1.0)
+        else:
+            robot.gaze[:] = 0.0
         robot.pending_grip = int(action.gripper)
 
     # --------------------------------------------------------------- gripper

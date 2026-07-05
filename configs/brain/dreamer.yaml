@@ -4,13 +4,21 @@
 kind: dreamer
 preset: nano                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
 
+# body:                       # BodySpec overrides; defaults in gol_world/interface.py.
+#   ray_pitches_deg: [30, 12, 0, -12, -30, -50]   # 6 pitch rows, up and down
+#   rays_per_row: 24
+#   fov_deg: 160
+#   ray_range: 32
+#   gaze_pitch_max_deg: 45    # head range beyond the fixed fan (0 disables gaze)
+#   gaze_yaw_max_deg: 90
+
 reward:
   w_curiosity: 1.0            # Plan2Explore ensemble disagreement
   w_homeostasis: 1.0          # ate / took_damage / low-energy pressure
   low_energy_threshold: 0.25
   low_energy_penalty: 0.02
   low_energy_graded: true     # penalty ramps toward zero energy (false: binary cliff, ablation)
-  curiosity_mask_agents: false  # ablation: mask other-robot ray classes from curiosity
+  curiosity_mask_agents: false  # ablation: mask other-robot ray hits from curiosity
 
 world_model:
   # Latent sizes come from the preset (nano 16x16, small 24x24, base 32x32).

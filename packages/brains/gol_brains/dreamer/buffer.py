@@ -1,8 +1,8 @@
 """Per-agent replay: one unbroken life, stored quantized.
 
 No episodes, no dones — a robot's replay is a single continuous sequence.
-Rays are stored as uint8 depth + uint8 class, everything else float16, so a
-200k-step life costs ~15 MB and survives checkpointing.
+Rays are stored as uint8 depth + uint8 RGB + uint8 hit-kind, everything else
+float16, so a 200k-step life stays tens of MB and survives checkpointing.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ class ReplayBuffer:
         self.num_rays = num_rays
         self.rng = np.random.default_rng(seed)
         self.depth = np.zeros((capacity, num_rays), dtype=np.uint8)
-        self.ray_class = np.zeros((capacity, num_rays), dtype=np.uint8)
+        self.rgb = np.zeros((capacity, num_rays, 3), dtype=np.uint8)
+        self.kind = np.zeros((capacity, num_rays), dtype=np.uint8)
         self.proprio = np.zeros((capacity, PROPRIO_DIM), dtype=np.float16)
         self.sound = np.zeros((capacity, SOUND_DIM), dtype=np.float16)
         self.events = np.zeros((capacity, EVENTS_DIM), dtype=np.uint8)
@@ -34,7 +35,8 @@ class ReplayBuffer:
     def add(self, obs: Observation, action: npt.NDArray[np.float32]) -> None:
         i = self.pos
         self.depth[i] = np.clip(obs["rays"][:, 0] * 255, 0, 255).astype(np.uint8)
-        self.ray_class[i] = obs["rays"][:, 1:].argmax(axis=1).astype(np.uint8)
+        self.rgb[i] = np.clip(obs["rays"][:, 1:4] * 255, 0, 255).astype(np.uint8)
+        self.kind[i] = obs["rays"][:, 4:].argmax(axis=1).astype(np.uint8)
         self.proprio[i] = obs["proprio"]
         self.sound[i] = obs["sound"]
         self.events[i] = np.clip(obs["events"], 0, 1).astype(np.uint8)
@@ -64,7 +66,8 @@ class ReplayBuffer:
         idx = np.stack([np.arange(s, s + length) for s in starts])  # (B, L)
         return {
             "depth": (self.depth[idx].astype(np.float32) / 255.0),
-            "ray_class": self.ray_class[idx].astype(np.int64).astype(np.float32),
+            "rgb": (self.rgb[idx].astype(np.float32) / 255.0),
+            "kind": self.kind[idx].astype(np.int64).astype(np.float32),
             "proprio": self.proprio[idx].astype(np.float32),
             "sound": self.sound[idx].astype(np.float32),
             "events": self.events[idx].astype(np.float32),
@@ -80,7 +83,8 @@ class ReplayBuffer:
         )
         return {
             "depth": self.depth[order][-n:],
-            "ray_class": self.ray_class[order][-n:],
+            "rgb": self.rgb[order][-n:],
+            "kind": self.kind[order][-n:],
             "proprio": self.proprio[order][-n:],
             "sound": self.sound[order][-n:],
             "events": self.events[order][-n:],
@@ -90,7 +94,7 @@ class ReplayBuffer:
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         n = min(len(state["depth"]), self.capacity)
-        for name in ("depth", "ray_class", "proprio", "sound", "events", "action"):
+        for name in ("depth", "rgb", "kind", "proprio", "sound", "events", "action"):
             getattr(self, name)[:n] = state[name][-n:]
         self.pos = n % self.capacity
         self.full = n == self.capacity

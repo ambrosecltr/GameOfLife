@@ -15,7 +15,12 @@ import zlib
 from typing import Any
 
 from gol_brains.base import Brain
-from gol_brains.registry import build_brain, is_learning_kind, resolve_brain_config
+from gol_brains.registry import (
+    body_from_config,
+    build_brain,
+    is_learning_kind,
+    resolve_brain_config,
+)
 from gol_world.interface import Observation
 from gol_world.sensing import observe
 from gol_world.world import World
@@ -74,6 +79,9 @@ class Population:
         """On resume: robots already exist; rebuild each brain from its kind."""
         for robot in self.world.robots.values():
             spec = self._specs_by_kind.get(robot.brain_name, {"kind": robot.brain_name})
+            # Saved robots carry no BodySpec; restore the body the config says
+            # this kind wears (senses must match what the brain was sized for).
+            robot.body = body_from_config(resolve_brain_config(spec))
             self.brains[robot.id] = build_brain(
                 spec, seed=self._seed_for(robot.id), device=self._device_for(spec)
             )
@@ -135,7 +143,9 @@ class Population:
         prefix = kind.rsplit("_", 1)[-1] if kind else "bot"
         robot_id = f"{prefix}_{self._next_idx:03d}"
         self._next_idx += 1
-        self.world.spawn_robot(robot_id, brain_name=kind)
+        spec = self._specs_by_kind.get(kind, {"kind": kind})
+        body = body_from_config(resolve_brain_config(spec))
+        self.world.spawn_robot(robot_id, brain_name=kind, body=body)
         mode = self.cfg.population.inherit_weights
         stash = self._lineage_stash.get(kind, [])
         if mode == "lineage" and stash:
@@ -143,7 +153,6 @@ class Population:
             brain = stash.pop(0)
             brain.reset_stream()
         else:
-            spec = self._specs_by_kind.get(kind, {"kind": kind})
             brain = build_brain(spec, seed=self._seed_for(robot_id), device=self._device_for(spec))
             if mode == "random_living":
                 donors = [

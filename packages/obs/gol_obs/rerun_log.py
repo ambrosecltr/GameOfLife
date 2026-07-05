@@ -12,54 +12,18 @@ import math
 from pathlib import Path
 
 import numpy as np
-import numpy.typing as npt
 import rerun as rr
-from gol_world.blocks import COLOR, Block
+from gol_world.blocks import Block
+from gol_world.entities import robot_color
 from gol_world.grid import CHUNK
-from gol_world.interface import (
-    NUM_RAY_CLASSES,
-    RAY_CLASS_DORMANT,
-    RAY_CLASS_ITEM,
-    RAY_CLASS_NOTHING,
-    RAY_CLASS_ROBOT,
-    Observation,
-)
-from gol_world.sensing import ray_directions
+from gol_world.interface import Observation
+from gol_world.sensing import robot_ray_dirs
 from gol_world.world import World
 
 from gol_obs.blueprint import build_blueprint
 from gol_obs.mesher import chunk_mesh
 
 APP_ID = "gameoflife"
-
-ROBOT_COLOR = np.array([255, 140, 30], dtype=np.uint8)  # ray-hit class color
-DORMANT_COLOR = np.array([110, 90, 70], dtype=np.uint8)
-
-# Stable per-robot identity colors, shared by the 3D body and every chart line.
-ROBOT_PALETTE = np.array(
-    [
-        [230, 80, 60],  # red
-        [70, 160, 235],  # blue
-        [110, 205, 90],  # green
-        [240, 190, 60],  # gold
-        [180, 110, 235],  # violet
-        [250, 140, 190],  # pink
-        [90, 220, 210],  # teal
-        [250, 160, 60],  # orange
-        [165, 165, 175],  # gray
-        [200, 220, 120],  # lime
-    ],
-    dtype=np.uint8,
-)
-
-
-def robot_color(robot_id: str) -> npt.NDArray[np.uint8]:
-    try:
-        idx = int(robot_id.rsplit("_", 1)[1])
-    except (IndexError, ValueError):
-        idx = abs(hash(robot_id))
-    color: npt.NDArray[np.uint8] = ROBOT_PALETTE[idx % len(ROBOT_PALETTE)]
-    return color
 
 
 # World events as feed entries: severity + a human sentence.
@@ -100,14 +64,6 @@ def _event_text(event: dict[str, object]) -> str:
         name = Block(int(block)).name if isinstance(block, int) else "?"
         return f"{rid} {kind} {name}"
     return f"{rid} {kind}"
-
-# Ray line colors by hit class: block hits use the block palette.
-RAY_CLASS_COLOR = np.zeros((NUM_RAY_CLASSES, 3), dtype=np.uint8)
-RAY_CLASS_COLOR[: len(COLOR)] = COLOR
-RAY_CLASS_COLOR[RAY_CLASS_ROBOT] = ROBOT_COLOR
-RAY_CLASS_COLOR[RAY_CLASS_DORMANT] = DORMANT_COLOR
-RAY_CLASS_COLOR[RAY_CLASS_ITEM] = (90, 220, 220)
-RAY_CLASS_COLOR[RAY_CLASS_NOTHING] = (70, 70, 80)
 
 
 class RerunLogger:
@@ -259,16 +215,14 @@ class RerunLogger:
             robot = world.robots.get(robot_id)
             if robot is None:
                 continue
-            dirs = ray_directions(
-                robot.yaw, robot.body.ray_pitches_deg, robot.body.rays_per_row, robot.body.fov_deg
-            )
+            dirs = robot_ray_dirs(robot)
             depths = o["rays"][:, 0:1].astype(np.float64) * robot.body.ray_range
             ends = robot.eye[None, :] + dirs * depths
             strips = np.stack(
                 [np.repeat(robot.eye[None, :], len(ends), axis=0), ends], axis=1
             ).astype(np.float32)
-            classes = o["rays"][:, 1:].argmax(axis=1)
-            colors = RAY_CLASS_COLOR[classes]
+            # Rays wear exactly the color the agent observed (v3: sight is RGB).
+            colors = np.clip(o["rays"][:, 1:4] * 255.0, 0, 255).astype(np.uint8)
             rr.log(f"world/rays/{robot_id}", rr.LineStrips3D(strips, colors=colors, radii=0.02))
 
     def _log_sounds(self, world: World) -> None:

@@ -13,23 +13,28 @@ from typing import TypedDict
 import numpy as np
 import numpy.typing as npt
 
-from gol_world.blocks import NUM_BLOCKS
+# v3: color vision. Rays carry depth + shaded RGB + a small hit-kind one-hot
+# instead of a block-class oracle: what a block *is* must now be read from how
+# it looks. Gaze control adds 2 action dims and 2 proprio dims; the ray fan
+# grows to 6 pitch rows (including upward — hills and skylines are visible).
+OBS_VERSION = 3
 
-# v2: BUSH_TOXIC block (widens the ray one-hot) + fatigue appended to proprio.
-OBS_VERSION = 2
+# Ray hit kinds: an animacy channel, not a semantic oracle. Blocks are told
+# apart only by color; other robots stay perceptually salient as "alive".
+RAY_KIND_BLOCK = 0
+RAY_KIND_ROBOT = 1
+RAY_KIND_DORMANT = 2
+RAY_KIND_NOTHING = 3  # no hit within range (sky)
+NUM_RAY_KINDS = 4
 
-# Ray hit classes: one per block id (AIR's slot is unused — a miss is NOTHING),
-# then entities, then "no hit within range".
-RAY_CLASS_ROBOT = NUM_BLOCKS  # 12
-RAY_CLASS_DORMANT = NUM_BLOCKS + 1  # 13
-RAY_CLASS_ITEM = NUM_BLOCKS + 2  # 14
-RAY_CLASS_NOTHING = NUM_BLOCKS + 3  # 15
-NUM_RAY_CLASSES = NUM_BLOCKS + 4  # 16
+# Per-ray features: depth, r, g, b, kind one-hot.
+RAY_DIM = 1 + 3 + NUM_RAY_KINDS
 
-PROPRIO_DIM = 15
+PROPRIO_DIM = 17
 SOUND_DIM = 4
 EVENTS_DIM = 4
 SIGNAL_DIM = 2
+GAZE_DIM = 2  # (pitch, yaw) targets in [-1, 1], scaled by the body's gaze range
 
 # Gripper action modes.
 GRIP_NOOP = 0
@@ -47,10 +52,17 @@ class BodySpec:
     height: float = 0.9
     max_speed: float = 4.0  # blocks/sec at full forward drive
     max_turn: float = 2.5  # rad/sec at full turn drive
-    ray_pitches_deg: tuple[float, ...] = (0.0, -30.0)
-    rays_per_row: int = 16
-    fov_deg: float = 144.0
-    ray_range: float = 24.0
+    # An elliptical visual field: wide horizontally, narrower vertically,
+    # denser near the horizon where most of life happens.
+    ray_pitches_deg: tuple[float, ...] = (30.0, 12.0, 0.0, -12.0, -30.0, -50.0)
+    rays_per_row: int = 24
+    fov_deg: float = 160.0
+    ray_range: float = 32.0
+    # Gaze: the head aims the eyes beyond the fixed fan, without turning the
+    # body. The gripper still works along the body heading — eyes look, arms
+    # reach from the chest.
+    gaze_pitch_max_deg: float = 45.0
+    gaze_yaw_max_deg: float = 90.0
     eye_height: float = 0.75  # ray origin above feet
     hear_radius: float = 12.0
     reach: float = 1.6  # gripper distance, from eye
@@ -61,7 +73,7 @@ class BodySpec:
 
 
 class Observation(TypedDict):
-    rays: npt.NDArray[np.float32]  # (num_rays, 1 + NUM_RAY_CLASSES): depth + class one-hot
+    rays: npt.NDArray[np.float32]  # (num_rays, RAY_DIM): depth + rgb + kind one-hot
     proprio: npt.NDArray[np.float32]  # (PROPRIO_DIM,)
     sound: npt.NDArray[np.float32]  # (SOUND_DIM,)
     events: npt.NDArray[np.float32]  # (EVENTS_DIM,): ate, took_damage, dig_success, bumped_robot
@@ -72,6 +84,7 @@ class Action:
     drive: npt.NDArray[np.float32]  # (2,): forward in [-1, 1], turn in [-1, 1]
     gripper: int = GRIP_NOOP
     signal: npt.NDArray[np.float32] | None = None  # (SIGNAL_DIM,) in [-1, 1]
+    gaze: npt.NDArray[np.float32] | None = None  # (GAZE_DIM,) in [-1, 1]; None = look straight
 
     @classmethod
     def idle(cls) -> Action:

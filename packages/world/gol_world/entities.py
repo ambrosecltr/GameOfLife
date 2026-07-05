@@ -8,7 +8,36 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from gol_world.interface import EVENTS_DIM, SIGNAL_DIM, BodySpec
+from gol_world.interface import EVENTS_DIM, GAZE_DIM, SIGNAL_DIM, BodySpec
+
+# Stable per-robot identity colors: how a body *looks*, to rays and viewer
+# alike — individuals are visually recognizable. Dormant bodies dim.
+ROBOT_PALETTE: npt.NDArray[np.uint8] = np.array(
+    [
+        [230, 80, 60],  # red
+        [70, 160, 235],  # blue
+        [110, 205, 90],  # green
+        [240, 190, 60],  # gold
+        [180, 110, 235],  # violet
+        [250, 140, 190],  # pink
+        [90, 220, 210],  # teal
+        [250, 160, 60],  # orange
+        [165, 165, 175],  # gray
+        [200, 220, 120],  # lime
+    ],
+    dtype=np.uint8,
+)
+DORMANT_DIM = 0.45
+
+
+def robot_color(robot_id: str) -> npt.NDArray[np.uint8]:
+    try:
+        idx = int(robot_id.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        idx = abs(hash(robot_id))
+    color: npt.NDArray[np.uint8] = ROBOT_PALETTE[idx % len(ROBOT_PALETTE)]
+    return color
+
 
 # Indices into Robot.events (mirrors Observation["events"]).
 EV_ATE = 0
@@ -51,6 +80,7 @@ class Robot:
     # Commanded controls; persist between act-steps (grip is one-shot).
     drive: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(2))
     signal: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(SIGNAL_DIM))
+    gaze: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(GAZE_DIM))
     pending_grip: int = 0
     # Set by physics each tick.
     touch: npt.NDArray[np.bool_] = field(default_factory=lambda: np.zeros(4, dtype=np.bool_))
@@ -91,6 +121,7 @@ class Robot:
             "ledger": self.ledger,
             "drive": self.drive.tolist(),
             "signal": self.signal.tolist(),
+            "gaze": self.gaze.tolist(),
             "pending_grip": self.pending_grip,
             "fall_peak_z": self.fall_peak_z,
         }
@@ -114,6 +145,7 @@ class Robot:
             ledger={**new_ledger(), **data.get("ledger", {})},
             drive=np.array(data["drive"], dtype=np.float64),
             signal=np.array(data["signal"], dtype=np.float64),
+            gaze=np.array(data.get("gaze", [0.0] * GAZE_DIM), dtype=np.float64),
             pending_grip=int(data.get("pending_grip", 0)),
             fall_peak_z=float(data.get("fall_peak_z", data["pos"][2])),
         )

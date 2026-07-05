@@ -15,12 +15,15 @@ import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from gol_world.blocks import SKY_DAY, SKY_NIGHT
 from gol_world.interface import (
     EVENTS_DIM,
+    GAZE_DIM,
     NUM_GRIP_MODES,
-    NUM_RAY_CLASSES,
+    NUM_RAY_KINDS,
     OBS_VERSION,
     PROPRIO_DIM,
+    RAY_DIM,
     SIGNAL_DIM,
     SOUND_DIM,
     Action,
@@ -45,7 +48,9 @@ PRESETS: dict[str, dict[str, int]] = {
     "base": {"deter": 1024, "groups": 32, "classes": 32, "hidden": 768, "units": 768},
 }
 
-ACTION_DIM = 2 + SIGNAL_DIM + NUM_GRIP_MODES  # drive(2) + signal(2) + gripper one-hot(4)
+# drive(2) + signal(2) + gaze(2) continuous, then gripper one-hot(4).
+CONT_DIM = 2 + SIGNAL_DIM + GAZE_DIM
+ACTION_DIM = CONT_DIM + NUM_GRIP_MODES
 
 
 class WorldModel(nn.Module):
@@ -53,7 +58,7 @@ class WorldModel(nn.Module):
         super().__init__()
         self.num_rays = num_rays
         units = preset["units"]
-        obs_dim = num_rays * (1 + NUM_RAY_CLASSES) + PROPRIO_DIM + SOUND_DIM + EVENTS_DIM
+        obs_dim = num_rays * RAY_DIM + PROPRIO_DIM + SOUND_DIM + EVENTS_DIM
         self.rssm_cfg = RSSMConfig(
             deter=preset["deter"],
             stoch_groups=preset["groups"],
@@ -66,7 +71,8 @@ class WorldModel(nn.Module):
         self.rssm = RSSM(self.rssm_cfg, embed_dim=units, action_dim=ACTION_DIM)
         feat = self.rssm_cfg.feat_dim
         self.head_depth = mlp(feat, units, num_rays, layers=2)
-        self.head_class = mlp(feat, units, num_rays * NUM_RAY_CLASSES, layers=2)
+        self.head_rgb = mlp(feat, units, num_rays * 3, layers=2)
+        self.head_kind = mlp(feat, units, num_rays * NUM_RAY_KINDS, layers=2)
         self.head_proprio = mlp(feat, units, PROPRIO_DIM, layers=2)
         self.head_reward = mlp(feat, units, 41, layers=2)  # twohot homeostasis
         self.head_cont = mlp(feat, units, 1, layers=2)
@@ -82,7 +88,8 @@ class WorldModel(nn.Module):
         flat = torch.cat(
             [
                 obs["depth"],
-                obs["class_onehot"].flatten(-2),
+                obs["rgb"].flatten(-2),
+                obs["kind_onehot"].flatten(-2),
                 obs["proprio"],
                 obs["sound"],
                 obs["events"],
@@ -99,10 +106,12 @@ class WorldModel(nn.Module):
 
 
 class DreamerBrain(Brain):
-    def __init__(self, cfg: dict[str, Any], seed: int, device: str = "cpu") -> None:
+    def __init__(
+        self, cfg: dict[str, Any], seed: int, device: str = "cpu", body: BodySpec | None = None
+    ) -> None:
         self.cfg = cfg
         self.device = torch.device(device)
-        self.body = BodySpec()
+        self.body = body or BodySpec()
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
 
@@ -117,7 +126,7 @@ class DreamerBrain(Brain):
         self.gamma = float(ac_cfg.get("gamma", 0.997))
         self.lam = float(ac_cfg.get("lam", 0.95))
         self.entropy_scale = float(ac_cfg.get("entropy", 3e-4))
-        self.actor = mlp(feat, units, 4 * 2 + NUM_GRIP_MODES, layers=2).to(self.device)
+        self.actor = mlp(feat, units, CONT_DIM * 2 + NUM_GRIP_MODES, layers=2).to(self.device)
         self.critic = mlp(feat, units, 41, layers=2).to(self.device)
         self.critic_ema = mlp(feat, units, 41, layers=2).to(self.device)
         self.critic_ema.load_state_dict(self.critic.state_dict())
@@ -172,7 +181,8 @@ class DreamerBrain(Brain):
         rays = torch.as_tensor(obs["rays"], device=self.device)
         return {
             "depth": rays[..., 0].unsqueeze(0),
-            "class_onehot": rays[..., 1:].unsqueeze(0),
+            "rgb": rays[..., 1:4].unsqueeze(0),
+            "kind_onehot": rays[..., 4:].unsqueeze(0),
             "proprio": torch.as_tensor(obs["proprio"], device=self.device).unsqueeze(0),
             "sound": torch.as_tensor(obs["sound"], device=self.device).unsqueeze(0),
             "events": torch.as_tensor(obs["events"], device=self.device).unsqueeze(0),
@@ -182,7 +192,9 @@ class DreamerBrain(Brain):
         self, feat: torch.Tensor
     ) -> tuple[TanhNormal, torch.distributions.Categorical]:
         out = self.actor(feat)
-        mean, raw_std, grip_logits = out[..., :4], out[..., 4:8], out[..., 8:]
+        mean = out[..., :CONT_DIM]
+        raw_std = out[..., CONT_DIM : 2 * CONT_DIM]
+        grip_logits = out[..., 2 * CONT_DIM :]
         std = F.softplus(raw_std) + 0.1
         probs = torch.softmax(grip_logits, dim=-1)
         probs = 0.99 * probs + 0.01 / NUM_GRIP_MODES  # unimix keeps exploration alive
@@ -190,8 +202,8 @@ class DreamerBrain(Brain):
 
     def _action_to_vec(self, cont: torch.Tensor, grip: int) -> npt.NDArray[np.float32]:
         vec = np.zeros(ACTION_DIM, dtype=np.float32)
-        vec[:4] = cont.detach().cpu().numpy()
-        vec[4 + grip] = 1.0
+        vec[:CONT_DIM] = cont.detach().cpu().numpy()
+        vec[CONT_DIM + grip] = 1.0
         return vec
 
     def act(self, obs: Observation) -> Action:
@@ -201,7 +213,7 @@ class DreamerBrain(Brain):
             self.h, self.z, _, _ = self.wm.rssm.obs_step(self.h, self.z, self.last_action, embed)
             if len(self.buffer) < self.warmup_steps:
                 cont = torch.as_tensor(
-                    self.rng.uniform(-1, 1, 4).astype(np.float32), device=self.device
+                    self.rng.uniform(-1, 1, CONT_DIM).astype(np.float32), device=self.device
                 )
                 grip = int(self.rng.integers(0, NUM_GRIP_MODES))
             else:
@@ -217,22 +229,31 @@ class DreamerBrain(Brain):
             drive=action_vec[:2].copy(),
             gripper=grip,
             signal=action_vec[2:4].copy(),
+            gaze=action_vec[4:6].copy(),
         )
 
     # ----------------------------------------------------------------- learn
 
     def _mask_agents(self, obs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """Rays that hit a robot read as 'nothing at max range' instead."""
-        from gol_world.interface import RAY_CLASS_DORMANT, RAY_CLASS_NOTHING, RAY_CLASS_ROBOT
+        """Rays that hit a robot read as 'sky at max range' instead."""
+        from gol_world.interface import RAY_KIND_DORMANT, RAY_KIND_NOTHING, RAY_KIND_ROBOT
 
-        class_onehot = obs["class_onehot"]
-        is_agent = (class_onehot[..., RAY_CLASS_ROBOT] + class_onehot[..., RAY_CLASS_DORMANT]) > 0.5
-        masked_class = class_onehot.clone()
-        masked_class[is_agent] = 0.0
-        masked_class[..., RAY_CLASS_NOTHING][is_agent] = 1.0
+        kind_onehot = obs["kind_onehot"]
+        is_agent = (kind_onehot[..., RAY_KIND_ROBOT] + kind_onehot[..., RAY_KIND_DORMANT]) > 0.5
+        masked_kind = kind_onehot.clone()
+        masked_kind[is_agent] = 0.0
+        masked_kind[..., RAY_KIND_NOTHING][is_agent] = 1.0
         masked_depth = obs["depth"].clone()
         masked_depth[is_agent] = 1.0
-        return {**obs, "depth": masked_depth, "class_onehot": masked_class}
+        # A masked ray must look like a real miss: the sky at the current
+        # light level (proprio[13]), not black.
+        light = obs["proprio"][..., 13]
+        night = torch.as_tensor(SKY_NIGHT, device=light.device)
+        day = torch.as_tensor(SKY_DAY, device=light.device)
+        sky = night + (day - night) * light[..., None]  # (..., 3)
+        masked_rgb = obs["rgb"].clone()
+        masked_rgb[is_agent] = sky.unsqueeze(-2).expand_as(masked_rgb)[is_agent]
+        return {**obs, "depth": masked_depth, "rgb": masked_rgb, "kind_onehot": masked_kind}
 
     def _homeostasis(self, events: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
         ate, damage = events[..., 0], events[..., 1]
@@ -252,10 +273,11 @@ class DreamerBrain(Brain):
             return None
         b = {k: torch.as_tensor(v, device=self.device) for k, v in batch_np.items()}
         B, L = b["depth"].shape[:2]
-        class_idx = b["ray_class"].long()
+        kind_idx = b["kind"].long()
         obs = {
             "depth": b["depth"],
-            "class_onehot": F.one_hot(class_idx, NUM_RAY_CLASSES).float(),
+            "rgb": b["rgb"],
+            "kind_onehot": F.one_hot(kind_idx, NUM_RAY_KINDS).float(),
             "proprio": b["proprio"],
             "sound": b["sound"],
             "events": b["events"],
@@ -277,11 +299,13 @@ class DreamerBrain(Brain):
         prior = torch.stack(priors, dim=1)
 
         pred_depth = self.wm.head_depth(feat)
-        pred_class = self.wm.head_class(feat).view(B, L, self.wm.num_rays, NUM_RAY_CLASSES)
+        pred_rgb = self.wm.head_rgb(feat).view(B, L, self.wm.num_rays, 3)
+        pred_kind = self.wm.head_kind(feat).view(B, L, self.wm.num_rays, NUM_RAY_KINDS)
         pred_proprio = self.wm.head_proprio(feat)
         loss_depth = F.mse_loss(pred_depth, b["depth"], reduction="none").sum(-1)
-        loss_class = (
-            F.cross_entropy(pred_class.flatten(0, 2), class_idx.flatten(), reduction="none")
+        loss_rgb = F.mse_loss(pred_rgb, b["rgb"], reduction="none").sum((-1, -2))
+        loss_kind = (
+            F.cross_entropy(pred_kind.flatten(0, 2), kind_idx.flatten(), reduction="none")
             .view(B, L, -1)
             .sum(-1)
         )
@@ -312,7 +336,7 @@ class DreamerBrain(Brain):
         loss_ens = torch.stack(ens_losses).mean(0)
 
         model_loss = (
-            loss_depth + loss_class + loss_proprio + loss_reward + loss_cont + loss_kl
+            loss_depth + loss_rgb + loss_kind + loss_proprio + loss_reward + loss_cont + loss_kl
         ).mean() + loss_ens.mean()
         self.opt_model.zero_grad()
         model_loss.backward()
@@ -400,7 +424,8 @@ class DreamerBrain(Brain):
         self._metrics = {
             "loss_model": float(model_loss.detach()),
             "pred_error_depth": float(loss_depth.detach().mean() / self.wm.num_rays),
-            "pred_error_class": float(loss_class.detach().mean() / self.wm.num_rays),
+            "pred_error_rgb": float(loss_rgb.detach().mean() / self.wm.num_rays),
+            "pred_error_kind": float(loss_kind.detach().mean() / self.wm.num_rays),
             "kl": float(loss_kl.detach().mean()),
             "curiosity": float(real_disagreement.mean()),
             "curiosity_scaled": float(

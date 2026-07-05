@@ -72,11 +72,14 @@ Files: `blocks.py`, `grid.py`, `terrain.py`, `physics.py`, `entities.py`, `sensi
 ## Sensing/action contract — `interface.py` (the stable wall between world and brains)
 
 ```python
-Observation (TypedDict):
-  rays:    float32 (R, 17)   # ray fan: depth + 16-way class one-hot (blocks/robot/item/dormant/none)
-                             # default R=32 (2 pitch rows × 16 over 144°); config option: ray-GRID
-                             # "semantic camera" (16×16=256 rays) for richer vision at cloud scale
-  proprio: float32 (15)      # body-frame vel, yaw sin/cos, energy, integrity, held, touch(4), light, fatigue
+Observation (TypedDict):                # OBS_VERSION 3: color vision + gaze
+  rays:    float32 (R, 8)    # depth + shaded RGB + 4-way hit-kind one-hot (block/robot/dormant/none).
+                             # Block identity is carried only by color (palette × face shade ×
+                             # per-voxel grain × daylight); misses see the sky. Default R=144
+                             # (6 pitch rows +30..-50° × 24 over 160°, range 32). Stage 2 option:
+                             # full RGB-D camera image + CNN encoder, behind a flag, at cloud scale.
+  proprio: float32 (17)      # body-frame vel, yaw sin/cos, energy, integrity, held, touch(4),
+                             # light, fatigue, gaze pitch/yaw
   sound:   float32 (4)       # distance-weighted neighbor signals + world cries (r=12), bearing of loudest
   events:  float32 (4)       # ate, took_damage, dig_success, bumped_robot
 
@@ -84,7 +87,13 @@ Action (frozen dataclass):
   drive:   float32 (2)       # forward ∈[-1,1], turn ∈[-1,1]
   gripper: int               # 0 noop | 1 dig/grab | 2 place/drop | 3 eat/use
   signal:  float32 (2)       # broadcast on sound channel
+  gaze:    float32 (2)       # head pitch/yaw targets ∈[-1,1] × body gaze range; None = straight.
+                             # Eyes look, arms reach: the gripper stays on the body heading.
 ```
+
+Appearance is one definition (`blocks.py`): palette color, per-face shade, deterministic
+per-voxel luminance grain (a pure hash of position — texture, not noise), and a daylight
+factor, shared by ray sensing and the Rerun mesher, so the viewer sees what agents see.
 
 Raycasting: Amanatides–Woo voxel DDA, vectorized across all rays of all agents in one numpy call; entity hits via neighbor pass. Contract versioned (`OBS_VERSION` checked on brain checkpoint load).
 
@@ -92,7 +101,7 @@ Raycasting: Amanatides–Woo voxel DDA, vectorized across all rays of all agents
 
 **Interface** (`base.py`): `act(obs) -> Action` (records transition), `learn() -> metrics|None` (one bounded step), `introspect() -> dict` (curiosity, pred error, value, reward components → observability), `state_dict/load_state_dict`. `registry.py` maps YAML `kind:` → constructor; mixed populations are one config list.
 
-**Scripted baselines** (`scripted.py`): `RandomWalkerBrain`, `ScriptedForagerBrain` (seek BUSH_RIPE rays, eat, avoid water, idle at night). In-world control group + economy calibration probes (tune so forager thrives, walker dies).
+**Scripted baselines** (`scripted.py`): `RandomWalkerBrain`, `ScriptedForagerBrain` (seek ripe-red rays by nearest palette chroma — brightness-invariant, so shading/grain/daylight don't fool it —, eat, avoid water, idle at night). In-world control group + economy calibration probes (tune so forager thrives, walker dies).
 
 **DreamerBrain** (`dreamer/{networks,rssm,buffer,brain}.py`) — full DreamerV3 recipe, implemented in-repo (reference: danijar/dreamerv3, NM512/dreamerv3-torch), sized to our low-dim obs:
 
