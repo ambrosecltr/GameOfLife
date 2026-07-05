@@ -10,11 +10,14 @@ future analysis notebooks read. Rerun charts are a *view*; these are the data.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
 
 from gol_world.blocks import Block
 from gol_world.world import World
+
+IntrospectionFn = Callable[[], dict[str, dict[str, float]]]
 
 
 class NdjsonWriter:
@@ -31,10 +34,16 @@ class NdjsonWriter:
 class RunLogs:
     """Drains world events every tick and samples metrics every N ticks."""
 
-    def __init__(self, save_dir: Path, metrics_every_ticks: int) -> None:
+    def __init__(
+        self,
+        save_dir: Path,
+        metrics_every_ticks: int,
+        introspection: IntrospectionFn | None = None,
+    ) -> None:
         self.events = NdjsonWriter(save_dir / "events.ndjson")
         self.metrics = NdjsonWriter(save_dir / "metrics.ndjson")
         self.metrics_every = metrics_every_ticks
+        self.introspection = introspection
 
     def on_tick(self, world: World) -> None:
         for event in world.consume_events():
@@ -60,6 +69,14 @@ class RunLogs:
                 for r in world.robots.values()
             },
         }
+        if self.introspection is not None:
+            brains = {
+                rid: {k: round(v, 5) for k, v in m.items()}
+                for rid, m in self.introspection().items()
+                if m
+            }
+            if brains:
+                record["brains"] = brains
         self.metrics.write(record)
 
     def close(self) -> None:

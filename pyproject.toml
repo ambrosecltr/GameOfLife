@@ -49,6 +49,13 @@ mypy_path = "packages/world:packages/brains:packages/runtime:packages/obs"
 module = ["rerun", "rerun.*"]
 ignore_missing_imports = true
 
+# torch.distributions and Tensor.backward ship without type annotations;
+# strict mode would force ignores on every call site in the dreamer modules.
+[[tool.mypy.overrides]]
+module = ["gol_brains.dreamer.*"]
+disallow_untyped_calls = false
+warn_return_any = false
+
 [tool.pytest.ini_options]
 testpaths = ["packages"]
 markers = ["slow: long-running smoke tests"]

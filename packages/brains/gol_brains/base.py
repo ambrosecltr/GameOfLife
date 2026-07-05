@@ -37,3 +37,9 @@ class Brain(ABC):
     def load_state_dict(self, state: dict[str, Any]) -> None:
         """Restore checkpointed state. Stateless brains ignore it."""
         del state  # nothing to restore by default
+
+    def reset_stream(self) -> None:  # noqa: B027 - optional hook, no-op by default
+        """Called when this brain wakes up in a new body (lineage respawn).
+
+        Weights and memory persist; only the live recurrent state resets.
+        """

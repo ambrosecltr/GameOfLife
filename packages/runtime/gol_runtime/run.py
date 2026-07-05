@@ -20,7 +20,7 @@ from gol_world.world import World
 from gol_runtime.config import load_run_config
 from gol_runtime.control import ControlServer
 from gol_runtime.loop import SimLoop
-from gol_runtime.scheduler import Population
+from gol_runtime.scheduler import LearnerThread, Population
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +40,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--headless", action="store_true", help="no viewer, unpaced")
     parser.add_argument("--ticks", type=int, default=None, help="stop after N ticks")
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        help="learn inline on the sim thread (deterministic; for tests/debugging)",
+    )
     parser.add_argument(
         "--rrd", type=Path, default=None, help="record to a .rrd file instead of spawning a viewer"
     )
@@ -71,7 +76,11 @@ def main(argv: list[str] | None = None) -> int:
     from gol_obs.logs import RunLogs
 
     population = Population(world, run_cfg)
-    logs = RunLogs(save_dir, run_cfg.observability.metrics_every_ticks)
+    logs = RunLogs(
+        save_dir,
+        run_cfg.observability.metrics_every_ticks,
+        introspection=population.introspection,
+    )
     if exists:
         ckpt = persistence.latest_checkpoint(save_dir)
         if ckpt is not None:
@@ -91,21 +100,37 @@ def main(argv: list[str] | None = None) -> int:
         def log_frame(w: World) -> None:
             logger.log_frame(w, obs=population.last_obs, introspection=population.introspection())
 
+    def act_step(w: World) -> None:
+        population.act_step(w)
+        if args.sync:
+            population.sync_learn()
+
     loop = SimLoop(
         world,
         save_dir,
         run_cfg,
         log_frame=log_frame,
         brain_states=population.brain_states,
-        act_step=population.act_step,
+        act_step=act_step,
         on_tick=logs.on_tick,
     )
     ControlServer(loop, port=run_cfg.control_port).start()
+    learner = None
+    if not args.sync and population.learning_ids():
+        learner = LearnerThread(population)
+        learner.start()
+        print(f"learner thread running for {len(population.learning_ids())} brain(s)")
     try:
         loop.run(max_ticks=args.ticks, paced=not args.headless)
     except KeyboardInterrupt:
         print(f"\nstopping; checkpointing at tick {world.tick}...")
+        if learner is not None:
+            learner.stop()
+            learner = None
         loop.checkpoint()
+    finally:
+        if learner is not None:
+            learner.stop()
     print(f"world is at tick {world.tick} ({world.tick / run_cfg.tick_rate:.0f}s of sim time)")
     return 0
 

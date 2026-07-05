@@ -14,7 +14,7 @@ devices:
 population:
   target: 16
   respawn_delay_ticks: 1200
-  inherit_weights: none
+  inherit_weights: lineage
   mix:
     - brain: configs/brain/dreamer.yaml
       count: 12

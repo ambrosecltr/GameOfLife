@@ -12,10 +12,8 @@ reward:
   curiosity_mask_agents: false  # ablation: mask other-robot ray classes from curiosity
 
 world_model:
-  stoch_classes: 24           # categorical latents: classes x groups
-  stoch_groups: 24
+  # Latent sizes come from the preset (nano 16x16, small 24x24, base 32x32).
   kl_free_bits: 1.0
-  kl_balance: 0.8
   unimix: 0.01
   ensemble_size: 8            # Plan2Explore disagreement heads
 
@@ -30,7 +28,7 @@ replay:
   capacity: 500000            # act-steps; long buffer = ballast against nonstationarity
   batch_size: 16
   seq_len: 64
-  warmup_steps: 2000          # random actions until buffer has this many steps
+  warmup_steps: 500           # random actions until buffer has this many steps
 
 training:
   model_lr: 1.0e-4

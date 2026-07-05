@@ -24,7 +24,7 @@ def resolve_brain_config(spec: str | dict[str, Any]) -> dict[str, Any]:
     return spec
 
 
-def build_brain(spec: str | dict[str, Any], seed: int) -> Brain:
+def build_brain(spec: str | dict[str, Any], seed: int, device: str = "cpu") -> Brain:
     cfg = resolve_brain_config(spec)
     kind = cfg.get("kind")
     if kind == "random_walker":
@@ -32,5 +32,11 @@ def build_brain(spec: str | dict[str, Any], seed: int) -> Brain:
     if kind == "scripted_forager":
         return ScriptedForagerBrain(seed=seed)
     if kind == "dreamer":
-        raise NotImplementedError("the dreamer brain arrives with milestone M3")
+        from gol_brains.dreamer import DreamerBrain
+
+        return DreamerBrain(cfg, seed=seed, device=device)
     raise ValueError(f"unknown brain kind: {kind!r}")
+
+
+def is_learning_kind(spec: str | dict[str, Any]) -> bool:
+    return resolve_brain_config(spec).get("kind") == "dreamer"
