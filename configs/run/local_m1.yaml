@@ -1,0 +1,30 @@
+# Local tier: M1 Pro. A couple of learning robots among scripted peers.
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20                 # sim ticks per wall second at speed 1.0
+act_every: 5                  # brains act every N ticks (4 Hz)
+checkpoint_interval_ticks: 30000
+control_port: 7301
+
+devices:
+  inference: cpu              # tiny per-agent forwards; CPU beats MPS at this size
+  learning: mps               # falls back to cpu if MPS is unavailable or slower
+
+population:
+  target: 8
+  respawn_delay_ticks: 1200
+  inherit_weights: none       # none | random_living (cultural transmission experiments)
+  mix:
+    - brain: configs/brain/dreamer.yaml
+      count: 2
+    - brain: { kind: scripted_forager }
+      count: 4
+    - brain: { kind: random_walker }
+      count: 2
+
+observability:
+  rerun: true
+  rerun_fps: 10
+  metrics_every_ticks: 100
+  rrd_rotate_sim_hours: 6

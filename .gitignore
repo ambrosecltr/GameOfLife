@@ -1,0 +1,15 @@
+# Environments & caches
+.venv/
+__pycache__/
+*.py[cod]
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# Persistent worlds & recordings (each save dir is a long-running experiment)
+saves/
+*.rrd
+
+# OS
+.DS_Store

@@ -1,0 +1,30 @@
+# Cloud tier: single CUDA GPU (RTX 4090-class). A living population.
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7301
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 16
+  respawn_delay_ticks: 1200
+  inherit_weights: none
+  mix:
+    - brain: configs/brain/dreamer.yaml
+      count: 12
+    - brain: { kind: scripted_forager }
+      count: 2
+    - brain: { kind: random_walker }
+      count: 2
+
+observability:
+  rerun: true                 # stream over SSH tunnel, or record .rrd and sync back
+  rerun_fps: 10
+  metrics_every_ticks: 100
+  rrd_rotate_sim_hours: 6

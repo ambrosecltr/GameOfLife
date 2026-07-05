@@ -1,0 +1,37 @@
+# World rules: terrain, ecology, and the energy economy.
+# Everything an agent's survival depends on is tunable here — this file is the
+# difficulty dial for the whole simulation.
+
+seed: 7
+size: [256, 256, 64]          # x, y, z (blocks)
+day_length_ticks: 24000       # 20 min of sim time at 20 ticks/s
+
+terrain:
+  height_base: 24             # mean terrain height
+  height_amp: 14              # fBm amplitude (blocks)
+  octaves: 4
+  water_level: 22             # basins below this fill with water
+  ore_pockets: 60             # random pockets inside rock
+  ore_pocket_size: 4          # ~blocks per pocket
+  bush_density: 0.012         # bushes per grass column
+
+ecology:
+  regrow_ticks: 12000         # half a day, on average
+  regrow_jitter: 3000         # +/- uniform jitter
+  regrow_daytime_only: true   # night scarcity is the core survival pressure
+
+economy:
+  energy_max: 100.0
+  integrity_max: 100.0
+  basal_drain: 0.002          # per tick, just existing
+  move_cost: 0.008            # per tick at full drive
+  turn_cost: 0.002            # per tick at full turn rate
+  climb_cost: 0.15            # per 1-block step climbed
+  dig_cost: 0.5               # per dig action
+  place_cost: 0.1
+  signal_cost: 0.01           # per act-step at full signal amplitude
+  eat_energy: 35.0            # energy restored per BUSH_RIPE / fruit
+  water_speed_mult: 0.5
+  water_drain_mult: 3.0
+  fall_damage_per_block: 8.0  # per block beyond 3
+  hibernate_integrity_drain: 0.001  # per tick while dormant

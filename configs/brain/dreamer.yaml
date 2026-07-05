@@ -1,0 +1,40 @@
+# DreamerV3-style brain. One instance of this config per learning robot.
+# Presets scale the model; everything else follows the published recipe.
+
+kind: dreamer
+preset: nano                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
+
+reward:
+  w_curiosity: 1.0            # Plan2Explore ensemble disagreement
+  w_homeostasis: 1.0          # ate / took_damage / low-energy pressure
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  curiosity_mask_agents: false  # ablation: mask other-robot ray classes from curiosity
+
+world_model:
+  stoch_classes: 24           # categorical latents: classes x groups
+  stoch_groups: 24
+  kl_free_bits: 1.0
+  kl_balance: 0.8
+  unimix: 0.01
+  ensemble_size: 8            # Plan2Explore disagreement heads
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  replay_ac: false            # ablation: actor-critic on replayed latents instead
+
+replay:
+  capacity: 500000            # act-steps; long buffer = ballast against nonstationarity
+  batch_size: 16
+  seq_len: 64
+  warmup_steps: 2000          # random actions until buffer has this many steps
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  train_ratio: 0.25           # target updates per act-step (learner may skip under load)
