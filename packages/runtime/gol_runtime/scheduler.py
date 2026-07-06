@@ -253,8 +253,14 @@ class LearnerThread:
     """
 
     # An indebted brain may owe at most this many updates; anything beyond is
-    # dropped (that's the "skip" in skip-don't-stall).
-    MAX_DEBT = 32.0
+    # dropped (that's the "skip" in skip-don't-stall). Sized to hold roughly a
+    # full awake burst (~3-8k ticks ≈ 600-1600 act-steps) so that when the
+    # body hibernates, the learner works through the day's banked experience —
+    # sleep pays the day's debt, which is the Dreamer premise. Too small and
+    # dormancy-heavy lives (beta_07: ~93% dormant) starve the learner while
+    # the GPU idles; unbounded and a sprinting world banks an unpayable
+    # backlog of stale data.
+    MAX_DEBT = 1024.0
 
     def __init__(self, population: Population, idle_seconds: float = 0.1) -> None:
         self.population = population
