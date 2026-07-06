@@ -183,6 +183,33 @@ Holding `speed 3` — ratio is not sagging, so no reason to slow down (~9 h to 3
 - Mirror sync had not been running on the laptop; started (15-min loop). Resume
   forgiveness confirmed harmless: updates ≈ acts − 500 within one debt cap.
 
+### Second checkpoint (~1.49M, halfway)
+
+Run healthy (ratio_eff 0.94, disk 26%, no new learner crashes; GPU idles at 0% during
+dormant spells as designed). All 1.06M trends continue, three sharpenings:
+
+- **Stimulation now sits ON the boredom gate** (0.51–0.66 vs the ~0.5 threshold);
+  `lp_stale_frac` reached 0.39–0.41; `value` down 40% from its 678 peak to ~413. The
+  decay branch of P1 is fully real. **But boredom does not *accumulate*** — it
+  flickers at 1e-4–1e-3 on every dreamer generation (16 dreamers now) and never
+  builds. Gate reachable ≠ gate dwelled-in.
+- **P2 is inverting, not just flat.** Dreamer eats per 100k ticks collapsed:
+  8, 8, 12, 10, 4, 1, 9, 3, 1, 5, 0, 1, 1, 4, 3 — the 1.0–1.1M window had *zero*
+  dreamer eats. And dreamer lifespans are eerily clock-like: the last six dreamer
+  deaths span 340,855–352,413 ticks (±2%), while foragers range 403k–556k. Lifespan
+  looks wear/hibernation-determined with behavior contributing nothing — the
+  hibernation treadmill unbroken, just with a longer period than beta_07's.
+- **The P3 suspect keeps strengthening:** `curiosity_scaled` climbed further
+  (1.36 → 1.70) as raw stimulation fell — the running-std normalizer is actively
+  re-inflating curiosity's scale, ~20% more since 1.06M. Policy entropy still
+  falling (now ~2.3–3.2).
+
+Watch for the close: if 1.5M more ticks of on-the-gate stimulation never converts to
+dwelled-in boredom or a single upturn in eating, the round's answer is "capacity was
+necessary but not sufficient — the std-only relative normalization (and possibly the
+boredom accumulator's time constants) is the binding design flaw," which is P3 in
+slow motion rather than the pinned-at-clamp version pre-registered.
+
 ## Results
 
 *(pending)*
