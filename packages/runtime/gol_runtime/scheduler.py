@@ -313,7 +313,7 @@ class LearnerThread:
             for rid, worker in list(self._workers.items()):
                 if not worker.is_alive():
                     self._workers.pop(rid, None)
-            for rid in list(self._seen_acts):
+            for rid in list(self._seen_acts.keys() | self._owed.keys()):
                 if rid not in self.population.brains:
                     self._seen_acts.pop(rid, None)
                     self._owed.pop(rid, None)
@@ -334,8 +334,14 @@ class LearnerThread:
                 continue
             with lock:
                 result = brain.learn()
+            # learn() runs long (0.25-0.7s on GPU); the body may have died and
+            # the supervisor pruned our pacing state in the meantime. End the
+            # watch instead of raising on (or resurrecting) the missing key.
+            owed = self._owed.get(rid)
+            if owed is None:
+                return
             if result is None:
                 # Nothing learnable yet (warmup): don't bank debt for it.
                 self._owed[rid] = 0.0
             else:
-                self._owed[rid] -= 1.0
+                self._owed[rid] = owed - 1.0

@@ -90,6 +90,50 @@ def test_workers_pay_debt_exactly_then_idle() -> None:
     assert [b.learned for b in brains.values()] == [20, 20, 20]
 
 
+class BlockingBrain(CountingBrain):
+    """learn() blocks until released, so a test can act mid-update."""
+
+    def __init__(self, ratio: float) -> None:
+        super().__init__(ratio)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def learn(self) -> dict[str, float] | None:
+        self.entered.set()
+        self.release.wait(2.0)
+        return super().learn()
+
+
+def test_worker_survives_prune_during_learn() -> None:
+    """Body dies while learn() holds the GPU: the worker exits cleanly instead
+    of dying on the pruned pacing key (KeyError seen live on beta_08)."""
+    brain = BlockingBrain(ratio=1.0)
+    pop = FakePopulation({"dreamer_007": brain})
+    lt = LearnerThread(cast(Population, pop), idle_seconds=0.01)
+    lt._accrue("dreamer_007", brain)  # first-sight baseline
+    brain.acts = 10  # owes 10 updates -> worker enters learn()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            lt._work("dreamer_007")
+        except BaseException as exc:  # noqa: BLE001 - the bug was an escaping KeyError
+            errors.append(exc)
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    assert brain.entered.wait(2.0)
+    # Agent dies mid-update; supervisor reaps the body and prunes pacing state.
+    del pop.brains["dreamer_007"]
+    lt._seen_acts.pop("dreamer_007", None)
+    lt._owed.pop("dreamer_007", None)
+    brain.release.set()
+    worker.join(timeout=2.0)
+    assert not worker.is_alive()
+    assert errors == []
+    assert "dreamer_007" not in lt._owed  # not resurrected by post-learn bookkeeping
+
+
 def test_dead_brain_pacing_state_pruned() -> None:
     brain = CountingBrain(ratio=1.0)
     pop = FakePopulation({"dreamer_000": brain})
