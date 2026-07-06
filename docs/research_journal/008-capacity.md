@@ -115,9 +115,22 @@ SSH (direct TCP; the `ssh.runpod.io` proxy is PTY-only — no command exec, no r
 - **Population/learning pulse, on the pod:** `cd ~/GameOfLife && uv run gol-stats
   saves/beta_08 [--compare|--interests|--circadian]`.
 - **Capacity gauges** (the numbers this round is about): grep the tail of
-  `saves/beta_08/metrics.ndjson` for `train_ratio_eff` (should climb to ≈1.0 via
-  dormancy catch-up), `learn_seconds` (~0.25–0.65 s/update, 3 workers),
-  `act_latched_frac` (≈0 when paced), `updates` vs `act_steps`.
+  `saves/beta_08/metrics.ndjson` for `train_ratio_eff` (climbs toward ≈1.0 over life),
+  `learn_seconds` (~0.25–0.65 s/update, 3 workers), `updates` vs `act_steps`.
+  **How to read them:** `updates = act_steps − 500` exactly (warmup acts carry no
+  debt), so ratio_eff asymptotes to 1.0 rather than sitting there from birth. GPU at
+  0%/P8 with all dreamers dormant means debt fully paid — correct, not stalled;
+  verify with the updates↔acts identity. `act_latched_frac` runs ~0.4, NOT ≈0: at
+  ratio 1.0 the learner is always mid-update during awake bursts and act() latches —
+  the known artifact is the price of full density (a lock-free weight snapshot for
+  act() is the future fix if it matters).
+- **Speed policy (35-min sanity, tick 20k):** enforcement verified exact (updates =
+  acts − 500 on all three dreamers). Because dreamers are dormant most of the time,
+  the GPU keeps up far below capacity — raised to `gol-ctl speed 3` (~60 t/s, 3M in
+  ~14 h ≈ $3 instead of 42 h ≈ $9). Debt banks during awake bursts (cap 1024) and
+  drains during sleep, so time-averaged ratio holds ≈1.0 while awake fraction stays
+  low. **If dreamers get much more active later (the P2 hope), ratio_eff will sag —
+  check it, and `gol-ctl speed 1` to restore full density at the cost of wall-clock.**
 - **Control:** `uv run gol-ctl pause|resume|speed <x>|checkpoint` on the pod
   (port 7301). A clean stop is `gol-ctl checkpoint`, then ONE Ctrl-C in tmux.
 - **Mirror home** (run on the laptop; spot-kill insurance + local analysis):
