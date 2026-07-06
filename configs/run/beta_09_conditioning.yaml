@@ -1,0 +1,55 @@
+# Experiment: the conditioning round (round 009; runs after round 008 closed).
+#
+# Round 008 bought capacity and proved it necessary but not sufficient: the
+# model converged and curiosity decayed, but the running-std normalizer
+# re-inflated the signal (curiosity_scaled 0.09→1.86), the cold-start trickle
+# floored stimulation near the boredom gate, and boredom — an instantaneous
+# gate product with no accumulator — never built pressure. This config moves
+# ONLY the signal-conditioning knobs (all in beta_09_dreamer.yaml: anchored
+# normalization, trickle annealing, boredom pressure). Capacity bundle (base
+# preset, train_ratio 1.0, cuda), world, population, seed protocol: identical
+# to beta_08, which is the A/B baseline. Foragers remain the cross-run anchor.
+#
+# PACING — same rule as round 008: train_ratio is updates per lived act-step,
+# so world speed and achieved ratio trade off exactly (achieved ratio ≈
+# U ÷ (ticks/s ÷ 5 × 3), U ≈ 3 ÷ learn_seconds with per-brain workers). Run
+# PACED (no --headless), read learn_seconds off early metrics, set gol-ctl
+# speed so train_ratio_eff holds ≈ 1.0. beta_08 measured: dreamers dormant
+# most of the time lets speed 3 (~60 t/s) hold ratio ~0.95 via sleep-learning
+# catch-up (debt cap 1024); if awake fraction rises, drop to speed 1.
+# 12 h at speed 3 ≈ 2.6M ticks ≈ $2.60 on a $0.22/hr 3090 box.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/beta_09 \
+#       --config configs/run/beta_09_conditioning.yaml
+#
+# Watch list (first checkpoint + mid-run): boredom_pressure (should charge
+# where 008's stimulation sat on the gate), curiosity_scaled (must NOT rise
+# after the anchor freezes ~1000 updates in), lp_mix_eff (→ 0 by ~1500
+# act-steps), and the 008 behavior gauges (eats/100k, death-ledger mix).
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7301
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/beta_09_dreamer.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: false                # round-008 lesson: full-fps .rrd grows ~80 MB/min and
+                              # fills a cloud disk mid-run; enable deliberately (low
+                              # fps + rotation) only if the round needs eye candy
+  metrics_every_ticks: 100

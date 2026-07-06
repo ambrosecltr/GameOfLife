@@ -64,14 +64,24 @@ def mlp(in_dim: int, hidden: int, out_dim: int, layers: int = 2) -> nn.Sequentia
 
 
 class RunningMeanStd:
-    """Numerically stable running statistics (Welford), for reward scaling."""
+    """Numerically stable running statistics (Welford), for reward scaling.
 
-    def __init__(self, eps: float = 1e-8) -> None:
+    anchor > 0 freezes the statistics once `count` reaches it: the scale
+    calibrates on early life and then holds, so a signal that genuinely
+    decays reads as decayed instead of being re-normalized toward its own
+    shrinkage (the round-008 hedonic-treadmill finding). 0 = legacy
+    lifetime statistics.
+    """
+
+    def __init__(self, eps: float = 1e-8, anchor: float = 0.0) -> None:
         self.mean = 0.0
         self.var = 1.0
         self.count = eps
+        self.anchor = anchor
 
     def update(self, x: torch.Tensor) -> None:
+        if self.anchor > 0 and self.count >= self.anchor:
+            return
         flat = x.detach().reshape(-1)
         if flat.numel() == 0:
             return

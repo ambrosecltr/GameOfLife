@@ -1,0 +1,124 @@
+# Signal-conditioning variant of beta_08_dreamer.yaml — the round-009 brain.
+# Capacity stays fixed at the beta_08 bundle (preset base, train_ratio 1.0,
+# cuda); EXACTLY three conditioning knobs are new, each fixing an instrumented
+# round-008 failure:
+#
+#   reward.norm_anchor_samples  — beta_08: curiosity_scaled rose 0.09→1.86
+#     while raw LP decayed (lifetime running-std re-normalizes a decaying
+#     signal toward its own shrinkage). Anchored: calibrate the scale on
+#     early life, then freeze — convergence reads as satisfaction.
+#   lp.mix_anneal_steps         — beta_08: the newborn cold-start trickle
+#     (0.1 × normalized disagreement) became a rising adult floor worth ~40%
+#     of the boredom stim gate. Annealed out over early life. NB inherited
+#     newborns carry the donor's act_steps, so warm-started minds skip the
+#     trickle entirely — correct: they are not cold.
+#   boredom.pressure            — beta_08: stimulation sat ON the gate for
+#     650k ticks and boredom never exceeded 1.6e-3; the penalty was an
+#     instantaneous gate product with no state to accumulate in. Pressure
+#     mode integrates the gate on real experience (rise) and drains it when
+#     either gate shuts (decay); imagination pays pressure × gates.
+#
+# Everything else must stay byte-identical to beta_08_dreamer.yaml or the
+# conditioning A/B is confounded.
+
+kind: dreamer
+preset: base                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
+
+# body:                       # BodySpec overrides; defaults in gol_world/interface.py.
+#   ray_pitches_deg: [30, 12, 0, -12, -30, -50]   # 6 pitch rows, up and down
+#   rays_per_row: 24
+#   fov_deg: 160
+#   ray_range: 32
+#   gaze_pitch_max_deg: 45    # head range beyond the fixed fan (0 disables gaze)
+#   gaze_yaw_max_deg: 90
+
+reward:
+  w_curiosity: 1.0
+  w_homeostasis: 1.0
+  # Freeze both curiosity normalizers (disagreement + LP) after this many
+  # real samples (~1000 updates at batch 16 × seq 63 — early adulthood for a
+  # beta_08-pace dreamer). 0 = legacy lifetime running std (the treadmill).
+  norm_anchor_samples: 1000000
+  # Curiosity flavor. "lp" rewards learning progress (Oudeyer): the rate at
+  # which the world model's error is *falling* per region, so interest is a
+  # moving frontier — mastered things and unlearnable things (noise, other
+  # minds) both go stale, and path-dependence turns tiny early differences
+  # into individual interests. "disagreement" = legacy Plan2Explore (ablation).
+  curiosity: lp
+  lp:
+    partition: latent         # latent: own representation carves activities | kind: animate-presence buckets (ablation)
+    regions: 32               # latent k-means regions
+    ema_fast: 0.02            # per-update rates; the fast/slow gap is the progress signal
+    ema_slow: 0.002
+    centroid_lr: 0.05         # how fast regions track the drifting latent space
+    relative: true            # progress as a fraction of the region's error (scale-free)
+    mix_disagreement: 0.1     # trickle of the legacy signal so newborns still move
+    mix_anneal_steps: 1500    # trickle → 0 over this many act-steps (~2.5 sim-days at
+                              # beta_08 awake pace); 0 = legacy, never anneals
+  boredom:
+    weight: 0.02              # standing cost of being safe AND learning nothing (0 disables)
+    stim_threshold: 0.5       # normalized curiosity below this starts to bore
+    drive_threshold: 0.15     # drives below this level count as "needs met"
+    pressure: true            # leaky-integrated mood instead of instantaneous gates
+    pressure_rise: 0.002      # charge per fully-gated learn() (≈ per act-step at ratio 1.0);
+                              # sustained dull safety saturates in ~a sim-day of awake life
+    pressure_decay: 0.0002    # leak per learn(); lived relief drains in ~5000 updates
+  # Homeostasis flavor. "drive" is HRRL drive-reduction (Keramati & Gutkin):
+  # reward = movement of the internal state (energy, integrity, rest) toward
+  # setpoints, so valence is need-relative — the meal that saves a starving
+  # agent outweighs a snack at satiety, and nothing past a setpoint feels
+  # good. "events" is the legacy flat ate/damage bonus (ablation).
+  homeostasis: drive
+  drive:
+    scale: 3.0                # reward per unit of drive reduced (sizes an eat-when-starving ~like the old ate=1)
+    level_penalty: 0.01       # standing cost of unmet drives (the "it hurts to stay hungry" gradient)
+    pow_m: 3.0                # deficit exponent; with pow_n < pow_m the neediest drive dominates
+    pow_n: 2.0                # aggregate root
+    energy_setpoint: 0.85     # sated below full: eating past this earns nothing (satiation)
+    energy_weight: 1.0
+    integrity_setpoint: 1.0
+    integrity_weight: 1.0
+    rested_setpoint: 1.0      # any fatigue is a (convexly discounted) deficit
+    rest_weight: 0.5
+  # events-mode knobs (legacy ablation):
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  low_energy_graded: true     # penalty ramps toward zero energy (false: binary cliff, ablation)
+  curiosity_mask_agents: false  # ablation: mask other-robot ray hits from curiosity
+
+# Innate, heritable individuality: log-normal multipliers over the abstract
+# drive knobs (curiosity/homeostasis weights, per-drive weights, boredom,
+# entropy). Sampled at birth, mutated on random_living inheritance. Nothing
+# object-specific — who likes what must be discovered, not wired in.
+temperament:
+  enabled: true
+  sigma: 0.25                 # birth diversity (log-stddev of the multipliers)
+  mutation_sigma: 0.1         # extra drift applied when inheriting from a donor
+
+world_model:
+  # Latent sizes come from the preset (nano 16x16, small 24x24, base 32x32).
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8            # Plan2Explore disagreement heads
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  replay_ac: false            # ablation: actor-critic on replayed latents instead
+
+replay:
+  capacity: 500000            # act-steps; long buffer = ballast against nonstationarity
+  batch_size: 16
+  seq_len: 64
+  warmup_steps: 500           # random actions until buffer has this many steps
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  train_ratio: 1.0            # unchanged from beta_08: capacity is the held-fixed bundle.
+                              # Run paced; watch train_ratio_eff (see the pacing math in
+                              # beta_09_conditioning.yaml).

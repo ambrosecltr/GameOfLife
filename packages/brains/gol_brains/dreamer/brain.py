@@ -204,7 +204,13 @@ class DreamerBrain(Brain):
         # Ablation (research question 2): mask other robots out of the
         # curiosity target so agents aren't intrinsically drawn to each other.
         self.curiosity_mask_agents = bool(rw.get("curiosity_mask_agents", False))
-        self.curiosity_norm = RunningMeanStd()
+        # Round-009 signal conditioning: calibrate both curiosity normalizers
+        # on the first `norm_anchor_samples` real samples, then freeze the
+        # scale. Without an anchor the lifetime running std shrinks with the
+        # decaying signal and re-inflates it (beta_08: curiosity_scaled rose
+        # 0.09→1.86 while raw LP fell). 0 = legacy lifetime std.
+        self.norm_anchor = float(rw.get("norm_anchor_samples", 0))
+        self.curiosity_norm = RunningMeanStd(anchor=self.norm_anchor)
         # Curiosity flavor: "lp" rewards learning progress — the *derivative*
         # of competence over self-organized regions (Oudeyer), so interest is
         # a moving frontier and mastered or unlearnable things both go stale.
@@ -230,7 +236,12 @@ class DreamerBrain(Brain):
             relative=bool(lp_cfg.get("relative", True)),
         )
         self.lp_mix_disagreement = float(lp_cfg.get("mix_disagreement", 0.1))
-        self.lp_norm = RunningMeanStd()
+        # The trickle exists for newborn cold-start; annealed to zero over
+        # this many act-steps it stops subsidizing adult stimulation
+        # (beta_08: the rising normalized-disagreement floor was worth ~40%
+        # of the boredom stim gate late in life). 0 = legacy, never anneals.
+        self.lp_mix_anneal_steps = int(lp_cfg.get("mix_anneal_steps", 0))
+        self.lp_norm = RunningMeanStd(anchor=self.norm_anchor)
         # Boredom: a standing cost of being safe AND learning nothing — the
         # pressure that produces play, and the counterweight that stops an
         # agent coasting once its niche is mastered. Weight 0 disables.
@@ -238,6 +249,14 @@ class DreamerBrain(Brain):
         self.boredom_weight = float(bd.get("weight", 0.0))
         self.boredom_stim_threshold = float(bd.get("stim_threshold", 0.5))
         self.boredom_drive_threshold = float(bd.get("drive_threshold", 0.15))
+        # Pressure mode: boredom as a leaky-integrated mood over real
+        # experience, not an instantaneous gate product. Sustained
+        # gate-touching accumulates pressure; relief drains it (beta_08:
+        # stimulation sat on the gate for 650k ticks and boredom only ever
+        # flickered ≤1.6e-3 — there was no state for it to build in).
+        self.boredom_pressure_on = bool(bd.get("pressure", False))
+        self.boredom_pressure_rise = float(bd.get("pressure_rise", 0.002))
+        self.boredom_pressure_decay = float(bd.get("pressure_decay", 0.0002))
 
         # Temperament: innate, heritable individuality. Each newborn samples
         # log-normal multipliers over the abstract drive knobs; inheritance
@@ -299,6 +318,7 @@ class DreamerBrain(Brain):
         self._learn_seconds = 0.0  # EMA of learn() wall time
         self._gate_calm = 0.0  # boredom gate telemetry (imagination means)
         self._gate_dull = 0.0
+        self._boredom_pressure = 0.0  # leaky-integrated mood (pressure mode)
 
     def _apply_temperament(self) -> None:
         t, base = self.temperament, self._pre_temperament
@@ -468,7 +488,7 @@ class DreamerBrain(Brain):
             r_lp = self.lp_norm.normalize(self.lp.reward(idx)).clamp(0.0, 5.0)
             # A trickle of disagreement keeps a newborn moving before any
             # region has enough history to show progress.
-            r_cur = r_lp + self.lp_mix_disagreement * r_dis
+            r_cur = r_lp + self._lp_mix() * r_dis
         else:
             r_cur = r_dis
         reward = self.w_homeostasis * r_homeo + self.w_curiosity * r_cur
@@ -485,8 +505,22 @@ class DreamerBrain(Brain):
             self._gate_calm = float(calm.mean())
             self._gate_dull = float(dull.mean())
             bored = self.boredom_weight * calm * dull
+            if self.boredom_pressure_on:
+                # Pressure modulates the instantaneous gates: the penalty is
+                # only loud once dull safety has *persisted* (integrated on
+                # real experience in learn()), and the actor escapes it by
+                # imagining states that shut a gate — which, lived, drains
+                # the pressure.
+                bored = bored * self._boredom_pressure
             reward = reward - bored
         return reward, r_cur, bored
+
+    def _lp_mix(self) -> float:
+        """Cold-start disagreement trickle, annealed out over early life."""
+        if self.lp_mix_anneal_steps <= 0:
+            return self.lp_mix_disagreement
+        frac = 1.0 - self._act_steps / self.lp_mix_anneal_steps
+        return self.lp_mix_disagreement * max(0.0, frac)
 
     def experience_count(self) -> int:
         return self._act_steps
@@ -593,6 +627,26 @@ class DreamerBrain(Brain):
                 real_lp = self.lp.reward(idx)
                 self.lp_norm.update(real_lp)
                 lp_reward_mean = float(self.lp_norm.normalize(real_lp).clamp(0, 5.0).mean())
+            if self.boredom_weight > 0 and self.boredom_pressure_on:
+                # Integrate the mood on lived states, not imagined ones: how
+                # much of this batch of real experience was calm AND dull?
+                # Sustained gate-touching charges the pressure; lived relief
+                # (either gate shutting) lets it leak away.
+                r_dis_real = self.curiosity_norm.normalize(real_disagreement).clamp(0, 5.0)
+                if self.curiosity_mode == "lp":
+                    stim = self.lp_norm.normalize(real_lp).clamp(0.0, 5.0)
+                    stim = stim + self._lp_mix() * r_dis_real.reshape(-1)
+                else:
+                    stim = r_dis_real.reshape(-1)
+                drive = self._drive_level(b["proprio"][:, :-1]).reshape(-1)
+                calm_r = (1.0 - drive / self.boredom_drive_threshold).clamp(min=0.0)
+                dull_r = (1.0 - stim / self.boredom_stim_threshold).clamp(min=0.0)
+                gate = float((calm_r * dull_r).mean())
+                pressure = self._boredom_pressure
+                pressure += (
+                    self.boredom_pressure_rise * gate - self.boredom_pressure_decay * pressure
+                )
+                self._boredom_pressure = min(1.0, max(0.0, pressure))
 
         # --- actor-critic in imagination, from a subsample of posterior states
         flat = feat.detach().flatten(0, 1)  # (B*L, F) = concat(h, z)
@@ -697,6 +751,8 @@ class DreamerBrain(Brain):
         if self.curiosity_mode == "lp":
             self._metrics["lp_reward"] = lp_reward_mean
             self._metrics["lp_regions"] = float(self.lp.regions_seen())
+            if self.lp_mix_anneal_steps > 0:
+                self._metrics["lp_mix_eff"] = self._lp_mix()
             # Per-region LP telemetry — the "does interest go stale where the
             # model converges" instrument. Stale = a seen region whose raw LP
             # has fallen to ~nothing; occupancy entropy says whether the batch
@@ -717,6 +773,8 @@ class DreamerBrain(Brain):
             self._metrics["stimulation"] = float(r_cur.mean())
             self._metrics["boredom_calm_gate"] = self._gate_calm
             self._metrics["boredom_dull_gate"] = self._gate_dull
+            if self.boredom_pressure_on:
+                self._metrics["boredom_pressure"] = self._boredom_pressure
         return self._metrics
 
     def introspect(self) -> dict[str, float]:
@@ -748,6 +806,7 @@ class DreamerBrain(Brain):
             "lp_tracker": self.lp.state_dict(),
             "lp_norm": self.lp_norm.state_dict(),
             "return_scale": self._return_scale[0],
+            "boredom_pressure": self._boredom_pressure,
             "updates": self._updates,
             "act_steps": self._act_steps,
             "rng_state": self.rng.bit_generator.state,
@@ -781,6 +840,8 @@ class DreamerBrain(Brain):
             self.lp.load_state_dict(state["lp_tracker"])
             self.lp_norm.load_state_dict(state["lp_norm"])
         self._return_scale = [float(state["return_scale"])]
+        # Guarded: pre-pressure checkpoints start with a fresh mood.
+        self._boredom_pressure = float(state.get("boredom_pressure", 0.0))
         self._updates = int(state["updates"])
         # Guarded: pre-pacing checkpoints carry no act-step counter; seed it
         # at the stored buffer's size so the update/act-step pair stays
@@ -797,6 +858,10 @@ class DreamerBrain(Brain):
         temperament — the temperament mutated, so lineages drift through
         temperament space and transmission has something to select on."""
         self.load_state_dict(state)
+        # A newborn is not born jaded: inherited knowledge keeps the donor's
+        # boredom-relevant *scales* (normalizers ride state_dict), but the
+        # accumulated mood itself resets with the new body.
+        self._boredom_pressure = 0.0
         if self.temperament_enabled and self.temperament_mutation > 0:
             self.temperament = {
                 k: v * float(np.exp(self.rng.normal(0.0, self.temperament_mutation)))

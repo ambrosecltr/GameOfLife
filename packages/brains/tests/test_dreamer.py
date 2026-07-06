@@ -394,3 +394,89 @@ def test_masked_brain_learns() -> None:
         brain.act(fake_obs(rng))
     metrics = brain.learn()
     assert metrics is not None and np.isfinite(metrics["loss_model"])
+
+
+def test_norm_anchor_freezes_scale() -> None:
+    """Anchored normalization: a decaying signal reads as decayed (008 fix)."""
+    from gol_brains.dreamer.networks import RunningMeanStd
+
+    legacy = RunningMeanStd()
+    anchored = RunningMeanStd(anchor=1000)
+    rng = np.random.default_rng(0)
+    # Calibration era: both see the same loud signal.
+    for _ in range(10):
+        x = torch.as_tensor(rng.normal(0, 1.0, 200), dtype=torch.float32)
+        legacy.update(x)
+        anchored.update(x)
+    frozen_var = anchored.var
+    # Decay era: the signal shrinks 10x.
+    for _ in range(50):
+        x = torch.as_tensor(rng.normal(0, 0.1, 200), dtype=torch.float32)
+        legacy.update(x)
+        anchored.update(x)
+    assert anchored.var == frozen_var, "anchored stats must freeze after calibration"
+    small = torch.as_tensor(rng.normal(0, 0.1, 500), dtype=torch.float32)
+    # Anchored: normalized magnitude tracks the true decay. Legacy: the
+    # shrinking yardstick re-inflates it (the hedonic treadmill).
+    assert anchored.normalize(small).abs().mean() < legacy.normalize(small).abs().mean()
+    assert anchored.normalize(small).abs().mean() < 0.3
+
+
+def test_lp_mix_anneals_with_age() -> None:
+    cfg = dict(TINY, reward={"curiosity": "lp", "lp": {"mix_anneal_steps": 100}})
+    brain = DreamerBrain(cfg, seed=30)
+    assert brain._lp_mix() == brain.lp_mix_disagreement, "newborn gets the full trickle"
+    brain._act_steps = 50
+    assert abs(brain._lp_mix() - 0.5 * brain.lp_mix_disagreement) < 1e-9
+    brain._act_steps = 200
+    assert brain._lp_mix() == 0.0, "adults get no disagreement subsidy"
+    # Legacy: no anneal configured, the trickle is constant.
+    legacy = DreamerBrain(dict(TINY, reward={"curiosity": "lp"}), seed=31)
+    legacy._act_steps = 10**6
+    assert legacy._lp_mix() == legacy.lp_mix_disagreement
+
+
+def test_boredom_pressure_accumulates_and_resets() -> None:
+    cfg = dict(
+        TINY,
+        reward={
+            "homeostasis": "drive",
+            "boredom": {
+                # Wide-open gates: all experience is calm and dull, so the
+                # integrator charges at pressure_rise per learn().
+                "weight": 1.0,
+                "stim_threshold": 100.0,
+                "drive_threshold": 100.0,
+                "pressure": True,
+                "pressure_rise": 0.05,
+                "pressure_decay": 0.001,
+            },
+        },
+    )
+    brain = DreamerBrain(cfg, seed=32)
+    feat = torch.randn(6, brain.wm.rssm_cfg.feat_dim)
+    action = torch.randn(6, ACTION_DIM)
+    with torch.no_grad():
+        _, _, bored = brain._imagination_reward(feat, action)
+    assert (bored == 0).all(), "a fresh mind has no accumulated boredom"
+
+    rng = np.random.default_rng(9)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    m1 = brain.learn()
+    assert m1 is not None and m1["boredom_pressure"] > 0.0
+    m2 = brain.learn()
+    assert m2 is not None and m2["boredom_pressure"] > m1["boredom_pressure"], (
+        "sustained dull safety must build pressure"
+    )
+    with torch.no_grad():
+        _, _, bored = brain._imagination_reward(feat, action)
+    assert (bored > 0).all(), "charged pressure makes dull imagined states cost"
+
+    # Pressure survives a checkpoint; a warm-started newborn is not born jaded.
+    resumed = DreamerBrain(cfg, seed=33)
+    resumed.load_state_dict(brain.state_dict())
+    assert resumed._boredom_pressure == brain._boredom_pressure
+    child = DreamerBrain(cfg, seed=34)
+    child.inherit(brain.state_dict())
+    assert child._boredom_pressure == 0.0
