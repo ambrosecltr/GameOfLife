@@ -1,0 +1,47 @@
+# Experiment: the capacity round (round 008; runs after beta_07 closes).
+#
+# Rounds 005–006 concluded that learning capacity and experience density — not
+# reward design — are the binding constraint: beta_07's dreamers manage an
+# effective train_ratio of ~0.016 against a 0.25 target (~400 updates per
+# ~25k lived act-steps, learner backpressured on M1 CPU). This config moves
+# ONLY the capacity knobs: brain scale (nano → base), update budget
+# (train_ratio 0.25 → 1.0, in beta_08_dreamer.yaml), and devices (cpu → cuda).
+# World, population, seed protocol, and the entire gratification reward stack
+# are identical to beta_07, which serves as the local A/B. Foragers are the
+# cross-run anchor — if their numbers shift materially, the world moved, not
+# the brains.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/beta_08 \
+#       --config configs/run/beta_08_capacity.yaml --headless
+#
+# If 3× base is too slow on a 4090-class box (watch ticks/s and effective
+# train_ratio = updates/buffer in metrics), drop beta_08_dreamer.yaml to
+# preset: small before burning budget — a starved base model is the same
+# experiment we already ran locally.
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7301
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/beta_08_dreamer.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: true                 # stream over SSH tunnel, or record .rrd and sync back
+  rerun_fps: 10
+  metrics_every_ticks: 100
+  rrd_rotate_sim_hours: 6

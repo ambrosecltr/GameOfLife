@@ -73,6 +73,12 @@ class EconomyConfig:
     fatigue_rise_active: float = 0.00004  # additional per tick at full drive
     fatigue_recover: float = 0.000125  # per tick while resting (or dormant)
     rest_drive_threshold: float = 0.1  # |drive| below this counts as resting
+    # Sleep: resting is circadian. Recovery and rest-repair scale with darkness
+    # by (1 + night_rest_bonus * (1 - light)), so a night's sleep outperforms a
+    # midday nap, and a resting body burns less just existing. Neither mints
+    # energy — sleep pays by slowing the meter, never by running it backward.
+    rest_basal_mult: float = 0.6  # basal drain multiplier while resting (1 disables)
+    night_rest_bonus: float = 1.0  # extra recovery/repair at full darkness (0 disables)
     exhaustion_threshold: float = 0.9
     exhaustion_drain_mult: float = 1.5
     exhaustion_integrity_drain: float = 0.002

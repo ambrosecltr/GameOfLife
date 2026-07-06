@@ -162,8 +162,9 @@ class Population:
                 ]
                 if donors:
                     donor = donors[int(self.world.rng.integers(0, len(donors)))]
-                    brain.load_state_dict(donor.state_dict())
-                    brain.reset_stream()
+                    # inherit, not load: newborns keep the donor's mind but
+                    # mutate heritable traits (temperament) on the way in.
+                    brain.inherit(donor.state_dict())
         self.brains[robot_id] = brain
         self.kinds[robot_id] = kind
         self.locks[robot_id] = threading.Lock()

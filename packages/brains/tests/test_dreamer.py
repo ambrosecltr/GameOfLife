@@ -196,6 +196,160 @@ def test_curiosity_masking_erases_agents() -> None:
     torch.testing.assert_close(masked2["rgb"], rgb)
 
 
+def test_drive_reward_semantics() -> None:
+    """HRRL drive-reduction: valence is need-relative, satiation is automatic."""
+    cfg = dict(TINY, reward={"homeostasis": "drive"})
+    brain = DreamerBrain(cfg, seed=8)
+    proprio = torch.zeros(1, 7, PROPRIO_DIM)
+    proprio[..., 6] = 1.0  # full integrity
+    proprio[..., 14] = 0.0  # fully rested
+    # Energy: hungry, hungry, +0.2 meal, +0.2 meal, hold, +0.2 near-sated meal,
+    # then topping up past the setpoint.
+    proprio[0, :, 5] = torch.tensor([0.3, 0.3, 0.5, 0.7, 0.7, 0.9, 1.0])
+    events = torch.zeros(1, 7, EVENTS_DIM)
+    r = brain._homeostasis(events, proprio)[0]
+    assert r[2] > 0.1, "eating while starving is strongly rewarded"
+    assert r[2] > r[5], "the same 0.2 energy is worth more the hungrier you are"
+    assert abs(r[6]) < 1e-4, "eating past the setpoint earns nothing (satiation)"
+    assert r[1] < 0.0, "a standing deficit stings (level penalty)"
+
+    # Fatigue is a drive too: growing tiredness feels bad, winding down feels good.
+    proprio2 = torch.zeros(1, 3, PROPRIO_DIM)
+    proprio2[..., 5] = 1.0
+    proprio2[..., 6] = 1.0
+    proprio2[0, :, 14] = torch.tensor([0.2, 0.6, 0.3])
+    r2 = brain._homeostasis(torch.zeros(1, 3, EVENTS_DIM), proprio2)[0]
+    assert r2[1] < 0.0 and r2[2] > 0.0
+
+
+def test_drive_mode_brain_learns() -> None:
+    cfg = dict(TINY, reward={"homeostasis": "drive"})
+    brain = DreamerBrain(cfg, seed=9)
+    rng = np.random.default_rng(6)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    metrics = brain.learn()
+    assert metrics is not None and np.isfinite(metrics["loss_model"])
+    assert "drive_level" in metrics and metrics["drive_level"] >= 0.0
+
+
+def test_unknown_homeostasis_mode_rejected() -> None:
+    with pytest.raises(ValueError, match="homeostasis"):
+        DreamerBrain(dict(TINY, reward={"homeostasis": "vibes"}), seed=10)
+
+
+def test_online_regions_separate_clusters() -> None:
+    from gol_brains.dreamer.interest import OnlineRegions
+
+    torch.manual_seed(0)
+    regions = OnlineRegions(2, 4, lr=0.5, device=torch.device("cpu"))
+    a = torch.randn(64, 4) * 0.1 + torch.tensor([5.0, 0, 0, 0])
+    b = torch.randn(64, 4) * 0.1 + torch.tensor([-5.0, 0, 0, 0])
+    for _ in range(5):
+        regions.adapt(torch.cat([a, b]))
+    ia, ib = regions.assign(a), regions.assign(b)
+    assert (ia == ia[0]).all() and (ib == ib[0]).all(), "each cluster maps to one region"
+    assert ia[0] != ib[0], "distinct clusters land in distinct regions"
+
+
+def test_learning_progress_rewards_falling_error() -> None:
+    from gol_brains.dreamer.interest import LearningProgress
+
+    lp = LearningProgress(2, fast=0.5, slow=0.05, relative=False)
+    idx = torch.tensor([0] * 8 + [1] * 8)
+    # First sight seeds both EMAs: no progress from mere novelty.
+    lp.update(idx, torch.cat([torch.full((8,), 1.0), torch.full((8,), 1.0)]))
+    assert lp.lp().abs().max() < 1e-6
+    # Region 0's error falls (learnable frontier); region 1 stays flat (noise).
+    for err0 in (0.7, 0.5, 0.3, 0.2):
+        lp.update(idx, torch.cat([torch.full((8,), err0), torch.full((8,), 1.0)]))
+    assert lp.lp()[0] > 0.1
+    assert lp.lp()[1] < 1e-6
+    assert (lp.reward(torch.tensor([0])) > lp.reward(torch.tensor([1]))).all()
+    # Checkpoint roundtrip.
+    clone = LearningProgress(2, fast=0.5, slow=0.05, relative=False)
+    clone.load_state_dict(lp.state_dict())
+    torch.testing.assert_close(clone.lp(), lp.lp())
+
+
+def test_lp_brain_learns_with_boredom() -> None:
+    cfg = dict(
+        TINY,
+        reward={
+            "curiosity": "lp",
+            "homeostasis": "drive",
+            "boredom": {"weight": 0.05},
+        },
+    )
+    brain = DreamerBrain(cfg, seed=11)
+    rng = np.random.default_rng(7)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    metrics = brain.learn()
+    assert metrics is not None
+    for key in ("lp_reward", "lp_regions", "boredom", "stimulation", "drive_level"):
+        assert key in metrics and np.isfinite(metrics[key]), key
+    assert metrics["lp_regions"] >= 1
+    # LP machinery must survive a checkpoint.
+    fresh = DreamerBrain(cfg, seed=12)
+    fresh.load_state_dict(brain.state_dict())
+    torch.testing.assert_close(fresh.regions.centroids, brain.regions.centroids)
+    torch.testing.assert_close(fresh.lp.fast, brain.lp.fast)
+
+
+def test_kind_partition_brain_learns() -> None:
+    cfg = dict(TINY, reward={"curiosity": "lp", "lp": {"partition": "kind"}})
+    brain = DreamerBrain(cfg, seed=13)
+    rng = np.random.default_rng(8)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    metrics = brain.learn()
+    assert metrics is not None and np.isfinite(metrics["lp_reward"])
+
+
+def test_boredom_bites_only_when_enabled() -> None:
+    cfg = dict(
+        TINY,
+        reward={
+            "homeostasis": "drive",
+            "boredom": {"weight": 1.0, "stim_threshold": 100.0, "drive_threshold": 100.0},
+        },
+    )
+    brain = DreamerBrain(cfg, seed=14)
+    feat = torch.randn(6, brain.wm.rssm_cfg.feat_dim)
+    action = torch.randn(6, ACTION_DIM)
+    with torch.no_grad():
+        reward_bored, _, bored = brain._imagination_reward(feat, action)
+        brain.boredom_weight = 0.0
+        reward_free, _, none = brain._imagination_reward(feat, action)
+    assert (bored > 0).all(), "wide-open thresholds: everything is boring"
+    assert (none == 0).all()
+    assert (reward_bored < reward_free).all()
+
+
+def test_temperament_sampling_and_inheritance() -> None:
+    cfg = dict(TINY, temperament={"enabled": True, "sigma": 0.5, "mutation_sigma": 0.2})
+    parent = DreamerBrain(cfg, seed=20)
+    sibling = DreamerBrain(cfg, seed=21)
+    assert parent.temperament != sibling.temperament, "birth diversity"
+    assert parent.w_curiosity != sibling.w_curiosity
+    plain = DreamerBrain(TINY, seed=22)
+    assert all(v == 1.0 for v in plain.temperament.values()), "disabled -> neutral"
+
+    # Checkpoint restore is exact; inheritance mutates.
+    resumed = DreamerBrain(cfg, seed=23)
+    resumed.load_state_dict(parent.state_dict())
+    assert resumed.temperament == parent.temperament
+    assert abs(resumed.w_curiosity - parent.w_curiosity) < 1e-9
+    child = DreamerBrain(cfg, seed=24)
+    child.inherit(parent.state_dict())
+    assert child.temperament != parent.temperament, "mutation on inheritance"
+    ratios = [child.temperament[k] / parent.temperament[k] for k in child.temperament]
+    assert all(0.4 < r < 2.5 for r in ratios), "children resemble their parents"
+    # Effective knobs follow the mutated temperament.
+    assert abs(child.w_curiosity - parent.w_curiosity * ratios[0]) < 1e-9
+
+
 def test_masked_brain_learns() -> None:
     cfg = dict(TINY, reward={"curiosity_mask_agents": True})
     brain = DreamerBrain(cfg, seed=7)

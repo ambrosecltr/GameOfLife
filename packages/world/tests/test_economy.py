@@ -234,6 +234,54 @@ def test_fatigue_builds_active_recovers_at_rest() -> None:
     assert abs(robot.fatigue - max(0.0, peak - 200 * CFG.economy.fatigue_recover)) < 1e-6
 
 
+def test_resting_discounts_basal_drain() -> None:
+    def drained(mult: float) -> float:
+        eco = EconomyConfig(rest_basal_mult=mult)
+        cfg = WorldConfig(seed=5, size=(48, 48, 40), day_length_ticks=2000, economy=eco)
+        world = World.new(cfg)
+        rid = world.spawn_robot("bot_000", "test").id
+        robot = world.robots[rid]
+        robot.energy = 50.0  # under repair_threshold: repair can't touch the meter
+        for _ in range(200):
+            world.step()  # no drive: resting throughout
+        return 50.0 - robot.energy
+
+    sleeping = drained(CFG.economy.rest_basal_mult)
+    flat = drained(1.0)
+    assert abs(sleeping / flat - CFG.economy.rest_basal_mult) < 1e-6
+
+
+def test_night_rest_recovers_fatigue_faster() -> None:
+    def recovered(start_tick: int) -> float:
+        world = make_world()
+        rid = world.spawn_robot("bot_000", "test").id
+        robot = world.robots[rid]
+        robot.fatigue = 0.5
+        world.tick = start_tick
+        for _ in range(100):
+            world.step()
+        return 0.5 - robot.fatigue
+
+    by_day = recovered(500)  # sun high: light 1.0, no bonus
+    by_night = recovered(1500)  # deep night: light 0.0, full bonus
+    assert abs(by_night / by_day - (1.0 + CFG.economy.night_rest_bonus)) < 1e-6
+
+
+def test_night_repair_outpaces_day_repair() -> None:
+    def repaired(start_tick: int) -> float:
+        world = make_world()
+        rid = world.spawn_robot("bot_000", "test").id
+        robot = world.robots[rid]
+        robot.integrity = 50.0
+        world.tick = start_tick
+        for _ in range(100):
+            world.step()
+        return robot.ledger["repaired"]
+
+    ratio = repaired(1500) / repaired(500)
+    assert abs(ratio - (1.0 + CFG.economy.night_rest_bonus)) < 1e-6
+
+
 def test_exhaustion_bleeds_integrity_and_multiplies_drain() -> None:
     world = make_world()
     rid = world.spawn_robot("bot_000", "test").id
@@ -330,6 +378,7 @@ def test_repair_from_energy_surplus_while_resting() -> None:
     robot = world.robots[rid]
     robot.integrity = 50.0
     start_energy = robot.energy
+    world.tick = 400  # full daylight throughout: the circadian rest bonus stays 1x
     for _ in range(200):
         world.step()
     eco = CFG.economy
@@ -394,6 +443,7 @@ def test_rest_repairs_faster_than_activity() -> None:
         rid = world.spawn_robot("bot_000", "test").id
         robot = world.robots[rid]
         robot.integrity = 50.0
+        world.tick = 400  # full daylight: no circadian bonus muddying the ratio
         if drive is not None:
             world.apply_action(rid, drive)  # drive persists between act-steps
         for _ in range(100):

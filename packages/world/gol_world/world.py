@@ -491,9 +491,12 @@ class World:
             return
         activity = float(np.abs(robot.drive).max())
         resting = activity < eco.rest_drive_threshold
+        # Sleep is a night thing, discovered rather than scripted: the same
+        # stillness recovers faster in the dark.
+        night_factor = 1.0 + eco.night_rest_bonus * (1.0 - self.light_level)
         was_exhausted = robot.fatigue >= eco.exhaustion_threshold
         if resting:
-            robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover)
+            robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover * night_factor)
         else:
             robot.fatigue = min(
                 1.0, robot.fatigue + eco.fatigue_rise_base + eco.fatigue_rise_active * activity
@@ -502,7 +505,7 @@ class World:
         if exhausted and not was_exhausted:
             self._emit("exhausted", robot)
         drain = (
-            eco.basal_drain
+            eco.basal_drain * (eco.rest_basal_mult if resting else 1.0)
             + eco.move_cost * costs["moved"]
             + eco.climb_cost * costs["climbed"]
             + eco.signal_cost * float(np.abs(robot.signal).max())
@@ -536,7 +539,8 @@ class World:
                 if eco.senescence_halflife > 0
                 else 1.0
             )
-            rate = eco.repair_rate * efficiency * (eco.rest_repair_mult if resting else 1.0)
+            rest_mult = eco.rest_repair_mult * night_factor if resting else 1.0
+            rate = eco.repair_rate * efficiency * rest_mult
             amount = min(rate, eco.integrity_max - robot.integrity)
             if eco.repair_energy_per_point > 0:
                 surplus = robot.energy - eco.repair_threshold

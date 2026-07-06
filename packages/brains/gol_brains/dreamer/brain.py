@@ -2,8 +2,20 @@
 
 World model (encoder + RSSM + heads) trained on replayed sequences of the
 robot's own experience; behavior from an actor-critic trained in imagination;
-drives purely intrinsic: Plan2Explore ensemble disagreement (curiosity) +
-homeostasis (eat, avoid damage, keep energy up). No tasks, no resets.
+drives purely intrinsic — no tasks, no resets:
+
+- Curiosity: learning progress over self-organized latent regions (interest
+  as the derivative of competence; see interest.py), or legacy Plan2Explore
+  disagreement as an ablation.
+- Homeostasis: HRRL drive-reduction (Keramati & Gutkin) — reward is movement
+  of the internal state (energy, integrity, rest) toward setpoints, so the
+  same meal is worth more to a starving body than a sated one. The legacy
+  ate/damage event bonus remains as an ablation.
+- Boredom: a standing cost of being safe and learning nothing — the pressure
+  that produces play.
+- Temperament: heritable log-normal multipliers over the abstract drive
+  knobs, sampled at birth and mutated on inheritance. Individuality is seeded
+  abstractly; concrete interests must be discovered.
 """
 
 from __future__ import annotations
@@ -24,6 +36,8 @@ from gol_world.interface import (
     OBS_VERSION,
     PROPRIO_DIM,
     RAY_DIM,
+    RAY_KIND_DORMANT,
+    RAY_KIND_ROBOT,
     SIGNAL_DIM,
     SOUND_DIM,
     Action,
@@ -33,6 +47,7 @@ from gol_world.interface import (
 
 from gol_brains.base import Brain
 from gol_brains.dreamer.buffer import ReplayBuffer
+from gol_brains.dreamer.interest import LearningProgress, OnlineRegions
 from gol_brains.dreamer.networks import (
     RunningMeanStd,
     TanhNormal,
@@ -51,6 +66,23 @@ PRESETS: dict[str, dict[str, int]] = {
 # drive(2) + signal(2) + gaze(2) continuous, then gripper one-hot(4).
 CONT_DIM = 2 + SIGNAL_DIM + GAZE_DIM
 ACTION_DIM = CONT_DIM + NUM_GRIP_MODES
+
+# Innate individuality: log-normal multipliers on abstract, domain-general
+# knobs only — how strongly each drive weighs, how curious, how restless.
+# Never object-specific ("likes animals" must be discovered, not wired in).
+TEMPERAMENT_KEYS = (
+    "w_curiosity",
+    "w_homeostasis",
+    "drive_energy",
+    "drive_integrity",
+    "drive_rest",
+    "boredom",
+    "entropy",
+)
+
+# Ray-kind LP partition (ablation): presence-combos of animate hit kinds —
+# nothing-alive / robot / dormant / both.
+KIND_REGIONS = 4
 
 
 class WorldModel(nn.Module):
@@ -137,6 +169,34 @@ class DreamerBrain(Brain):
         rw = dict(cfg.get("reward", {}))
         self.w_curiosity = float(rw.get("w_curiosity", 1.0))
         self.w_homeostasis = float(rw.get("w_homeostasis", 1.0))
+        # "drive": HRRL drive-reduction over internal state (energy, integrity,
+        # rest). "events": the legacy ate/damage bonus, kept as an ablation and
+        # as the default so configs stored in older saves keep the reward their
+        # brains were trained on.
+        self.homeostasis_mode = str(rw.get("homeostasis", "events"))
+        if self.homeostasis_mode not in ("drive", "events"):
+            raise ValueError(f"unknown homeostasis mode: {self.homeostasis_mode!r}")
+        drv = dict(rw.get("drive", {}))
+        self.drive_scale = float(drv.get("scale", 3.0))
+        self.drive_level_penalty = float(drv.get("level_penalty", 0.01))
+        self.drive_pow_m = float(drv.get("pow_m", 3.0))
+        self.drive_pow_n = float(drv.get("pow_n", 2.0))
+        self.drive_setpoints = torch.tensor(
+            [
+                float(drv.get("energy_setpoint", 0.85)),
+                float(drv.get("integrity_setpoint", 1.0)),
+                float(drv.get("rested_setpoint", 1.0)),
+            ],
+            device=self.device,
+        )
+        self.drive_weights = torch.tensor(
+            [
+                float(drv.get("energy_weight", 1.0)),
+                float(drv.get("integrity_weight", 1.0)),
+                float(drv.get("rest_weight", 0.5)),
+            ],
+            device=self.device,
+        )
         self.low_energy_threshold = float(rw.get("low_energy_threshold", 0.25))
         self.low_energy_penalty = float(rw.get("low_energy_penalty", 0.02))
         self.low_energy_graded = bool(rw.get("low_energy_graded", True))
@@ -144,6 +204,62 @@ class DreamerBrain(Brain):
         # curiosity target so agents aren't intrinsically drawn to each other.
         self.curiosity_mask_agents = bool(rw.get("curiosity_mask_agents", False))
         self.curiosity_norm = RunningMeanStd()
+        # Curiosity flavor: "lp" rewards learning progress — the *derivative*
+        # of competence over self-organized regions (Oudeyer), so interest is
+        # a moving frontier and mastered or unlearnable things both go stale.
+        # "disagreement" is the legacy Plan2Explore level signal, kept as the
+        # ablation and the code default so stored configs keep their reward.
+        self.curiosity_mode = str(rw.get("curiosity", "disagreement"))
+        if self.curiosity_mode not in ("lp", "disagreement"):
+            raise ValueError(f"unknown curiosity mode: {self.curiosity_mode!r}")
+        lp_cfg = dict(rw.get("lp", {}))
+        self.lp_partition = str(lp_cfg.get("partition", "latent"))
+        if self.lp_partition not in ("latent", "kind"):
+            raise ValueError(f"unknown lp partition: {self.lp_partition!r}")
+        n_regions = (
+            int(lp_cfg.get("regions", 32)) if self.lp_partition == "latent" else KIND_REGIONS
+        )
+        self.regions = OnlineRegions(
+            n_regions, feat, lr=float(lp_cfg.get("centroid_lr", 0.05)), device=self.device
+        )
+        self.lp = LearningProgress(
+            n_regions,
+            fast=float(lp_cfg.get("ema_fast", 0.02)),
+            slow=float(lp_cfg.get("ema_slow", 0.002)),
+            relative=bool(lp_cfg.get("relative", True)),
+        )
+        self.lp_mix_disagreement = float(lp_cfg.get("mix_disagreement", 0.1))
+        self.lp_norm = RunningMeanStd()
+        # Boredom: a standing cost of being safe AND learning nothing — the
+        # pressure that produces play, and the counterweight that stops an
+        # agent coasting once its niche is mastered. Weight 0 disables.
+        bd = dict(rw.get("boredom", {}))
+        self.boredom_weight = float(bd.get("weight", 0.0))
+        self.boredom_stim_threshold = float(bd.get("stim_threshold", 0.5))
+        self.boredom_drive_threshold = float(bd.get("drive_threshold", 0.15))
+
+        # Temperament: innate, heritable individuality. Each newborn samples
+        # log-normal multipliers over the abstract drive knobs; inheritance
+        # (Brain.inherit) copies the donor's and mutates. Nothing here names
+        # an object or activity — specific interests must be discovered.
+        tp = dict(cfg.get("temperament", {}))
+        self.temperament_enabled = bool(tp.get("enabled", False))
+        self.temperament_mutation = float(tp.get("mutation_sigma", 0.1))
+        t_sigma = float(tp.get("sigma", 0.25))
+        self._pre_temperament: dict[str, Any] = {
+            "w_curiosity": self.w_curiosity,
+            "w_homeostasis": self.w_homeostasis,
+            "drive_weights": self.drive_weights.clone(),
+            "boredom_weight": self.boredom_weight,
+            "entropy_scale": self.entropy_scale,
+        }
+        if self.temperament_enabled:
+            self.temperament = {
+                k: float(np.exp(self.rng.normal(0.0, t_sigma))) for k in TEMPERAMENT_KEYS
+            }
+        else:
+            self.temperament = dict.fromkeys(TEMPERAMENT_KEYS, 1.0)
+        self._apply_temperament()
 
         replay = dict(cfg.get("replay", {}))
         self.buffer = ReplayBuffer(
@@ -174,6 +290,17 @@ class DreamerBrain(Brain):
         self._return_scale = [1.0]
         self._metrics: dict[str, float] = {}
         self._updates = 0
+
+    def _apply_temperament(self) -> None:
+        t, base = self.temperament, self._pre_temperament
+        self.w_curiosity = base["w_curiosity"] * t["w_curiosity"]
+        self.w_homeostasis = base["w_homeostasis"] * t["w_homeostasis"]
+        mult = torch.tensor(
+            [t["drive_energy"], t["drive_integrity"], t["drive_rest"]], device=self.device
+        )
+        self.drive_weights = base["drive_weights"] * mult
+        self.boredom_weight = base["boredom_weight"] * t["boredom"]
+        self.entropy_scale = base["entropy_scale"] * t["entropy"]
 
     # ------------------------------------------------------------------- act
 
@@ -255,7 +382,35 @@ class DreamerBrain(Brain):
         masked_rgb[is_agent] = sky.unsqueeze(-2).expand_as(masked_rgb)[is_agent]
         return {**obs, "depth": masked_depth, "rgb": masked_rgb, "kind_onehot": masked_kind}
 
+    def _drive_level(self, proprio: torch.Tensor) -> torch.Tensor:
+        """Keramati–Gutkin drive: convex distance from internal setpoints.
+
+        Internal state comes straight from proprio — energy, integrity, and
+        restedness (1 - fatigue), all "higher is better". Only deficits below
+        setpoint count (surplus is not a drive), and the convex exponents
+        (m > n) let the neediest variable dominate: a starving agent is not
+        consoled by being well-rested.
+        """
+        x = torch.stack([proprio[..., 5], proprio[..., 6], 1.0 - proprio[..., 14]], dim=-1)
+        # Clamp to the physical range: decoded proprio (boredom's gate reads
+        # imagined bodies) can stray outside [0, 1].
+        deficit = (self.drive_setpoints - x.clamp(0.0, 1.0)).clamp(min=0.0)
+        d = (self.drive_weights * deficit.pow(self.drive_pow_m)).sum(-1)
+        return d.pow(1.0 / self.drive_pow_n)
+
     def _homeostasis(self, events: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
+        if self.homeostasis_mode == "drive":
+            # HRRL: reward is drive *reduction*, so valence is need-relative —
+            # eating while starving is worth a lot, eating past the setpoint is
+            # worth nothing, and satiation needs no stop rule. Damage and
+            # fatigue price themselves the same way, through the state they
+            # move. A small level penalty keeps a gradient on standing
+            # deficits. The first step of a sequence has no predecessor, so
+            # its reduction term is zero.
+            d = self._drive_level(proprio)
+            reduction = torch.zeros_like(d)
+            reduction[..., 1:] = d[..., :-1] - d[..., 1:]
+            return self.drive_scale * reduction - self.drive_level_penalty * d
         ate, damage = events[..., 0], events[..., 1]
         energy = proprio[..., 5]
         if self.low_energy_graded:
@@ -266,6 +421,58 @@ class DreamerBrain(Brain):
         else:
             low = (energy < self.low_energy_threshold).float()
         return ate - damage - self.low_energy_penalty * low
+
+    def _kind_regions_obs(self, kind_onehot: torch.Tensor) -> torch.Tensor:
+        """Presence-combo region from real rays: is anything alive in view?"""
+        has_robot = kind_onehot[..., RAY_KIND_ROBOT].amax(-1) > 0.5
+        has_dormant = kind_onehot[..., RAY_KIND_DORMANT].amax(-1) > 0.5
+        return has_robot.long() + 2 * has_dormant.long()
+
+    def _kind_regions_img(self, feat: torch.Tensor) -> torch.Tensor:
+        """Same combo on imagined states, via the decoder's kind head."""
+        logits = self.wm.head_kind(feat).view(*feat.shape[:-1], self.wm.num_rays, NUM_RAY_KINDS)
+        probs = torch.softmax(logits, dim=-1)
+        has_robot = probs[..., RAY_KIND_ROBOT].amax(-1) > 0.5
+        has_dormant = probs[..., RAY_KIND_DORMANT].amax(-1) > 0.5
+        return has_robot.long() + 2 * has_dormant.long()
+
+    def _imagination_reward(
+        self, img_feat: torch.Tensor, img_action: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Assemble the intrinsic reward on imagined states.
+
+        Every term is a function of latent state — LP by region lookup,
+        drives via decoded proprio — so the actor can plan toward interest
+        and away from boredom inside the dream. Returns (reward, stimulation,
+        boredom) for the return computation and metrics.
+        """
+        r_homeo = self.twohot.decode(self.wm.head_reward(img_feat))
+        r_dis = self.curiosity_norm.normalize(
+            self.wm.disagreement(img_feat, img_action)
+        ).clamp(0, 5.0)
+        if self.curiosity_mode == "lp":
+            if self.lp_partition == "latent":
+                idx = self.regions.assign(img_feat)
+            else:
+                idx = self._kind_regions_img(img_feat)
+            r_lp = self.lp_norm.normalize(self.lp.reward(idx)).clamp(0.0, 5.0)
+            # A trickle of disagreement keeps a newborn moving before any
+            # region has enough history to show progress.
+            r_cur = r_lp + self.lp_mix_disagreement * r_dis
+        else:
+            r_cur = r_dis
+        reward = self.w_homeostasis * r_homeo + self.w_curiosity * r_cur
+        bored = torch.zeros_like(reward)
+        if self.boredom_weight > 0:
+            # Safe AND learning nothing: both gates must open. An agent in
+            # need is never bored (survival is stimulation enough), and an
+            # agent making progress is never bored no matter how sated.
+            drive = self._drive_level(self.wm.head_proprio(img_feat))
+            calm = (1.0 - drive / self.boredom_drive_threshold).clamp(min=0.0)
+            dull = (1.0 - r_cur / self.boredom_stim_threshold).clamp(min=0.0)
+            bored = self.boredom_weight * calm * dull
+            reward = reward - bored
+        return reward, r_cur, bored
 
     def learn(self) -> dict[str, float] | None:
         batch_np = self.buffer.sample_sequences(self.batch_size, self.seq_len)
@@ -344,9 +551,25 @@ class DreamerBrain(Brain):
         self.opt_model.step()
 
         # Curiosity statistics on real experience (keeps normalization honest).
+        lp_reward_mean = 0.0
         with torch.no_grad():
             real_disagreement = self.wm.disagreement(feat[:, :-1].detach(), b["action"][:, 1:])
             self.curiosity_norm.update(real_disagreement)
+            if self.curiosity_mode == "lp":
+                # Fold this batch's per-sample model errors into their regions'
+                # progress ledgers. Replay mixes old and new experience, so LP
+                # here reads as competence progress on a region regardless of
+                # when it was lived — retention counts, not just recency.
+                err = loss_ens.detach()
+                if self.lp_partition == "latent":
+                    flat = ens_in_feat.reshape(-1, ens_in_feat.shape[-1])
+                    idx = self.regions.adapt(flat)
+                else:
+                    idx = self._kind_regions_obs(obs["kind_onehot"][:, :-1]).reshape(-1)
+                self.lp.update(idx, err)
+                real_lp = self.lp.reward(idx)
+                self.lp_norm.update(real_lp)
+                lp_reward_mean = float(self.lp_norm.normalize(real_lp).clamp(0, 5.0).mean())
 
         # --- actor-critic in imagination, from a subsample of posterior states
         flat = feat.detach().flatten(0, 1)  # (B*L, F) = concat(h, z)
@@ -375,11 +598,7 @@ class DreamerBrain(Brain):
         img_action = torch.stack(img_actions)
 
         with torch.no_grad():
-            r_homeo = self.twohot.decode(self.wm.head_reward(img_feat))
-            r_cur = self.curiosity_norm.normalize(self.wm.disagreement(img_feat, img_action)).clamp(
-                0, 5.0
-            )
-            reward = self.w_homeostasis * r_homeo + self.w_curiosity * r_cur
+            reward, r_cur, bored = self._imagination_reward(img_feat, img_action)
             cont = torch.sigmoid(self.wm.head_cont(img_feat).squeeze(-1))
             discount = self.gamma * cont
             value_ema = self.twohot.decode(self.critic_ema(img_feat))
@@ -439,10 +658,21 @@ class DreamerBrain(Brain):
             "updates": float(self._updates),
             "buffer": float(len(self.buffer)),
         }
+        if self.homeostasis_mode == "drive":
+            self._metrics["drive_level"] = float(self._drive_level(b["proprio"]).mean())
+        if self.curiosity_mode == "lp":
+            self._metrics["lp_reward"] = lp_reward_mean
+            self._metrics["lp_regions"] = float(self.lp.regions_seen())
+        if self.boredom_weight > 0:
+            self._metrics["boredom"] = float(bored.mean())
+            self._metrics["stimulation"] = float(r_cur.mean())
         return self._metrics
 
     def introspect(self) -> dict[str, float]:
-        return dict(self._metrics)
+        out = dict(self._metrics)
+        if self.temperament_enabled:
+            out.update({f"temperament_{k}": v for k, v in self.temperament.items()})
+        return out
 
     def reset_stream(self) -> None:
         """The stream broke (respawn or wake): reset live recurrent state only."""
@@ -462,6 +692,10 @@ class DreamerBrain(Brain):
             "opt_actor": self.opt_actor.state_dict(),
             "opt_critic": self.opt_critic.state_dict(),
             "curiosity_norm": self.curiosity_norm.state_dict(),
+            "temperament": dict(self.temperament),
+            "lp_regions": self.regions.state_dict(),
+            "lp_tracker": self.lp.state_dict(),
+            "lp_norm": self.lp_norm.state_dict(),
             "return_scale": self._return_scale[0],
             "updates": self._updates,
             "rng_state": self.rng.bit_generator.state,
@@ -485,6 +719,15 @@ class DreamerBrain(Brain):
         self.opt_actor.load_state_dict(state["opt_actor"])
         self.opt_critic.load_state_dict(state["opt_critic"])
         self.curiosity_norm.load_state_dict(state["curiosity_norm"])
+        # Keys guarded: checkpoints from before the interest/temperament work
+        # load cleanly, keeping their fresh defaults for the new machinery.
+        if "temperament" in state:
+            self.temperament = dict(state["temperament"])
+            self._apply_temperament()
+        if "lp_tracker" in state:
+            self.regions.load_state_dict(state["lp_regions"])
+            self.lp.load_state_dict(state["lp_tracker"])
+            self.lp_norm.load_state_dict(state["lp_norm"])
         self._return_scale = [float(state["return_scale"])]
         self._updates = int(state["updates"])
         self.rng.bit_generator.state = state["rng_state"]
@@ -492,3 +735,16 @@ class DreamerBrain(Brain):
         self.h = torch.as_tensor(state["h"], device=self.device)
         self.z = torch.as_tensor(state["z"], device=self.device)
         self.last_action = torch.as_tensor(state["last_action"], device=self.device)
+
+    def inherit(self, state: dict[str, Any]) -> None:
+        """Warm-start a newborn from a living donor: weights, memories, and
+        temperament — the temperament mutated, so lineages drift through
+        temperament space and transmission has something to select on."""
+        self.load_state_dict(state)
+        if self.temperament_enabled and self.temperament_mutation > 0:
+            self.temperament = {
+                k: v * float(np.exp(self.rng.normal(0.0, self.temperament_mutation)))
+                for k, v in self.temperament.items()
+            }
+            self._apply_temperament()
+        self.reset_stream()

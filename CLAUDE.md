@@ -41,7 +41,9 @@ into "episodic RL training pipeline." These rules exist so that never happens ag
 - `packages/brains/gol_brains` — Brain interface, scripted baselines, `dreamer/`
 - `packages/runtime/gol_runtime` — persistent loop, learner thread, checkpoints, CLI
 - `packages/obs/gol_obs` — Rerun logging, metrics/events writers
-- `configs/` — world/brain/run YAML (dataclass defaults → YAML → `--set k=v`)
+- `configs/` — world/brain/run YAML (dataclass defaults → YAML → `--set k=v`); round
+  configs are save-name-prefixed (`beta_NN_*.yaml`) and freeze at launch — see
+  `configs/README.md`
 - `saves/` — gitignored persistent worlds; a save dir is a reproducible experiment
 
 ## Commands

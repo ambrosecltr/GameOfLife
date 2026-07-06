@@ -14,13 +14,42 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
 
+import numpy as np
 from gol_world.blocks import Block
+from gol_world.entities import Robot
 from gol_world.world import World
 
 from gol_obs.heatmap import VisitHeatmap
 
 IntrospectionFn = Callable[[], dict[str, dict[str, float]]]
 EventSink = Callable[[list[dict[str, Any]]], None]
+
+# The "engagement bubble" for interest profiles: what a robot is near is a
+# proxy for what it is spending its time on. gol-stats --interests turns these
+# samples into per-agent activity profiles and divergence/stability stats.
+INTEREST_RADIUS = 8.0
+
+
+def _interest_context(world: World, robots: list[Robot]) -> dict[str, tuple[int, int]]:
+    """(near_robots, near_bushes) per robot id, one vectorized pass."""
+    if not robots:
+        return {}
+    pos = np.array([r.pos for r in robots])
+    dists = np.linalg.norm(pos[None, :, :2] - pos[:, None, :2], axis=-1)
+    near_robots = (dists < INTEREST_RADIUS).sum(1) - 1  # minus self
+    bush_ids = np.array([int(Block.BUSH_RIPE), int(Block.BUSH_TOXIC)])
+    blocks = world.grid.blocks
+    rad = int(INTEREST_RADIUS)
+    out: dict[str, tuple[int, int]] = {}
+    for i, robot in enumerate(robots):
+        x, y, z = (int(v) for v in robot.pos)
+        patch = blocks[
+            max(0, x - rad) : x + rad + 1,
+            max(0, y - rad) : y + rad + 1,
+            max(0, z - 4) : z + 5,
+        ]
+        out[robot.id] = (int(near_robots[i]), int(np.isin(patch, bush_ids).sum()))
+    return out
 
 
 class NdjsonWriter:
@@ -64,6 +93,9 @@ class RunLogs:
             self._sample(world)
 
     def _sample(self, world: World) -> None:
+        robots = list(world.robots.values())
+        context = _interest_context(world, robots)
+        rest_threshold = world.cfg.economy.rest_drive_threshold
         record: dict[str, Any] = {
             "tick": world.tick,
             "light": round(world.light_level, 3),
@@ -78,11 +110,14 @@ class RunLogs:
                     "integrity": round(r.integrity, 2),
                     "fatigue": round(r.fatigue, 4),
                     "dormant": r.dormant,
+                    "resting": bool(np.abs(r.drive).max() < rest_threshold),
+                    "near_robots": context[r.id][0],
+                    "near_bushes": context[r.id][1],
                     "age": r.age_ticks,
                     "brain": r.brain_name,
                     "ledger": {k: round(v, 2) for k, v in r.ledger.items()},
                 }
-                for r in world.robots.values()
+                for r in robots
             },
         }
         if self.introspection is not None:

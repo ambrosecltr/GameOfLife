@@ -38,6 +38,15 @@ class Brain(ABC):
         """Restore checkpointed state. Stateless brains ignore it."""
         del state  # nothing to restore by default
 
+    def inherit(self, state: dict[str, Any]) -> None:
+        """Warm-start a newborn from a donor brain's checkpointed state.
+
+        Default is a plain copy plus a stream reset; learning brains may
+        override to mutate heritable traits (temperament) on the way in.
+        """
+        self.load_state_dict(state)
+        self.reset_stream()
+
     def reset_stream(self) -> None:  # noqa: B027 - optional hook, no-op by default
         """Called when the stream of experience breaks: lineage respawn into a
         new body, or waking from dormancy (the dormant gap is never observed).

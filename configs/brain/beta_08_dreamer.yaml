@@ -1,8 +1,13 @@
-# DreamerV3-style brain. One instance of this config per learning robot.
-# Presets scale the model; everything else follows the published recipe.
+# Cloud capacity variant of dreamer.yaml — the round-008 experiment brain.
+# EXACTLY two knobs differ from configs/brain/dreamer.yaml: preset (nano →
+# base) and training.train_ratio (0.25 → 1.0). Everything else — the entire
+# reward/temperament stack — must stay byte-identical to what beta_07 ran, or
+# the capacity A/B is confounded. If dreamer.yaml's reward block changes after
+# beta_07's review (e.g. w_homeostasis escalation), mirror it here deliberately
+# and note it in the round-008 journal entry.
 
 kind: dreamer
-preset: nano                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
+preset: base                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
 
 # body:                       # BodySpec overrides; defaults in gol_world/interface.py.
 #   ray_pitches_deg: [30, 12, 0, -12, -30, -50]   # 6 pitch rows, up and down
@@ -89,4 +94,4 @@ training:
   actor_lr: 3.0e-5
   critic_lr: 3.0e-5
   grad_clip: 100.0
-  train_ratio: 0.25           # target updates per act-step (learner may skip under load)
+  train_ratio: 1.0            # the capacity experiment: 4× beta_07's target, and GPU should actually hit it

@@ -1,0 +1,40 @@
+# Research Journal
+
+One entry per **research round**: a deliberate change to the world/brains, the runs that
+tested it, what the data showed, and what it implies for the next round. This folder
+replaces the old `docs/journal.md` (migrated 2026-07-06).
+
+## Why this format
+
+The primary reader is the assistant analyzing the *next* round. Entries are optimized for
+that: machine-scannable frontmatter (grep the `headline:` lines to recall every finding
+without opening a file), self-contained statistics (save dirs get pruned after a round
+closes — brains/checkpoints deleted, so the numbers in the entry are the durable record),
+and explicit lineage (`baselines:` says which prior rounds a comparison is valid against,
+and under what confounds).
+
+## Rules
+
+- One file per round, named `NNN-slug.md`. Lexicographic order = chronological order.
+- Frontmatter follows [TEMPLATE.md](TEMPLATE.md). `headline:` is the one-sentence finding —
+  write it last, make it the thing you'd want recalled a month later.
+- Every quantitative claim in the body should carry its number. Assume the save dir may be
+  gone; era tables and totals live in the entry, not just in `metrics.ndjson`.
+- Record confounds and config mistakes honestly (see round 006 — a wrong config became the
+  control arm). A confounded run is still data if the entry says exactly what it confounds.
+- Standard stats come from `uv run gol-stats <save> [--compare|--events|--interests]`.
+  Era-windowed tables (500k-tick windows) come from [tools/era_stats.py](tools/era_stats.py):
+  `python3 docs/research_journal/tools/era_stats.py saves/<name> ...`
+- When a round closes: fill `status: complete`, write the headline, add the index row here,
+  and note the spawned follow-ups in the entry's **Next** section.
+
+## Index (newest first)
+
+| round | date | runs | headline |
+|---|---|---|---|
+| [006 — obs v3 and the capacity wall](006-obs-v3-capacity-wall.md) | 2026-07-06 | beta_06, beta_06h | Richer senses tripled scripted foraging but sank the learners: the hunger effect of round 005 did not replicate under obs v3 — the critic learned the future is hungry (value went negative) and the policy still couldn't act on it. Binding constraint confirmed as learning capacity, not reward design. |
+| [005 — the hunger experiment](005-hunger-experiment.md) | 2026-07-05 | beta_05 | A louder body softened the motivational decay but couldn't stop it: hunger reward held steady and lifespans stabilized, but the policy never learned to cash the gradient in (~1 meal/day in replay is too sparse at nano/CPU capacity). |
+| [004 — competence killed motivation](004-curiosity-collapse.md) | 2026-07-05 | beta_04 | Cross-lifetime learning works (model loss 84→19 across generations) — and that's the problem: curiosity collapsed 20× as the world became predictable, homeostasis was ~1000× too quiet to take over, and behavior decayed to aimless wandering in a food-rich world. |
+| [003 — bush ecology and the toxic ratchet](003-bush-ecology.md) | 2026-07-05 | beta_03 | First emergent ecology: lifespans became behavior-dependent, but the regrow rule was a one-way toxic ratchet — the better the population avoided poison, the more poisoned the world became. Plants effectively evolved defenses under grazing pressure. |
+| [002 — survival pressures, broken bodies](002-survival-pressures.md) | 2026-07-05 | beta_02 (beta_01 precursor) | The wake economy was a death ratchet (wake below brownout) and the calibration probe was wedged from spawn (eat resolved only at eye height) — when the probe fails you can't distinguish "economy too harsh" from "bodies broken." |
+| [001 — build-out soaks](001-buildout-soaks.md) | 2026-07-05 | (pre-beta, saves not retained) | Economy calibrated (bush clumps + softened costs), first mind confirmed lifelong learning across a body death (lineage inheritance), devices benchmarked (nano→CPU on M1). |

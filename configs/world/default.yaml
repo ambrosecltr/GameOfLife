@@ -53,6 +53,11 @@ economy:
   fatigue_rise_active: 0.00004
   fatigue_recover: 0.000125   # full recovery in ~1/3 sim-day of stillness
   rest_drive_threshold: 0.1   # |drive| below this counts as resting
+  # Sleep: resting is circadian — recovery and rest-repair scale with darkness
+  # by (1 + night_rest_bonus * (1 - light)), and a resting body burns less.
+  # Sleep never mints energy; it only slows the meter.
+  rest_basal_mult: 0.6        # basal drain multiplier while resting (1 disables)
+  night_rest_bonus: 1.0       # extra recovery/repair at full darkness (0 disables)
   exhaustion_threshold: 0.9   # past this: costs multiply, integrity bleeds
   exhaustion_drain_mult: 1.5
   exhaustion_integrity_drain: 0.002
