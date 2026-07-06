@@ -100,6 +100,37 @@ updates/s total), so ratio 1.0 is sustainable against the ~12 awake-act-steps/s 
 speed 1.0 only via the dormancy catch-up; if awake fraction runs high, achieved
 ratio will sag below 1.0 and that is the honest number to report.
 
+## Monitoring the live run (for whoever checks progress next)
+
+The run lives on RunPod pod `pjilmbiyse472t` (community 3090, $0.22/hr, 28 vCPU/62GB),
+launched 2026-07-06 in tmux session `world`, repo at `~/GameOfLife`, log at
+`~/GameOfLife/beta_08.log`. **No auto-terminate is set** — terminate the pod in the
+console (or `runpodctl pod delete pjilmbiyse472t`) when the round closes.
+
+SSH (direct TCP; the `ssh.runpod.io` proxy is PTY-only — no command exec, no rsync):
+
+    ssh -i ~/.runpod/ssh/runpodctl-ssh-key -p 15023 root@64.119.209.250
+
+- **Watch stdout live:** add `-t ... 'tmux attach -t world'` (detach: `Ctrl-b d`).
+- **Population/learning pulse, on the pod:** `cd ~/GameOfLife && uv run gol-stats
+  saves/beta_08 [--compare|--interests|--circadian]`.
+- **Capacity gauges** (the numbers this round is about): grep the tail of
+  `saves/beta_08/metrics.ndjson` for `train_ratio_eff` (should climb to ≈1.0 via
+  dormancy catch-up), `learn_seconds` (~0.25–0.65 s/update, 3 workers),
+  `act_latched_frac` (≈0 when paced), `updates` vs `act_steps`.
+- **Control:** `uv run gol-ctl pause|resume|speed <x>|checkpoint` on the pod
+  (port 7301). A clean stop is `gol-ctl checkpoint`, then ONE Ctrl-C in tmux.
+- **Mirror home** (run on the laptop; spot-kill insurance + local analysis):
+  `RSYNC_RSH="ssh -i ~/.runpod/ssh/runpodctl-ssh-key -p 15023"
+  scripts/sync_back.sh root@64.119.209.250 -p 15023 saves/beta_08`
+- **Rerun viewing:** the run records rotating `.rrd` files into the save dir
+  (`rec_*.rrd`, new file every 6 sim-hours ≈ 432k ticks). They sync home with the
+  mirror; open locally with `uv run rerun saves/beta_08/rec_000000000000.rrd`. The
+  in-progress file usually opens fine (you see everything logged so far); completed
+  rotations are the safe bet. Live streaming wasn't wired for this run — recordings
+  only.
+- Budget: ~20 t/s → 3M ticks ≈ 42 h ≈ $9.20 total; user balance was $10 at launch.
+
 ## Results
 
 *(pending)*
