@@ -1,16 +1,16 @@
 ---
 round: 008
 title: the capacity round — does a mind that can converge develop taste?
-date: 2026-07-06            # pre-registered at launch prep; results pending (target ≥3M ticks)
-status: planned
+date: 2026-07-06            # launched 2026-07-06, closed 2026-07-07 (host reboot at 2.005M of 3M target)
+status: complete
 question: With ~40× the update density (train_ratio 1.0, actually enforced) and a 7× bigger brain (base preset) on GPU, does learning progress finally decay where the model converges — letting the gratification balance (boredom gate, hunger airtime) engage as designed?
-headline: pending
+headline: Capacity was necessary but not sufficient — the model converged (loss 29→4.2), curiosity finally decayed (stimulation 3.7→~0.5, value −50% from peak), and boredom fired for the first time in the series, but it only ever flickered (≤1.6e-3, never accumulated), the running-std normalizer re-inflated curiosity 20× against the decay, and dreamer eating collapsed instead of rising (92 meals in 2M ticks, 38% of them toxic, vs foragers' 5026 at 0.6%); the curiosity→hunger handoff now needs normalization + boredom-accumulator redesign, not more capacity. Bonus: dreamers are the world's only terraformers (318 digs/287 places vs foragers' 0).
 runs:
   - save: saves/beta_08
     config: configs/run/beta_08_capacity.yaml
     brain: configs/brain/beta_08_dreamer.yaml
     commit: "322f60b"       # pacing enforcement (55dd661) + sleep-learning debt cap (322f60b)
-    ticks: 0                # target ≥3M
+    ticks: 2005400          # target was ≥3M; host reboot ended it — trends unambiguous by 1.5M
     role: experiment
 baselines: [007]
 tags: [capacity, motivation, reward, infrastructure]
@@ -212,11 +212,82 @@ slow motion rather than the pinned-at-clamp version pre-registered.
 
 ## Results
 
-*(pending)*
+Run ended at **tick 2,005,400** (of the 3M target) by a RunPod host reboot — not a clean
+stop; the last atomic checkpoint is the resume point. ~9.5 h of paced wall-clock, ~$2.60.
+36 robots lived (22 dreamers across 3 lineages, 14 foragers), 30 deaths, population 6
+throughout. Pacing enforcement held for the whole run: final `train_ratio_eff` 0.956,
+`learn_seconds` 0.25–0.74, `act_latched_frac` ~0.78 steady-state.
+
+**P1 — confirmed. Curiosity decays where the model converges.**
+
+| gauge | birth→early | end of run |
+|---|---|---|
+| `loss_model` | 29 | ~4.2 |
+| `stimulation` | 3.4–3.7 plateau | 0.5–1.0 band (on the 0.5 gate from ~1.35M) |
+| `lp_stale_frac` | 0.0 | 0.3–0.5 band |
+| `value` | climb to 683 peak @ ~640k | 343 (−50% from peak) |
+
+First nonzero `boredom` in project history at ~tick 338k. Every dreamer generation
+since flickers (1e-5 to 1.6e-3, max dreamer_020) — **but it never accumulates**, even
+with stimulation sitting on the gate for the last 650k ticks. Gate reachable ≠ gate
+dwelled-in.
+
+**P2 — falsified. Hunger never got airtime; eating collapsed instead of rising.**
+Dreamer eats per 100k ticks: 8, 8, 12, 10, 4, 1, 9, 3, 1, 5, 0, 1, 1, 4, 3, … — total
+92 dreamer meals vs 5,026 forager meals. Death-ledger decomposition shows exactly two
+dreamer death modes: (a) the **hibernation clock** — 9 of 19 dreamer deaths within ±2%
+of ~347k ticks, ledgers reading hibernation 91–96, wear 5–10, poison 0; (b)
+**poison-accelerated** — lifespans 109k–263k with poison ledger 36–84. Behavior
+contributes nothing to dreamer survival. Foragers show the coupling dreamers lack:
+eats 90–589 funds repair 10–89, lifespans 403k–556k, wear-dominated. The treadmill is
+unbroken, just longer-period than beta_07's.
+
+**P3 — the slow-motion branch, and the round's real answer.** `curiosity_scaled` rose
+monotonically 0.09 → 1.86 (~20×) while raw LP decayed — the lifetime running-std
+normalizer measurably re-inflates curiosity's scale as the signal shrinks: the
+built-in hedonic treadmill, caught on instruments. Stimulation sagged anyway (the
+clamp and region structure still let absolute decay through), so the pre-registered
+"pinned at clamp" version didn't trigger — but the two mechanisms that *did* bind are
+concrete: (1) std-only relative normalization fights its own decay; (2) the boredom
+accumulator's time constants don't integrate gate-touching into pressure.
+
+**Outside the pre-registered lanes:**
+
+- **Dreamers are the world's only terraformers**: 318 digs + 287 places, foragers 0.
+  Intrinsic motivation produces all world-modification in the system.
+- **Dreamers never learned bush discrimination**: 38% of dreamer meals poisoned
+  (35/92) vs 0.6% for foragers (31/5026) — despite obs v3 color vision existing for
+  exactly this. Plausibly also a within-run eating deterrent (poison ledger damage).
+- **Lineage individuality replicated at capacity** (beta_07's H4): three temperament
+  draws persisted through 22 dreamers; lineage C (w_cur 0.76, w_homeo 1.11) ran
+  systematically lower `value` (257–378 vs 300–906 for A/B) and supplied most of the
+  forage-flavored profiles; A/B skewed pure-rest. Interest divergence stayed
+  plateaued ~0.15 (dips to 0.03 during synchronized hibernation).
+- **Circadian structure exists but is weak in dreamers**: dormancy 0.77 day / 0.95
+  night (corr −0.28) vs foragers' hard nocturnal economy (eat-at-night corr −0.87).
+- Policy entropy fell 7.5 → ~2–3 by mid-run (continuing beta_07's first-ever fall);
+  late aggregate wobbles up as young births dominate the mean.
 
 ## Interpretation
 
-*(pending)*
+Rounds 004–007 said "capacity is the binding constraint." This round bought the
+capacity and got the receipt: the model converges, interest goes stale, boredom
+exists. Everything 007 said was impossible now happens — **and the cascade still
+stalls at step one**. The design assumed decaying curiosity would hand the floor to
+hunger; instead the floor stayed empty: homeostasis is still O(0.005) against a
+curiosity signal whose *normalizer* keeps re-amplifying it (0.09→1.86), and the
+boredom accumulator discards what the gate admits. The binding constraint has moved,
+for the first time, from capacity to **reward-stack design** — specifically signal
+conditioning, not drive semantics. That is progress: 007 couldn't distinguish "the
+stack is wrong" from "the mind is too small to engage it." 008 can: the mind engaged
+it, and two specific components failed in specific, instrumented ways.
+
+The terraforming and poisoning findings sharpen the same point from outside: the
+dreamers are behaviorally *alive* (they alone modify the world; lineages have
+persistent styles) but survival-*blind* (eating collapsed, no bush discrimination,
+death by hibernation clock). Curiosity built explorers; nothing yet builds survivors.
+
+## Caveats
 
 ## Caveats
 
@@ -227,8 +298,27 @@ slow motion rather than the pinned-at-clamp version pre-registered.
   behavior data carries the ~23%+ action-latch artifact of unpaced running. Compare
   trajectory shapes and within-run trends, not fine levels.
 - Single run; round 006 measured 40% forager variance between identical-config runs.
+- Ended at 2.005M of the 3M target by host reboot (unclean stop; last atomic
+  checkpoint coherent). Trends were unambiguous and stable from ~1.5M, so the round
+  closes on 2M.
+- `act_latched_frac` ~0.78 all run (not the ~0.4 from the 35-min sanity) — behavior
+  levels carry a large latch artifact; within-run *trends* are the comparable thing.
+- The learner-worker KeyError race killed one worker thread once (benign — the agent
+  was already dead). Fixed post-launch in 398573a; the pod ran pre-fix code all round.
 
 ## Next
 
-*(pending close: fill results, headline, README index row; prune beta_* save dirs per
-round 006's note)*
+- **Round 009 (the conditioning round, ~12 h GPU):** keep capacity fixed at base@1.0,
+  change only signal conditioning, behind config flags per convention —
+  1. **Normalizer rework** (primary): replace lifetime running-std LP normalization
+     with an absolute or early-life-anchored scale so global convergence reads as
+     global satisfaction. beta_08's curve: `curiosity_scaled` 0.09→1.86 over one run
+     is the number to kill.
+  2. **Boredom accumulator time constants** (secondary): stimulation sat on the gate
+     for 650k ticks and produced ≤1.6e-3 boredom — integration is broken, tune the
+     accumulator so sustained gate-touching becomes pressure.
+  3. Watch the free riders: does eating recover once curiosity can actually yield?
+     Does bush discrimination (38% poisoned meals) emerge when homeostasis gets
+     airtime? Do the dreamer-only terraforming and lineage styles survive?
+- Prune beta_* save dirs per round 006's note once the beta_08 mirror is verified.
+- Terminate pod pjilmbiyse472t (runbook: no auto-terminate is set).
