@@ -2,7 +2,8 @@
 
 This platform exists to probe questions the episodic RL literature mostly doesn't touch.
 Every long run should be attributable to at least one of these. When a run produces
-evidence (or interesting absence of evidence), write it up in [journal.md](journal.md).
+evidence (or interesting absence of evidence), write it up in the
+[research journal](research_journal/).
 
 ## 1. Lifelong, non-episodic world-model learning
 
@@ -50,6 +51,65 @@ Does warm-starting newborns from living agents' weights propagate behaviors?
 - Watch for: behavioral lineages (foraging routes, hoarding sites persisting across
   "generations"), divergence between inherit-on and inherit-off worlds under the same
   seed.
+
+## System-level questions
+
+The four above are about what an agent *learns and does*. The long runs kept surfacing a
+second class of question — about what the *system* becomes over time — that we didn't
+write down in advance. These earn their place by having already produced evidence (the
+round they came from is noted); they are the ones that most directly answer "what emerges
+in a world with no goals."
+
+## 5. What keeps a mind motivated for a whole lifetime?
+
+This has become the project's central question, and the runs discovered it — it was not
+planned. Curiosity is self-extinguishing: the better the world model gets, the less
+surprise there is to feed on. How does an intrinsic motivation system stay *alive* across
+one unbroken life, handing off between drives as each satisfies itself?
+
+- Round 004 is the crux: cross-lifetime learning worked, and *that was the problem* —
+  curiosity collapsed 20× as the world became predictable, homeostasis was ~1000× too
+  quiet to take over, and behavior decayed to aimless wandering in a food-rich world.
+- Rounds 005–008 are successive attacks on it: a louder body (005), richer senses (006),
+  and the full gratification stack — learning-progress curiosity, drive reduction,
+  boredom, temperament (007) — each testing whether motivation can be made to persist and
+  hand off rather than decay.
+- The episodic literature never meets this: agents are reset long before they could get
+  bored of a mastered world.
+
+## 6. Where does individuality come from?
+
+Do identical minds in a shared world necessarily diverge into persistent individuals, and
+what carries that identity — the seed, the life history, the lineage?
+
+- Round 007: three lineages with identical architecture and identical drive settings
+  developed distinct, persistent behavioral profiles (forager / social / mixed), and
+  individuality arrived *before* survival competence.
+- Instruments: `gol-stats --interests` (per-agent activity profiles over time windows —
+  do agents differ, and do the differences persist rather than being noise?).
+
+## 7. Does the world itself evolve under the population?
+
+A persistent world shaped by adaptive agents starts generating its own selection pressures
+back at them. Does agent–world coevolution appear without any ecology being designed in?
+
+- Round 003's toxic ratchet: the better the population avoided poison bushes, the more
+  poisoned the world became — plants effectively evolved defenses under grazing pressure,
+  from nothing but the regrow rule and the agents' avoidance.
+- Watch for: feedback loops where a behavior reshapes the world in a way that reshapes the
+  behavior, on timescales longer than a single life.
+
+## 8. Can natural selection arise without a fitness function?
+
+The prospective one (see [budding proposal](research_proposals/001-budding.md)). If
+reproduction becomes a bodily process — funded by an agent's own energy surplus, passing
+on mutated temperament — does a population under *no* fitness function develop real
+selection on temperament and a cross-generational ratchet in competence?
+
+- Selection would act only through who stays in surplus, i.e. who forages and survives
+  well — the opposite of a designer-assigned fitness function (which stays a non-goal).
+- It is also the answer to a pattern in Q5–Q7: five rounds each hinged on *one* brain's
+  learning speed; selection over an inheriting population is the one lever that doesn't.
 
 ## Non-goals
 
