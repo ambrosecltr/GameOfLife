@@ -136,13 +136,19 @@ SSH (direct TCP; the `ssh.runpod.io` proxy is PTY-only — no command exec, no r
 - **Mirror home** (run on the laptop; spot-kill insurance + local analysis):
   `RSYNC_RSH="ssh -i ~/.runpod/ssh/runpodctl-ssh-key -p 15023"
   scripts/sync_back.sh root@64.119.209.250 -p 15023 saves/beta_08`
-- **Rerun viewing:** the run records rotating `.rrd` files into the save dir
-  (`rec_*.rrd`, new file every 6 sim-hours ≈ 432k ticks). They sync home with the
-  mirror; open locally with `uv run rerun saves/beta_08/rec_000000000000.rrd`. The
-  in-progress file usually opens fine (you see everything logged so far); completed
-  rotations are the safe bet. Live streaming wasn't wired for this run — recordings
-  only.
-- Budget: ~20 t/s → 3M ticks ≈ 42 h ≈ $9.20 total; user balance was $10 at launch.
+- **Rerun: OFF since tick 255,966.** The `.rrd` recording grew ~80 MB/min at
+  `rerun_fps: 10` (6.9 GB by tick 250k — on track to fill the 40 GB disk near
+  ~1.2M and crash the run) and made the mirror re-pull one giant file every cycle.
+  Clean stop → deleted the pod's rrd → resumed with `--set
+  observability.rerun=false` (paced, no logger). A 5.2 GB local copy of the first
+  ~85 min survives on the laptop (`uv run rerun saves/beta_08/rec_000000000000.rrd`)
+  for eye candy. Future cloud rounds: `rerun_fps: 1` or rerun off; never record
+  full-fps rrd on a multi-hour run.
+- Resume bookkeeping: learner workers take no retroactive debt on first sight, so
+  whatever updates were *owed* at the restart (banked debt from the last awake
+  burst) were forgiven — `updates` will run slightly below `acts − 500` from here;
+  the shortfall is bounded by one debt cap (≤1024 per brain).
+- Budget: at `speed 3` (~60 t/s) → 3M ticks ≈ 14 h ≈ $3.10 total.
 
 ## Results
 
