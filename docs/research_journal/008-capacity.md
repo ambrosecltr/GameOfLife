@@ -150,6 +150,39 @@ SSH (direct TCP; the `ssh.runpod.io` proxy is PTY-only — no command exec, no r
   the shortfall is bounded by one debt cap (≤1024 per brain).
 - Budget: at `speed 3` (~60 t/s) → 3M ticks ≈ 14 h ≈ $3.10 total.
 
+## Mid-run review (~1.06M ticks, 2026-07-06)
+
+Run healthy: tick 1,059,700 of 3M, population 6 (3 dreamers / 3 foragers), GPU 27%,
+disk 26%, `train_ratio_eff` 0.92 and still climbing toward 1.0, `learn_seconds` 0.25.
+Holding `speed 3` — ratio is not sagging, so no reason to slow down (~9 h to 3M).
+
+- **P1 is landing.** The model converges for the first time (`loss_model` 29 → 4.3),
+  `lp_stale_frac` climbs 0 → ~0.25–0.31, `stimulation` sags from its 3.4–3.7 plateau
+  to ~0.7–1.1 (dipping toward the 0.5 gate), and **the first nonzero `boredom` in
+  project history** appeared at ~tick 338k — every dreamer born since shows it (max
+  1.45e-3, dreamer_017). Tiny, but the gate is provably reachable now. `value` peaked
+  ~678 at ~580k and has *declined* to ~541 — the perpetual-curiosity annuity of
+  beta_07 (monotone climb) is over.
+- **P3 watch, not triggered but real:** raw stimulation falls while `curiosity_scaled`
+  *rises* (0.09 → ~1.38) — the std-only relative normalization re-inflates curiosity's
+  scale as LP shrinks. Stimulation is sagging anyway, so the falsification branch
+  isn't hit, but the normalization is fighting the decay; keep this for the close.
+- **P2 not moving yet.** Dreamer eats per 100k ticks: 8, 8, 12, 10, 4, 1, 9, 3, 1, 5 —
+  flat-to-down, no hunger airtime in behavior; `homeo_spike_frac` ~0.007. Dreamer
+  lifespans 172k–378k ticks with no trend. Policy entropy keeps falling (7.5 → ~3.3),
+  continuing beta_07's first-ever decline.
+- Interest divergence still plateaued at ~0.10–0.18 — not breaking past beta_07.
+- **Bug found (once, benign):** thread `learner-dreamer_007` died with
+  `KeyError: 'dreamer_007'` at `scheduler.py:341` — a race where `_supervise` prunes
+  `_owed[rid]` while that brain's last `learn()` is in flight; the decrement after
+  learn() hits the missing key. No effect (agent was dead; supervisor reaps the
+  thread) but fix before the next round.
+- `act_latched_frac` runs ~0.78 steady-state, not the ~0.4 recorded at the 35-min
+  sanity check — the latch artifact at ratio 1.0 is bigger than the runbook says.
+  Behavior comparisons vs beta_07 must weigh this.
+- Mirror sync had not been running on the laptop; started (15-min loop). Resume
+  forgiveness confirmed harmless: updates ≈ acts − 500 within one debt cap.
+
 ## Results
 
 *(pending)*
