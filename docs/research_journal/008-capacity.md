@@ -9,7 +9,7 @@ runs:
   - save: saves/beta_08
     config: configs/run/beta_08_capacity.yaml
     brain: configs/brain/beta_08_dreamer.yaml
-    commit: "55dd661"       # the pacing-enforcement commit the run executes on
+    commit: "322f60b"       # pacing enforcement (55dd661) + sleep-learning debt cap (322f60b)
     ticks: 0                # target ≥3M
     role: experiment
 baselines: [007]
@@ -88,6 +88,17 @@ saves/beta_08` on a loop; spot-kill costs at most one sync interval.
 First-checkpoint sanity (~30 min): `train_ratio_eff` ≈ 1.0 and holding,
 `act_latched_frac` ≈ 0 (paced), `lp_regions` 32, three temperament draws, forager eat
 rate within variance of beta_07's 9.7/10k, `homeo_max` spiking ~0.6 on meals.
+
+Launch-day operational finding (first attempt, tick 0–13k, discarded): newborn
+dreamers hibernate early and often, and with the debt cap at 32 the learner froze
+during every dormant spell — `updates/s` hit 0 while the world ran on. Fixed before
+the real launch (322f60b): the cap now holds a full awake burst (1024), so the
+learner works through banked experience during hibernation — sleep pays the day's
+debt, updates stay strictly ratio × experience lived. Measured on the pod: base
+preset `learn_seconds` ≈ 0.25–0.74 s/update with 3 concurrent workers (~4–6
+updates/s total), so ratio 1.0 is sustainable against the ~12 awake-act-steps/s of
+speed 1.0 only via the dormancy catch-up; if awake fraction runs high, achieved
+ratio will sag below 1.0 and that is the honest number to report.
 
 ## Results
 
