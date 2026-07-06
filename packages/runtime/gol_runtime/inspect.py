@@ -8,6 +8,10 @@ gol-stats saves/alpha --compare    # learning sanity probe: dreamers vs
 gol-stats saves/alpha --interests  # per-agent activity profiles over time
                                    # windows: do agents differ (individuality)
                                    # and persist (interests, not noise)?
+gol-stats saves/alpha --circadian  # does rest track the day/night cycle?
+                                   # awake-resting vs light correlation, per
+                                   # brain kind (dormancy reported separately
+                                   # — hibernation is forced, not chosen)
 """
 
 from __future__ import annotations
@@ -206,6 +210,65 @@ def interests(save_dir: Path, window_ticks: int) -> dict[str, Any]:
     return {"window_ticks": window_ticks, "per_agent": per_agent, "divergence": divergence}
 
 
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    n = len(xs)
+    if n < 2:
+        return None
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+    vx = sum((x - mx) ** 2 for x in xs)
+    vy = sum((y - my) ** 2 for y in ys)
+    if vx == 0.0 or vy == 0.0:
+        return None
+    return cov / math.sqrt(vx * vy)
+
+
+def circadian(save_dir: Path, since_tick: int = 0) -> dict[str, Any]:
+    """Rest-vs-light structure, per brain kind.
+
+    The H2 question ("do bodies find a rhythm?") needs *chosen* rest split
+    from forced dormancy: awake_resting is the low-motor state while awake,
+    dormancy is hibernation. A negative rest-light correlation = sleeps at
+    night; beta_07 measured the inverse (+0.12: rests by day, likely riding
+    the solar trickle), which is why this is a standard readout now.
+    """
+    metrics = _read_ndjson(save_dir / "metrics.ndjson")
+    # kind -> (light, awake_resting) / (light, dormant) sample pairs
+    rest: dict[str, tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
+    dorm: dict[str, tuple[list[float], list[float]]] = defaultdict(lambda: ([], []))
+    for m in metrics:
+        if m["tick"] < since_tick:
+            continue
+        light = float(m.get("light", 0.0))
+        for r in m.get("robots", {}).values():
+            if "resting" not in r:  # save predates rest logging
+                continue
+            kind = r.get("brain", "?")
+            dorm[kind][0].append(light)
+            dorm[kind][1].append(float(r.get("dormant", False)))
+            if not r.get("dormant", False):
+                rest[kind][0].append(light)
+                rest[kind][1].append(float(r["resting"]))
+
+    def _split(lights: list[float], flags: list[float]) -> dict[str, float | int | None]:
+        day = [f for li, f in zip(lights, flags, strict=True) if li > 0.5]
+        night = [f for li, f in zip(lights, flags, strict=True) if li <= 0.5]
+        corr = _pearson(lights, flags)
+        return {
+            "samples": len(flags),
+            "corr_with_light": None if corr is None else round(corr, 4),
+            "day_frac": round(sum(day) / len(day), 4) if day else None,
+            "night_frac": round(sum(night) / len(night), 4) if night else None,
+        }
+
+    return {
+        "since_tick": since_tick,
+        "awake_resting": {kind: _split(li, fl) for kind, (li, fl) in sorted(rest.items())},
+        "dormant": {kind: _split(li, fl) for kind, (li, fl) in sorted(dorm.items())},
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="gol-stats", description=__doc__)
     parser.add_argument("save_dir", type=Path)
@@ -214,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--interests", action="store_true", help="per-agent activity profiles")
     parser.add_argument(
         "--window", type=int, default=50_000, help="interest-profile window (ticks)"
+    )
+    parser.add_argument("--circadian", action="store_true", help="rest-vs-light structure")
+    parser.add_argument(
+        "--since", type=int, default=0, help="circadian: ignore samples before this tick"
     )
     args = parser.parse_args(argv)
 
@@ -225,6 +292,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.interests:
         print(json.dumps(interests(args.save_dir, args.window), indent=2))
+        return 0
+    if args.circadian:
+        print(json.dumps(circadian(args.save_dir, args.since), indent=2))
         return 0
     summary = summarize(args.save_dir)
     if args.events:

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pickle
 import threading
-import time
 import zlib
 from typing import Any
 
@@ -50,6 +49,12 @@ class Population:
         # inherit_weights == "lineage": dead learning brains wait here for a
         # new body — weights and replay memory persist across deaths.
         self._lineage_stash: dict[str, list[Brain]] = {}
+        # Action-latch accounting: act-steps where the learner held the lock
+        # and the robot repeated its previous command. The artifact grows with
+        # world speed (a 200ms update spans more ticks the faster ticks go);
+        # act_latched_frac in metrics keeps it visible instead of anecdotal.
+        self._act_attempts: dict[str, int] = {}
+        self._act_latched: dict[str, int] = {}
         if world.robots:
             self._rebuild_brains()
             self._next_idx = (
@@ -129,6 +134,8 @@ class Population:
             self.last_obs.pop(rid, None)
             self._dormant_ids.discard(rid)
             self._pending_stream_reset.discard(rid)
+            self._act_attempts.pop(rid, None)
+            self._act_latched.pop(rid, None)
             self._respawn_queue.append((world.tick + self.cfg.population.respawn_delay_ticks, kind))
         if len(world.robots) < self.cfg.population.target:
             due = [entry for entry in self._respawn_queue if entry[0] <= world.tick]
@@ -189,7 +196,9 @@ class Population:
         self._dormant_ids = {r.id for r in world.robots.values() if r.dormant}
         for robot_id, o in obs.items():
             lock = self.locks[robot_id]
+            self._act_attempts[robot_id] = self._act_attempts.get(robot_id, 0) + 1
             if not lock.acquire(blocking=False):
+                self._act_latched[robot_id] = self._act_latched.get(robot_id, 0) + 1
                 continue
             try:
                 if robot_id in self._pending_stream_reset:
@@ -209,7 +218,14 @@ class Population:
         return [rid for rid, kind in self.kinds.items() if kind == "dreamer"]
 
     def introspection(self) -> dict[str, dict[str, float]]:
-        return {rid: brain.introspect() for rid, brain in self.brains.items()}
+        out = {}
+        for rid, brain in self.brains.items():
+            m = dict(brain.introspect())
+            attempts = self._act_attempts.get(rid, 0)
+            if m and attempts:
+                m["act_latched_frac"] = self._act_latched.get(rid, 0) / attempts
+            out[rid] = m
+        return out
 
     def stats(self) -> dict[str, Any]:
         robots = self.world.robots.values()
@@ -220,42 +236,100 @@ class Population:
 
 
 class LearnerThread:
-    """Background learning: round-robins learn() across learning brains.
+    """Background learning, paced to lived experience, one worker per brain.
 
-    Backpressure rule: the learner skips, the sim never waits. If learning is
-    slow, updates simply get sparser; the world does not stall.
+    Each brain declares a target train_ratio (updates per recorded act-step);
+    its worker accrues update debt as act-steps land and pays it down one
+    learn() at a time. Workers are per-brain because a single mind's updates
+    are inherently serial (each needs the previous one's weights) while
+    *siblings* are independent — three brains learn concurrently instead of
+    taking turns. A supervisor spawns workers for newborns and reaps them on
+    death (stashed lineage brains don't learn, same as before).
+
+    Backpressure rule: the learner skips, the sim never waits — debt is
+    capped, so a world outrunning the learner sheds updates instead of
+    banking an unpayable backlog, and a fast learner idles instead of
+    over-training stale data.
     """
 
-    def __init__(self, population: Population, min_round_seconds: float = 1.0) -> None:
+    # An indebted brain may owe at most this many updates; anything beyond is
+    # dropped (that's the "skip" in skip-don't-stall).
+    MAX_DEBT = 32.0
+
+    def __init__(self, population: Population, idle_seconds: float = 0.1) -> None:
         self.population = population
-        self.min_round_seconds = min_round_seconds
+        self.idle_seconds = idle_seconds
         self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-        self.rounds = 0
+        self._supervisor: threading.Thread | None = None
+        self._workers: dict[str, threading.Thread] = {}
+        self._owed: dict[str, float] = {}
+        self._seen_acts: dict[str, int] = {}
+        self.rounds = 0  # supervisor sweeps (observability/tests)
 
     def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, daemon=True, name="learner")
-        self._thread.start()
+        self._supervisor = threading.Thread(target=self._supervise, daemon=True, name="learner")
+        self._supervisor.start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=30)
+        if self._supervisor is not None:
+            self._supervisor.join(timeout=30)
+        for worker in list(self._workers.values()):
+            worker.join(timeout=30)
 
-    def _run(self) -> None:
+    def _accrue(self, rid: str, brain: Brain) -> float:
+        """Fold newly lived act-steps into rid's update debt."""
+        acts = brain.experience_count()
+        prev = self._seen_acts.get(rid)
+        if prev is None:
+            # First sight (fresh spawn or resume): pace from here, no
+            # retroactive debt for experience lived before we were watching.
+            self._seen_acts[rid] = acts
+            self._owed[rid] = 0.0
+            return 0.0
+        owed = self._owed.get(rid, 0.0) + brain.target_train_ratio() * (acts - prev)
+        owed = min(owed, self.MAX_DEBT)
+        self._seen_acts[rid] = acts
+        self._owed[rid] = owed
+        return owed
+
+    def _supervise(self) -> None:
         while not self._stop.is_set():
-            began = time.monotonic()
-            did_anything = False
-            for rid in self.population.learning_ids():
-                if self._stop.is_set():
-                    return
-                brain = self.population.brains.get(rid)
-                lock = self.population.locks.get(rid)
-                if brain is None or lock is None:
-                    continue
-                with lock:
-                    result = brain.learn()
-                did_anything = did_anything or result is not None
-            elapsed = time.monotonic() - began
-            sleep_for = max(self.min_round_seconds - elapsed, 0.05 if did_anything else 0.5)
-            self._stop.wait(sleep_for)
+            living = set(self.population.learning_ids())
+            for rid in living - self._workers.keys():
+                worker = threading.Thread(
+                    target=self._work, args=(rid,), daemon=True, name=f"learner-{rid}"
+                )
+                self._workers[rid] = worker
+                worker.start()
+            # Reap finished workers and drop pacing state for the dead (also
+            # covers ids that never got a worker) so nothing accumulates.
+            for rid, worker in list(self._workers.items()):
+                if not worker.is_alive():
+                    self._workers.pop(rid, None)
+            for rid in list(self._seen_acts):
+                if rid not in self.population.brains:
+                    self._seen_acts.pop(rid, None)
+                    self._owed.pop(rid, None)
+            self.rounds += 1
+            self._stop.wait(0.25)
+
+    def _work(self, rid: str) -> None:
+        """Pace one brain's updates to its lived experience, until it dies."""
+        while not self._stop.is_set():
+            brain = self.population.brains.get(rid)
+            lock = self.population.locks.get(rid)
+            if brain is None or lock is None:
+                # Body died: this worker's watch has ended. Pacing state is
+                # pruned by the supervisor; a respawn gets a fresh worker.
+                return
+            if self._accrue(rid, brain) < 1.0:
+                self._stop.wait(self.idle_seconds)
+                continue
+            with lock:
+                result = brain.learn()
+            if result is None:
+                # Nothing learnable yet (warmup): don't bank debt for it.
+                self._owed[rid] = 0.0
+            else:
+                self._owed[rid] -= 1.0

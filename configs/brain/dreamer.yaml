@@ -89,4 +89,6 @@ training:
   actor_lr: 3.0e-5
   critic_lr: 3.0e-5
   grad_clip: 100.0
-  train_ratio: 0.25           # target updates per act-step (learner may skip under load)
+  train_ratio: 0.25           # updates per act-step; the learner thread paces to this,
+                              # skipping (never stalling the sim) when it can't keep up.
+                              # Achieved ratio is logged as train_ratio_eff.

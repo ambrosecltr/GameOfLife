@@ -107,8 +107,23 @@ def test_learn_returns_metrics_and_updates() -> None:
         brain.act(fake_obs(rng))
     metrics = brain.learn()
     assert metrics is not None
-    for key in ("loss_model", "kl", "curiosity", "loss_critic", "loss_actor"):
+    for key in (
+        "loss_model",
+        "kl",
+        "curiosity",
+        "loss_critic",
+        "loss_actor",
+        "homeo_max",
+        "homeo_spike_frac",
+        "learn_seconds",
+    ):
         assert key in metrics and np.isfinite(metrics[key])
+    # Pacing counters: 80 acts recorded, 1 update done.
+    assert brain.experience_count() == 80
+    assert metrics["act_steps"] == 80.0
+    assert metrics["updates"] == 1.0
+    assert metrics["train_ratio_eff"] == 1.0 / 80
+    assert brain.target_train_ratio() == 0.25  # config default
 
 
 @pytest.mark.slow
@@ -141,6 +156,13 @@ def test_state_dict_roundtrip() -> None:
     fresh = DreamerBrain(TINY, seed=99)
     fresh.load_state_dict(state)
     assert len(fresh.buffer) == len(brain.buffer)
+    assert fresh.experience_count() == brain.experience_count()
+    # Pre-pacing checkpoints (no act_steps key) seed the counter from the
+    # stored buffer so the update/act-step pair stays coherent.
+    legacy = {k: v for k, v in state.items() if k != "act_steps"}
+    older = DreamerBrain(TINY, seed=98)
+    older.load_state_dict(legacy)
+    assert older.experience_count() == len(brain.buffer)
     for p1, p2 in zip(brain.wm.parameters(), fresh.wm.parameters(), strict=True):
         torch.testing.assert_close(p1, p2)
     obs = fake_obs(np.random.default_rng(5))
@@ -287,9 +309,23 @@ def test_lp_brain_learns_with_boredom() -> None:
         brain.act(fake_obs(rng))
     metrics = brain.learn()
     assert metrics is not None
-    for key in ("lp_reward", "lp_regions", "boredom", "stimulation", "drive_level"):
+    for key in (
+        "lp_reward",
+        "lp_regions",
+        "boredom",
+        "stimulation",
+        "drive_level",
+        "lp_p50",
+        "lp_p90",
+        "lp_stale_frac",
+        "lp_occ_entropy",
+        "boredom_calm_gate",
+        "boredom_dull_gate",
+    ):
         assert key in metrics and np.isfinite(metrics[key]), key
     assert metrics["lp_regions"] >= 1
+    assert 0.0 <= metrics["lp_occ_entropy"] <= 1.0
+    assert 0.0 <= metrics["lp_stale_frac"] <= 1.0
     # LP machinery must survive a checkpoint.
     fresh = DreamerBrain(cfg, seed=12)
     fresh.load_state_dict(brain.state_dict())

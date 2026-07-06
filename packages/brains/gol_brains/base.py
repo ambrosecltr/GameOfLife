@@ -26,6 +26,20 @@ class Brain(ABC):
         """
         return None
 
+    def experience_count(self) -> int:
+        """Lifetime act-steps recorded. The learner thread paces updates
+        against this; scripted brains stay at 0 and are never scheduled."""
+        return 0
+
+    def target_train_ratio(self) -> float:
+        """Desired updates per recorded act-step (training.train_ratio).
+
+        A target, not a promise: when the learner can't keep up it skips —
+        the sim never waits — so the achieved ratio (logged as
+        train_ratio_eff) may run below this.
+        """
+        return 0.0
+
     def introspect(self) -> dict[str, float]:
         """Live internals for the observability layer (curiosity, losses...)."""
         return {}

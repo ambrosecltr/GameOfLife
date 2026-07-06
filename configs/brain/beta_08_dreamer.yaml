@@ -94,4 +94,7 @@ training:
   actor_lr: 3.0e-5
   critic_lr: 3.0e-5
   grad_clip: 100.0
-  train_ratio: 1.0            # the capacity experiment: 4× beta_07's target, and GPU should actually hit it
+  train_ratio: 1.0            # the capacity experiment: the learner paces to this for real
+                              # (enforced post-007; watch train_ratio_eff). Only reachable
+                              # when the world is paced near the GPU's update rate — see
+                              # the pacing math in beta_08_capacity.yaml.

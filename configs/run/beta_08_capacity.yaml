@@ -1,23 +1,36 @@
 # Experiment: the capacity round (round 008; runs after beta_07 closes).
 #
-# Rounds 005–006 concluded that learning capacity and experience density — not
-# reward design — are the binding constraint: beta_07's dreamers manage an
-# effective train_ratio of ~0.016 against a 0.25 target (~400 updates per
-# ~25k lived act-steps, learner backpressured on M1 CPU). This config moves
-# ONLY the capacity knobs: brain scale (nano → base), update budget
-# (train_ratio 0.25 → 1.0, in beta_08_dreamer.yaml), and devices (cpu → cuda).
-# World, population, seed protocol, and the entire gratification reward stack
-# are identical to beta_07, which serves as the local A/B. Foragers are the
-# cross-run anchor — if their numbers shift materially, the world moved, not
-# the brains.
+# Rounds 005–007 concluded that learning capacity and experience density — not
+# reward design — are the binding constraint (beta_07 achieved train_ratio
+# ~0.023 against a 0.25 target; its LP curiosity never decayed because the
+# model never converged). This config moves ONLY the capacity knobs: brain
+# scale (nano → base), update budget (train_ratio 0.25 → 1.0, in
+# beta_08_dreamer.yaml), and devices (cpu → cuda). World, population, seed
+# protocol, and the entire gratification reward stack are identical to
+# beta_07, which serves as the local A/B. Foragers are the cross-run anchor —
+# if their numbers shift materially, the world moved, not the brains.
+#
+# PACING — the capacity experiment's one operational rule: train_ratio is
+# updates per lived act-step, so world speed and achieved ratio trade off
+# exactly. The GPU delivers some U updates/s total — one learner worker per
+# brain, so U ≈ 3 ÷ learn_seconds (read learn_seconds off early metrics);
+# 3 dreamers consume (ticks/s ÷ act_every × 3) act-steps/s, so
+#
+#   achieved ratio ≈ U ÷ (ticks/s ÷ 5 × 3)  →  ticks/s for ratio R = 5·U/(3·R)
+#
+# Run PACED (no --headless) and set the multiplier live with gol-ctl speed:
+# e.g. U=15/s → ratio 1.0 at 25 t/s (speed 1.25); ratio 0.25 at 100 t/s
+# (speed 5, ~8h to 3M ticks). Headless-unpaced on a many-core box sprints the
+# world and collapses the ratio back to beta_07 starvation — paying for a GPU
+# it never lets catch up. Watch train_ratio_eff and act_latched_frac in the
+# per-brain metrics; both exist post-007.
 #
 #   PYTHONUNBUFFERED=1 uv run gol-run --new saves/beta_08 \
-#       --config configs/run/beta_08_capacity.yaml --headless
+#       --config configs/run/beta_08_capacity.yaml
 #
-# If 3× base is too slow on a 4090-class box (watch ticks/s and effective
-# train_ratio = updates/buffer in metrics), drop beta_08_dreamer.yaml to
-# preset: small before burning budget — a starved base model is the same
-# experiment we already ran locally.
+# If base is too slow on the box (learn_seconds ≫ 100ms, forcing speed < 1),
+# drop beta_08_dreamer.yaml to preset: small before burning budget — a
+# starved base model is the same experiment we already ran locally.
 
 world_config: configs/world/default.yaml
 

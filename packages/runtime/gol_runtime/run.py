@@ -132,7 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.sync and population.learning_ids():
         learner = LearnerThread(population)
         learner.start()
-        print(f"learner thread running for {len(population.learning_ids())} brain(s)")
+        print(f"learner running: one worker per brain, {len(population.learning_ids())} brain(s)")
     try:
         loop.run(max_ticks=args.ticks, paced=not args.headless)
     except KeyboardInterrupt:

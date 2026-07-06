@@ -20,6 +20,7 @@ drives purely intrinsic — no tasks, no resets:
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import numpy as np
@@ -283,6 +284,10 @@ class DreamerBrain(Brain):
         )
         self.grad_clip = float(tr.get("grad_clip", 100.0))
         self.imag_starts = int(tr.get("imag_starts", 256))
+        # Updates per act-step the learner thread paces toward. Both counters
+        # it paces with (_act_steps, _updates) ride state_dict, so the debt
+        # math stays coherent across checkpoints and inheritance.
+        self.train_ratio = float(tr.get("train_ratio", 0.25))
 
         # Live recurrent state (the robot's stream of consciousness).
         self.h, self.z = self.wm.rssm.initial(1, self.device)
@@ -290,6 +295,10 @@ class DreamerBrain(Brain):
         self._return_scale = [1.0]
         self._metrics: dict[str, float] = {}
         self._updates = 0
+        self._act_steps = 0
+        self._learn_seconds = 0.0  # EMA of learn() wall time
+        self._gate_calm = 0.0  # boredom gate telemetry (imagination means)
+        self._gate_dull = 0.0
 
     def _apply_temperament(self) -> None:
         t, base = self.temperament, self._pre_temperament
@@ -351,6 +360,7 @@ class DreamerBrain(Brain):
 
         action_vec = self._action_to_vec(cont, grip)
         self.buffer.add(obs, action_vec)
+        self._act_steps += 1
         self.last_action = torch.as_tensor(action_vec, device=self.device).unsqueeze(0)
         return Action(
             drive=action_vec[:2].copy(),
@@ -470,14 +480,25 @@ class DreamerBrain(Brain):
             drive = self._drive_level(self.wm.head_proprio(img_feat))
             calm = (1.0 - drive / self.boredom_drive_threshold).clamp(min=0.0)
             dull = (1.0 - r_cur / self.boredom_stim_threshold).clamp(min=0.0)
+            # Gate telemetry: the product collapses to 0 whenever either gate
+            # is shut, hiding how close the other came — log them separately.
+            self._gate_calm = float(calm.mean())
+            self._gate_dull = float(dull.mean())
             bored = self.boredom_weight * calm * dull
             reward = reward - bored
         return reward, r_cur, bored
+
+    def experience_count(self) -> int:
+        return self._act_steps
+
+    def target_train_ratio(self) -> float:
+        return self.train_ratio
 
     def learn(self) -> dict[str, float] | None:
         batch_np = self.buffer.sample_sequences(self.batch_size, self.seq_len)
         if batch_np is None or len(self.buffer) < self.warmup_steps:
             return None
+        learn_began = time.monotonic()
         b = {k: torch.as_tensor(v, device=self.device) for k, v in batch_np.items()}
         B, L = b["depth"].shape[:2]
         kind_idx = b["kind"].long()
@@ -552,6 +573,7 @@ class DreamerBrain(Brain):
 
         # Curiosity statistics on real experience (keeps normalization honest).
         lp_reward_mean = 0.0
+        lp_idx: torch.Tensor | None = None
         with torch.no_grad():
             real_disagreement = self.wm.disagreement(feat[:, :-1].detach(), b["action"][:, 1:])
             self.curiosity_norm.update(real_disagreement)
@@ -567,6 +589,7 @@ class DreamerBrain(Brain):
                 else:
                     idx = self._kind_regions_obs(obs["kind_onehot"][:, :-1]).reshape(-1)
                 self.lp.update(idx, err)
+                lp_idx = idx
                 real_lp = self.lp.reward(idx)
                 self.lp_norm.update(real_lp)
                 lp_reward_mean = float(self.lp_norm.normalize(real_lp).clamp(0, 5.0).mean())
@@ -640,6 +663,10 @@ class DreamerBrain(Brain):
         self.opt_actor.step()
 
         self._updates += 1
+        elapsed = time.monotonic() - learn_began
+        self._learn_seconds = (
+            elapsed if self._learn_seconds == 0.0 else 0.95 * self._learn_seconds + 0.05 * elapsed
+        )
         self._metrics = {
             "loss_model": float(model_loss.detach()),
             "pred_error_depth": float(loss_depth.detach().mean() / self.wm.num_rays),
@@ -651,11 +678,18 @@ class DreamerBrain(Brain):
                 self.curiosity_norm.normalize(real_disagreement).clamp(0, 5).mean()
             ),
             "reward_homeostasis": float(homeo.mean()),
+            # Batch mean hides meal spikes; max + spike share make the
+            # drive-reward's loud instants visible next to curiosity.
+            "homeo_max": float(homeo.max()),
+            "homeo_spike_frac": float((homeo > 0.1).float().mean()),
             "value": float(value.mean()),
             "loss_critic": float(loss_critic.detach()),
             "loss_actor": float(loss_actor.detach()),
             "entropy": float(img_ent.detach().mean()),
             "updates": float(self._updates),
+            "act_steps": float(self._act_steps),
+            "train_ratio_eff": float(self._updates / max(1, self._act_steps)),
+            "learn_seconds": self._learn_seconds,
             "buffer": float(len(self.buffer)),
         }
         if self.homeostasis_mode == "drive":
@@ -663,9 +697,26 @@ class DreamerBrain(Brain):
         if self.curiosity_mode == "lp":
             self._metrics["lp_reward"] = lp_reward_mean
             self._metrics["lp_regions"] = float(self.lp.regions_seen())
+            # Per-region LP telemetry — the "does interest go stale where the
+            # model converges" instrument. Stale = a seen region whose raw LP
+            # has fallen to ~nothing; occupancy entropy says whether the batch
+            # actually spreads over the partition (1 = uniform, 0 = one region).
+            seen = self.lp.count > 0
+            if bool(seen.any()):
+                lp_seen = self.lp.lp()[seen]
+                self._metrics["lp_p50"] = float(lp_seen.quantile(0.5))
+                self._metrics["lp_p90"] = float(lp_seen.quantile(0.9))
+                self._metrics["lp_stale_frac"] = float((lp_seen < 1e-3).float().mean())
+            if lp_idx is not None:
+                occ = torch.bincount(lp_idx.reshape(-1).cpu(), minlength=self.lp.n).float()
+                probs = occ / occ.sum().clamp(min=1.0)
+                entropy = -(probs[probs > 0] * probs[probs > 0].log()).sum()
+                self._metrics["lp_occ_entropy"] = float(entropy / np.log(self.lp.n))
         if self.boredom_weight > 0:
             self._metrics["boredom"] = float(bored.mean())
             self._metrics["stimulation"] = float(r_cur.mean())
+            self._metrics["boredom_calm_gate"] = self._gate_calm
+            self._metrics["boredom_dull_gate"] = self._gate_dull
         return self._metrics
 
     def introspect(self) -> dict[str, float]:
@@ -698,6 +749,7 @@ class DreamerBrain(Brain):
             "lp_norm": self.lp_norm.state_dict(),
             "return_scale": self._return_scale[0],
             "updates": self._updates,
+            "act_steps": self._act_steps,
             "rng_state": self.rng.bit_generator.state,
             "buffer": self.buffer.state_dict(),
             "h": self.h.cpu().numpy(),
@@ -730,6 +782,10 @@ class DreamerBrain(Brain):
             self.lp_norm.load_state_dict(state["lp_norm"])
         self._return_scale = [float(state["return_scale"])]
         self._updates = int(state["updates"])
+        # Guarded: pre-pacing checkpoints carry no act-step counter; seed it
+        # at the stored buffer's size so the update/act-step pair stays
+        # roughly coherent.
+        self._act_steps = int(state.get("act_steps", len(state["buffer"]["depth"])))
         self.rng.bit_generator.state = state["rng_state"]
         self.buffer.load_state_dict(state["buffer"])
         self.h = torch.as_tensor(state["h"], device=self.device)

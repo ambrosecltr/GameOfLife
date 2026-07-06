@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from gol_runtime.inspect import interests
+from gol_runtime.inspect import circadian, interests
 
 
 def _write(path: Path, records: list[dict[str, Any]]) -> None:
@@ -73,3 +73,53 @@ def test_interests_tolerates_old_saves(tmp_path: Path) -> None:
     _write(tmp_path / "events.ndjson", [])
     out = interests(tmp_path, window_ticks=1000)
     assert out["per_agent"] == {} and out["divergence"] == []
+
+
+def test_circadian_splits_chosen_rest_from_forced_dormancy(tmp_path: Path) -> None:
+    (tmp_path / "manifest.json").write_text("{}")
+    # Alternating day/night samples: one agent rests only at night while
+    # awake; another hibernates through the day.
+    metrics = []
+    for i, tick in enumerate(range(0, 4000, 100)):
+        light = 1.0 if i % 2 == 0 else 0.0
+        metrics.append(
+            {
+                "tick": tick,
+                "light": light,
+                "robots": {
+                    "night_rester": {
+                        "brain": "dreamer",
+                        "resting": light <= 0.5,
+                        "dormant": False,
+                    },
+                    "day_sleeper": {
+                        "brain": "scripted_forager",
+                        "resting": False,
+                        "dormant": light > 0.5,
+                    },
+                },
+            }
+        )
+    _write(tmp_path / "metrics.ndjson", metrics)
+
+    out = circadian(tmp_path)
+    rester = out["awake_resting"]["dreamer"]
+    assert rester["corr_with_light"] < -0.99  # sleeps at night: the H2 signature
+    assert rester["night_frac"] == 1.0
+    assert rester["day_frac"] == 0.0
+    sleeper = out["dormant"]["scripted_forager"]
+    assert sleeper["corr_with_light"] > 0.99
+    # --since trims the early samples.
+    trimmed = circadian(tmp_path, since_tick=2000)
+    assert trimmed["dormant"]["scripted_forager"]["samples"] == 20
+
+
+def test_circadian_tolerates_old_saves(tmp_path: Path) -> None:
+    (tmp_path / "manifest.json").write_text("{}")
+    # Pre-rest-logging save: robots carry no resting field.
+    _write(
+        tmp_path / "metrics.ndjson",
+        [{"tick": 0, "light": 1.0, "robots": {"walker_0": {"energy": 50.0}}}],
+    )
+    out = circadian(tmp_path)
+    assert out["awake_resting"] == {} and out["dormant"] == {}
