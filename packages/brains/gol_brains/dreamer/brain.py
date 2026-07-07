@@ -333,6 +333,18 @@ class DreamerBrain(Brain):
         # Batch rows pinned to the newest experience (DreamerV3 online-queue
         # mixing); the rest sample uniformly over the whole life. 0 = legacy.
         self.recent_slots = int(replay.get("recent", 0))
+        # Reward-aware replay (round 009's reachability finding): "reward"
+        # draws prioritize_rows of the batch from windows containing an
+        # ate/damage event so the twohot reward head actually trains on the
+        # rare loud moments. Learned-from changes; rewarded never does.
+        self.prioritize = str(replay.get("prioritize", "none"))
+        if self.prioritize not in ("none", "reward"):
+            raise ValueError(f"unknown replay prioritize mode: {self.prioritize!r}")
+        self.prioritize_rows = (
+            int(replay.get("prioritize_rows", max(1, self.batch_size // 4)))
+            if self.prioritize == "reward"
+            else 0
+        )
 
         tr = dict(cfg.get("training", {}))
         model_lr = float(tr.get("model_lr", 1e-4))
@@ -613,7 +625,11 @@ class DreamerBrain(Brain):
 
     def learn(self) -> dict[str, float] | None:
         batch_np = self.buffer.sample_sequences(
-            self.batch_size, self.burn_in + self.seq_len, recent=self.recent_slots
+            self.batch_size,
+            self.burn_in + self.seq_len,
+            recent=self.recent_slots,
+            prioritized=self.prioritize_rows,
+            spike_offset=self.burn_in,
         )
         if batch_np is None or len(self.buffer) < self.warmup_steps:
             return None
@@ -673,7 +689,8 @@ class DreamerBrain(Brain):
         )
         loss_proprio = F.mse_loss(pred_proprio, b["proprio"], reduction="none").sum(-1)
         homeo = self._homeostasis(b["events"], b["proprio"])
-        loss_reward = self.twohot.loss(self.wm.head_reward(feat), homeo)
+        reward_logits = self.wm.head_reward(feat)
+        loss_reward = self.twohot.loss(reward_logits, homeo)
         cont_target = (b["proprio"][..., 5] > 0.01).float()
         loss_cont = F.binary_cross_entropy_with_logits(
             self.wm.head_cont(feat).squeeze(-1), cont_target, reduction="none"
@@ -845,6 +862,7 @@ class DreamerBrain(Brain):
             # drive-reward's loud instants visible next to curiosity.
             "homeo_max": float(homeo.max()),
             "homeo_spike_frac": float((homeo > 0.1).float().mean()),
+            "loss_reward": float(loss_reward.detach().mean()),
             "value": float(value.mean()),
             "loss_critic": float(loss_critic.detach()),
             "loss_actor": float(loss_actor.detach()),
@@ -855,6 +873,19 @@ class DreamerBrain(Brain):
             "learn_seconds": self._learn_seconds,
             "buffer": float(len(self.buffer)),
         }
+        # Can the reward head see the loud moments? |decoded - realized| on
+        # spike samples is the reachability gauge (009: a head that never
+        # trains on meals can't let the actor plan toward one), and the
+        # spike-row fraction shows what prioritized replay is feeding it.
+        with torch.no_grad():
+            spike = homeo.abs() > 0.1
+            if bool(spike.any()):
+                pred_r = self.twohot.decode(reward_logits.detach())
+                self._metrics["reward_head_spike_err"] = float(
+                    (pred_r[spike] - homeo[spike]).abs().mean()
+                )
+            if self.prioritize_rows > 0:
+                self._metrics["spike_row_frac"] = float(spike.any(dim=1).float().mean())
         if self.l2_init_weight > 0:
             self._metrics["l2_init_dist"] = l2_dist
         if self.homeostasis_mode == "drive":

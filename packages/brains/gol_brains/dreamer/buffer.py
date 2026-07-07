@@ -46,7 +46,12 @@ class ReplayBuffer:
             self.full = True
 
     def sample_sequences(
-        self, batch: int, length: int, recent: int = 0
+        self,
+        batch: int,
+        length: int,
+        recent: int = 0,
+        prioritized: int = 0,
+        spike_offset: int = 0,
     ) -> dict[str, npt.NDArray[np.float32]] | None:
         """Contiguous sequences that do not cross the ring's write seam.
 
@@ -55,6 +60,15 @@ class ReplayBuffer:
         online-queue mixing: without it, a long lifelong buffer means most
         gradient flows to ancient experience and fresh events wait ~capacity/
         batch*length updates for their first replay.
+
+        `prioritized` rows are drawn from windows containing an ate/damage
+        event (reward-aware replay, round 009's reachability finding: ~53
+        meals in 2.8M ticks means a uniformly-sampled reward head trains on
+        essentially zero positive-homeostasis events — the actor cannot plan
+        toward a spike its head has never learned to predict). This changes
+        what is learned from, never what is rewarded. The spike lands at
+        window position >= `spike_offset` (callers pass burn_in so it falls
+        in the graded region). No events lived yet -> rows fall back uniform.
         """
         n = len(self)
         if n < length + 2:
@@ -68,6 +82,19 @@ class ReplayBuffer:
             # time-contiguous; only the write seam at pos is a discontinuity,
             # and these windows end at (or stagger back from) exactly there.
             rows.append(np.arange(end - length, end, dtype=np.int64) % self.capacity)
+        if prioritized > 0:
+            spikes_raw = np.flatnonzero(self.events[:n, :2].max(axis=1) > 0)
+            if spikes_raw.size:
+                # Work in time coordinates (0 = oldest): windows clamped to
+                # [0, n - length] are seam-safe by construction, then map back
+                # to ring positions. When full, time t lives at raw (pos+t).
+                t_spikes = (spikes_raw - self.pos) % self.capacity if self.full else spikes_raw
+                for _ in range(min(prioritized, batch - len(rows))):
+                    t = int(t_spikes[self.rng.integers(0, t_spikes.size)])
+                    off = int(self.rng.integers(min(spike_offset, length - 1), length))
+                    start = min(max(t - off, 0), n - length)
+                    raw = (self.pos + start) % self.capacity if self.full else start
+                    rows.append((raw + np.arange(length, dtype=np.int64)) % self.capacity)
         starts = []
         for _ in range(batch - len(rows)):
             for _attempt in range(20):

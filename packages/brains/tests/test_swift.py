@@ -190,6 +190,72 @@ def test_uniform_rows_never_cross_seam() -> None:
         np.testing.assert_array_equal(np.diff(batch["proprio"][..., 0], axis=1) % 512, 1)
 
 
+def _spiked_buffer(capacity: int, fill: int, spike_steps: set[int]) -> ReplayBuffer:
+    rng = np.random.default_rng(1)
+    buf = ReplayBuffer(capacity=capacity, num_rays=4, action_dim=ACTION_DIM, seed=1)
+    for i in range(fill):
+        obs = fake_obs(rng)
+        obs["rays"] = obs["rays"][:4]
+        obs["proprio"][0] = i % 512
+        obs["events"][:] = 0.0
+        if i in spike_steps:
+            obs["events"][0] = 1.0  # ate
+        buf.add(obs, np.zeros(ACTION_DIM, dtype=np.float32))
+    return buf
+
+
+def test_prioritized_rows_contain_spikes() -> None:
+    buf = _spiked_buffer(capacity=1000, fill=300, spike_steps={137})
+    for _ in range(10):
+        batch = buf.sample_sequences(4, 32, prioritized=2, spike_offset=8)
+        assert batch is not None
+        for row in range(2):
+            hits = np.flatnonzero(batch["events"][row, :, 0] > 0)
+            assert hits.size, "prioritized row must contain the spike"
+            assert batch["proprio"][row, hits[0], 0] == 137
+            # burn-in offset: the spike lands in the graded region.
+            assert hits[0] >= 8
+            np.testing.assert_array_equal(np.diff(batch["proprio"][row, :, 0]), 1)
+
+
+def test_prioritized_rows_wrap_ring() -> None:
+    buf = _spiked_buffer(capacity=100, fill=150, spike_steps={130})
+    for _ in range(10):
+        batch = buf.sample_sequences(2, 32, prioritized=1)
+        assert batch is not None
+        assert (batch["events"][0, :, 0] > 0).any()
+        np.testing.assert_array_equal(np.diff(batch["proprio"][0, :, 0]) % 512, 1)
+
+
+def test_prioritized_falls_back_uniform_without_spikes() -> None:
+    buf = _filled_buffer(capacity=1000, fill=300)  # no events anywhere
+    batch = buf.sample_sequences(4, 32, prioritized=2)
+    assert batch is not None and batch["depth"].shape == (4, 32, 4)
+
+
+def test_prioritize_brain_learns_and_reports() -> None:
+    cfg = dict(TINY, replay=dict(TINY["replay"], prioritize="reward", prioritize_rows=1))
+    brain = DreamerBrain(cfg, seed=50)
+    rng = np.random.default_rng(50)
+    for i in range(80):
+        obs = fake_obs(rng)
+        obs["events"][:] = 0.0
+        if i % 20 == 5:
+            obs["events"][0] = 1.0  # occasional meal
+        brain.act(obs)
+    metrics = brain.learn()
+    assert metrics is not None
+    assert np.isfinite(metrics["loss_reward"])
+    assert "spike_row_frac" in metrics and metrics["spike_row_frac"] > 0.0
+    assert "reward_head_spike_err" in metrics and np.isfinite(metrics["reward_head_spike_err"])
+
+
+def test_unknown_prioritize_rejected() -> None:
+    cfg = dict(TINY, replay=dict(TINY["replay"], prioritize="vibes"))
+    with pytest.raises(ValueError, match="prioritize"):
+        DreamerBrain(cfg, seed=51)
+
+
 def test_burn_in_brain_learns() -> None:
     cfg = dict(TINY, replay=dict(TINY["replay"], seq_len=8, burn_in=8, recent=1))
     brain = DreamerBrain(cfg, seed=40)

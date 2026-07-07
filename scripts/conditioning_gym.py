@@ -114,7 +114,8 @@ def main() -> None:
 
     out_path = args.out or blob_path.with_suffix(".gym.ndjson")
     watch = ("curiosity_scaled", "lp_reward", "lp_stale_frac", "boredom_pressure",
-             "boredom", "stimulation", "lp_mix_eff", "loss_model")
+             "boredom", "stimulation", "lp_mix_eff", "loss_model",
+             "loss_reward", "reward_head_spike_err", "spike_row_frac")
     began = time.monotonic()
     with open(out_path, "w") as out:
         for i in range(args.updates):
