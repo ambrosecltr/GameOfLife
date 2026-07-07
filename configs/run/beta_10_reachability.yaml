@@ -1,0 +1,64 @@
+# Experiment: the reachability round (journal round 011; runs after 009
+# closed and 010/swift-nano merged its speed core to main).
+#
+# Round 009's verdict: conditioning works (boredom is a thermostat at ~0.39
+# equilibrium and drove the first within-run eating rise ever), but the binge
+# collapsed the moment hunger had to carry it — the HRRL reward is
+# well-shaped and UNREACHABLE. Two structural gaps, two knobs, both in
+# beta_10_dreamer.yaml: reward.blackout: priced (the dormancy crash becomes
+# one visible HRRL-priced transition) and replay.prioritize: reward (salient
+# steps actually reach the twohot reward head). Everything else — the
+# conditioning stack, capacity bundle (base preset, train_ratio 1.0, cuda),
+# world, seed protocol, population — identical to beta_09, the A/B baseline.
+# Foragers remain the cross-run anchor.
+#
+# Code-side (not config): stream-break markers now zero the HRRL reduction
+# across respawns in ALL modes — beta_09's replay paid every death->rebirth
+# stitch as +3.9 and every wake as +1.2 (dreamer_043 census), so the beta_10
+# baseline semantics are cleaner than beta_09's, not identical. Journal 011
+# carries the reinterpretation.
+#
+# PACING — same rule as 008/009: train_ratio is updates per lived act-step;
+# run PACED (no --headless), read learn_seconds off early metrics, set
+# gol-ctl speed so train_ratio_eff holds ~1.0. Verify at first checkpoint:
+# updates == act_steps - warmup (±1024 debt cap). Benchmarked on THIS box
+# (RTX 3090 Ti, 2026-07-07): see journal 011 Operations for the numbers the
+# launch speed came from. Priced blackouts may reduce dormancy (that is the
+# point), which cuts sleep-learning catch-up headroom — watch awake fraction
+# and drop speed if ratio slips.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/beta_10 \
+#       --config configs/run/beta_10_reachability.yaml
+#
+# Watch list (first checkpoint + mid-run): reward_head_spike_err (falling =
+# the head is finally fitting the loud moments), spike_row_frac (~what
+# prioritization feeds it), eats-while-hungry (the win condition: a rise
+# that survives the calm gate closing), hibernation-ledger death fraction
+# (beta_09: 23/26 on the ~347k clock), poisoned-meal fraction (~26% flat so
+# far), boredom_pressure (~0.39 equilibrium should replicate — saturation
+# means a regression).
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7301
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/beta_10_dreamer.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: false                # round-008 disk lesson stands
+  metrics_every_ticks: 100
