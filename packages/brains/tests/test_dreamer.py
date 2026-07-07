@@ -86,6 +86,33 @@ def test_respawn_severs_salience_even_when_priced() -> None:
     assert brain._prev_drive is None
 
 
+def test_stream_break_zeroes_replayed_reduction() -> None:
+    """A window spanning a respawn must not pay the newborn's full tank as
+    drive reduction (beta_09 census: +3.9 vs +0.5 for a real meal)."""
+    brain = DreamerBrain({**TINY, "reward": dict(DRIVE)}, seed=7)
+    proprio = torch.zeros(1, 2, PROPRIO_DIM)
+    proprio[0, 0, 5], proprio[0, 0, 6] = 0.01, 0.02  # dying
+    proprio[0, 1, 5], proprio[0, 1, 6] = 1.0, 1.0  # newborn, full tank
+    events = torch.zeros(1, 2, EVENTS_DIM)
+    unmasked = brain._homeostasis(events, proprio)
+    assert float(unmasked[0, 1]) > 1.0, "sanity: the fictional jackpot exists unmasked"
+    masked = brain._homeostasis(events, proprio, torch.tensor([[0.0, 1.0]]))
+    assert float(masked[0, 1]) <= 0.0, "marked break: only the level penalty may remain"
+
+
+def test_wake_marks_stream_break_only_when_cut() -> None:
+    for mode, expect_break in (("cut", 1), ("priced", 0)):
+        brain = DreamerBrain({**TINY, "reward": {**DRIVE, "blackout": mode}}, seed=3)
+        rng = np.random.default_rng(2)
+        brain.act(body_obs(rng, energy=0.9, integrity=1.0))
+        brain.act(body_obs(rng, energy=0.02, integrity=1.0))
+        brain.wake()
+        brain.act(body_obs(rng, energy=0.4, integrity=0.6))
+        assert brain.buffer.first[0] == 1, "a fresh mind's first step is a break"
+        assert brain.buffer.first[1] == 0
+        assert brain.buffer.first[2] == expect_break, mode
+
+
 def test_priced_blackout_requires_drive_homeostasis() -> None:
     with pytest.raises(ValueError, match="blackout"):
         DreamerBrain({**TINY, "reward": {"blackout": "priced"}}, seed=0)

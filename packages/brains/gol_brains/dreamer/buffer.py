@@ -32,6 +32,13 @@ class ReplayBuffer:
         # at satiety is an ate event worth exactly zero (measured on
         # swift_01: 4 meals, all at energy >= 0.96, all worthless).
         self.salience = np.zeros(capacity, dtype=np.float16)
+        # Stream-break marker: 1 on a step with no lived predecessor (first
+        # act of a new body, or a wake the brain treats as a cut). The ring
+        # stays adjacent across breaks; this is how learn() knows a window's
+        # cross-gap drive delta is fictional. Census of beta_09's dreamer_043
+        # measured what happens without it: 8 death->rebirth stitches read as
+        # +3.9 reward (vs +0.5 for a real meal) and landed in ~61% of batches.
+        self.first = np.zeros(capacity, dtype=np.uint8)
         self.pos = 0
         self.full = False
 
@@ -39,10 +46,15 @@ class ReplayBuffer:
         return self.capacity if self.full else self.pos
 
     def add(
-        self, obs: Observation, action: npt.NDArray[np.float32], salience: float = 0.0
+        self,
+        obs: Observation,
+        action: npt.NDArray[np.float32],
+        salience: float = 0.0,
+        first: bool = False,
     ) -> None:
         i = self.pos
         self.salience[i] = salience
+        self.first[i] = first
         self.depth[i] = np.clip(obs["rays"][:, 0] * 255, 0, 255).astype(np.uint8)
         self.rgb[i] = np.clip(obs["rays"][:, 1:4] * 255, 0, 255).astype(np.uint8)
         self.kind[i] = obs["rays"][:, 4:].argmax(axis=1).astype(np.uint8)
@@ -127,6 +139,7 @@ class ReplayBuffer:
             "sound": self.sound[idx].astype(np.float32),
             "events": self.events[idx].astype(np.float32),
             "action": self.action[idx].astype(np.float32),
+            "first": self.first[idx].astype(np.float32),
         }
 
     def state_dict(self) -> dict[str, Any]:
@@ -145,6 +158,7 @@ class ReplayBuffer:
             "events": self.events[order][-n:],
             "action": self.action[order][-n:],
             "salience": self.salience[order][-n:],
+            "first": self.first[order][-n:],
             "rng_state": self.rng.bit_generator.state,
         }
 
@@ -156,6 +170,10 @@ class ReplayBuffer:
         # stored proprio/events on load when prioritization is on.
         if "salience" in state:
             self.salience[:n] = state["salience"][-n:]
+        # Pre-marker checkpoints: zeros, i.e. legacy no-breaks behavior (the
+        # stored life's breaks are unrecoverable — same rule as salience).
+        if "first" in state:
+            self.first[:n] = state["first"][-n:]
         self.pos = n % self.capacity
         self.full = n == self.capacity
         self.rng.bit_generator.state = state["rng_state"]

@@ -381,6 +381,10 @@ class DreamerBrain(Brain):
         # satiety is an ate event worth zero (swift_01 measured exactly that).
         self.prioritize_threshold = float(replay.get("prioritize_threshold", 0.1))
         self._prev_drive: float | None = None  # act-stream drive level, for salience
+        # The next recorded step has no lived predecessor (fresh mind, respawn,
+        # or a cut wake): it lands in the buffer as a stream-break marker so
+        # replayed windows never read a fictional drive delta across the gap.
+        self._stream_first = True
 
         tr = dict(cfg.get("training", {}))
         model_lr = float(tr.get("model_lr", 1e-4))
@@ -518,7 +522,8 @@ class DreamerBrain(Brain):
                 grip = int(dist_grip.sample()[0])
 
         action_vec = self._action_to_vec(cont, grip)
-        self.buffer.add(obs, action_vec, salience=salience)
+        self.buffer.add(obs, action_vec, salience=salience, first=self._stream_first)
+        self._stream_first = False
         self._act_steps += 1
         self.last_action = torch.as_tensor(action_vec, device=self.device).unsqueeze(0)
         return Action(
@@ -567,7 +572,9 @@ class DreamerBrain(Brain):
         d = (self.drive_weights * deficit.pow(self.drive_pow_m)).sum(-1)
         return d.pow(1.0 / self.drive_pow_n)
 
-    def _homeostasis(self, events: torch.Tensor, proprio: torch.Tensor) -> torch.Tensor:
+    def _homeostasis(
+        self, events: torch.Tensor, proprio: torch.Tensor, first: torch.Tensor | None = None
+    ) -> torch.Tensor:
         if self.homeostasis_mode == "drive":
             # HRRL: reward is drive *reduction*, so valence is need-relative —
             # eating while starving is worth a lot, eating past the setpoint is
@@ -575,10 +582,16 @@ class DreamerBrain(Brain):
             # fatigue price themselves the same way, through the state they
             # move. A small level penalty keeps a gradient on standing
             # deficits. The first step of a sequence has no predecessor, so
-            # its reduction term is zero.
+            # its reduction term is zero — and so does a stream-break step
+            # (`first`): without the mask a window spanning a respawn pays the
+            # newborn's full tank as a +3.9 "reduction" (measured on beta_09's
+            # dreamer_043; a real meal is +0.5). Priced blackouts don't mark
+            # the wake, so their true cross-gap delta stays in.
             d = self._drive_level(proprio)
             reduction = torch.zeros_like(d)
             reduction[..., 1:] = d[..., :-1] - d[..., 1:]
+            if first is not None:
+                reduction = reduction * (1.0 - first)
             return self.drive_scale * reduction - self.drive_level_penalty * d
         ate, damage = events[..., 0], events[..., 1]
         energy = proprio[..., 5]
@@ -739,7 +752,7 @@ class DreamerBrain(Brain):
             .sum(-1)
         )
         loss_proprio = F.mse_loss(pred_proprio, b["proprio"], reduction="none").sum(-1)
-        homeo = self._homeostasis(b["events"], b["proprio"])
+        homeo = self._homeostasis(b["events"], b["proprio"], b["first"])
         reward_logits = self.wm.head_reward(feat)
         loss_reward = self.twohot.loss(reward_logits, homeo)
         if self.spike_loss_weight > 0.0:
@@ -994,15 +1007,17 @@ class DreamerBrain(Brain):
         self.h, self.z = self.wm.rssm.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
         self._prev_drive = None
+        self._stream_first = True
 
     def wake(self) -> None:
         """First act after a dormant spell (see the blackout flag's contract).
 
         cut: the gap is a stream break like any other. priced: the live
         recurrent state still resets (the mind was off) but _prev_drive
-        survives, so the wake act records the gap's real drive delta as
-        salience — the blackout becomes the one visible transition that
-        reward-aware replay can then keep feeding to the reward head.
+        survives and the wake step is NOT marked as a stream break, so the
+        gap's real drive delta enters both the replayed reward and the
+        salience chain — the blackout becomes the one visible transition
+        that reward-aware replay can keep feeding to the reward head.
         """
         if self.blackout == "cut":
             self.reset_stream()
@@ -1014,9 +1029,11 @@ class DreamerBrain(Brain):
         """Backfill per-step reward salience for a pre-salience checkpoint.
 
         Right after ReplayBuffer.load_state_dict the ring is in time order,
-        so the drive deltas below pair consecutive lived steps (any stream
-        breaks inside the stored life are unrecoverable — those steps read
-        slightly wrong, which uniform fallback tolerates).
+        so the drive deltas below pair consecutive lived steps. Stream-break
+        markers, when the blob carries them, zero the fictional cross-gap
+        spikes; pre-marker blobs' breaks are unrecoverable — those steps read
+        wrong (a respawn backfills as a ~3.9 spike), which a screen must
+        discount by hand.
         """
         n = len(self.buffer)
         if n == 0:
@@ -1029,6 +1046,7 @@ class DreamerBrain(Brain):
             reduction = torch.zeros_like(d)
             reduction[1:] = d[:-1] - d[1:]
             sal = (self.drive_scale * reduction).abs().cpu().numpy()
+            sal[self.buffer.first[:n] == 1] = 0.0
         else:
             sal = self.buffer.events[:n, :2].astype(np.float32).sum(-1)
         self.buffer.salience[:n] = sal.astype(np.float16)
@@ -1054,9 +1072,10 @@ class DreamerBrain(Brain):
             "lp_norm": self.lp_norm.state_dict(),
             "return_scale": self._return_scale[0],
             "boredom_pressure": self._boredom_pressure,
-            # Rides the checkpoint so a resume during a dormant spell doesn't
+            # Ride the checkpoint so a resume during a dormant spell doesn't
             # silently cut a blackout the priced mode should have seen.
             "prev_drive": self._prev_drive,
+            "stream_first": self._stream_first,
             "updates": self._updates,
             "act_steps": self._act_steps,
             "rng_state": self.rng.bit_generator.state,
@@ -1102,6 +1121,7 @@ class DreamerBrain(Brain):
         self._boredom_pressure = float(state.get("boredom_pressure", 0.0))
         prev_drive = state.get("prev_drive")
         self._prev_drive = float(prev_drive) if prev_drive is not None else None
+        self._stream_first = bool(state.get("stream_first", False))
         self._updates = int(state["updates"])
         # Guarded: pre-pacing checkpoints carry no act-step counter; seed it
         # at the stored buffer's size so the update/act-step pair stays
