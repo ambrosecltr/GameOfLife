@@ -14,13 +14,15 @@
 # swift replay shape (see configs/brain/swift_01_dreamer.yaml header).
 #
 # PACING — same rule as rounds 008/009: run PACED, never --headless. Measured
-# on M1 Pro (bench_learn.py): nano learn() ~0.17s/update on mps at the swift
-# replay shape -> ~6 updates/s/brain solo; 3 workers contend on one GPU queue,
-# so budget ~8-10 updates/s aggregate. At tick_rate 20 / act_every 5, three
-# awake dreamers need 12 updates/s for ratio 1.0 — dormancy plus the debt cap
-# (sleep pays the day's debt) is expected to cover the gap, as it did on the
-# 3090 rounds. Read learn_seconds + train_ratio_eff off the first checkpoint:
-# holding >= 0.9, nudge `gol-ctl speed` up; sagging, drop to speed 0.75.
+# on M1 Pro (bench_learn.py + a 3-thread contention probe): solo, nano learn()
+# is 188ms on mps vs 209ms cpu — but under 3 concurrent workers cpu aggregates
+# 7.6 updates/s vs mps 4.9 (the shared intra-op threadpool beats the
+# serialized GPU queue), so this config runs cpu. At tick_rate 20 / act_every
+# 5, three awake dreamers need 12 updates/s for ratio 1.0; 7.6 aggregate holds
+# it at awake fraction <= ~0.6, and dormancy plus the debt cap (sleep pays the
+# day's debt) covered a bigger gap on the 3090 rounds. Read learn_seconds +
+# train_ratio_eff off the first checkpoint: holding >= 0.9, nudge `gol-ctl
+# speed` up; sagging, drop to speed 0.75 (~15 t/s, fully-awake-sustainable).
 #
 #   PYTHONUNBUFFERED=1 uv run gol-run --new saves/swift_01 \
 #       --config configs/run/swift_01_local.yaml
@@ -41,12 +43,12 @@ act_every: 5
 checkpoint_interval_ticks: 30000
 control_port: 7302
 
-# Nano + speed core benchmarked fastest on mps at the swift replay shape
-# (166ms vs 204ms cpu); act() costs ~3ms there — nothing at 4 Hz. Learning
-# brains live entirely on the learning device.
+# Solo-brain mps edges cpu (188 vs 209ms/update), but three concurrent
+# learner workers aggregate 7.6 updates/s on cpu vs 4.9 on mps — one GPU
+# queue serializes siblings, eight cores share. Population > 1 learner: cpu.
 devices:
-  inference: mps
-  learning: mps
+  inference: cpu
+  learning: cpu
 
 population:
   target: 6

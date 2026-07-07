@@ -8,10 +8,10 @@
 # temperament), imagination shape, train_ratio 1.0.
 #
 # The swift bundle (what this round actually tests, beyond speed):
-#   preset nano + mps        — ~4M params on the M1 GPU. Round 007 ran nano at
-#     achieved ratio ~0.023 (starved); the speed core makes ratio 1.0 real
-#     locally, so nano finally gets the update density that round 008 proved
-#     is the binding variable.
+#   preset nano, local       — ~4M params on M1 (cpu when 3 workers share the
+#     box; see the run config's device note). Round 007 ran nano at achieved
+#     ratio ~0.023 (starved); the speed core makes ratio 1.0 real locally, so
+#     nano finally gets the update density round 008 proved is binding.
 #   replay 32x32 + burn_in 8 — same 1024 samples/update as beta's 16x64, but
 #     the grad-carrying unroll halves and each sequence's recurrent state is
 #     warmed by 8 gradient-free steps instead of starting on the zero-state

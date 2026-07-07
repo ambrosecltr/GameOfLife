@@ -61,19 +61,22 @@ The speed core (commit on branch `swift/nano-optimization`), all parity-pinned b
 Measured on M1 Pro (scripts/bench_learn.py, 20 timed updates, 1024 samples/update
 throughout):
 
-| config | learn p50 |
+| config | learn p50 (solo) |
 |---|---|
 | pre-swift nano, cpu, 16×64 (beta_07-era shape) | 474ms (historical) / 441ms (re-measured) |
 | swift core only, cpu, 16×64 | 242ms |
 | swift core + 32×32+burn8, cpu | 209ms |
 | swift core + 32×32+burn8, mps | 188ms newborn / **174ms adult** |
 
-≈ **2.7× per update**, so at act_every 5 / tick_rate 20, three nano dreamers hold
-ratio 1.0 locally with dormancy slack (~5.7 updates/s/brain solo; three workers
-share the M1 GPU queue — verify `train_ratio_eff` live, the run config header has
-the pacing math). The "20M ticks where 5M fit" ambition cashes out as: update speed
-bounds world speed at fixed ratio, so 2.7× per update ≈ 2.7× ticks per wall-hour at
-ratio 1.0, before dormancy and the adult skip.
+Contention (3 learner workers, the real population): **cpu 7.6 updates/s
+aggregate vs mps 4.9** — one GPU queue serializes siblings, eight cores share —
+so the run config uses cpu despite mps winning solo. ≈ **2.7× per update**
+solo and ~3× aggregate against the pre-swift 3-worker CPU baseline, so at
+act_every 5 / tick_rate 20, three nano dreamers hold ratio 1.0 locally at
+awake fraction ≤ ~0.6, with dormancy + the debt cap as slack. The "20M ticks
+where 5M fit" ambition cashes out as: update speed bounds world speed at fixed
+ratio, so ~3× per update ≈ ~3× ticks per wall-hour at ratio 1.0, before the
+adult skip and any future parallel-unroll architecture.
 
 Conditioning knobs are beta_09's verbatim (anchored normalizers at 1e6 samples,
 trickle anneal 1500 act-steps, boredom pressure 0.002/0.0002, HRRL drive,
