@@ -26,8 +26,14 @@ into "episodic RL training pipeline." These rules exist so that never happens ag
 
 ## Research questions (why this exists)
 
-1. Lifelong, non-episodic world-model learning — can a Dreamer-class agent learn in one
-   unbroken life in a nonstationary world?
+1. Lifelong, non-episodic learning — can an agent learn in one unbroken life in a
+   nonstationary world, and *which brain architectures can host that*? World-models
+   (Dreamer-class) are the first bet, not the only one: model-free, predictive-coding,
+   evolved-plasticity, and other families are all in scope, and the architecture itself
+   is a research variable. The `Brain` interface is architecture-agnostic by design;
+   any family that implements it lives in the same world beside the others. We do our
+   own exploration here (params, learning rules, mechanisms), not just replicate
+   existing results.
 2. Intrinsic motivation in a shared world — what happens when curiosity-driven agents
    are each other's most unpredictable objects?
 3. Emergent communication — does a free signal channel acquire meaning under survival
@@ -43,7 +49,10 @@ into "episodic RL training pipeline." These rules exist so that never happens ag
 - `packages/obs/gol_obs` — Rerun logging, metrics/events writers
 - `configs/` — world/brain/run YAML (dataclass defaults → YAML → `--set k=v`); round
   configs are save-name-prefixed (`beta_NN_*.yaml`) and freeze at launch — see
-  `configs/README.md`
+  `configs/README.md`. The prefix names a *track* (a brain-architecture family + the
+  bet it's testing), not the whole project: `beta` is the world-model/Dreamer track; a
+  new architecture branch gets its own prefix so tracks in the same world stay
+  comparable and don't collide on one linear counter.
 - `saves/` — gitignored persistent worlds; a save dir is a reproducible experiment
 
 ## Commands

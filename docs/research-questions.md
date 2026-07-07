@@ -5,14 +5,22 @@ Every long run should be attributable to at least one of these. When a run produ
 evidence (or interesting absence of evidence), write it up in the
 [research journal](research_journal/).
 
-## 1. Lifelong, non-episodic world-model learning
+## 1. Lifelong, non-episodic learning — and which architectures can host it
 
-Can a Dreamer-class agent learn continuously through one unbroken life — no resets, no
-episode boundaries — in a world that other agents are simultaneously changing?
+Can an agent learn continuously through one unbroken life — no resets, no episode
+boundaries — in a world that other agents are simultaneously changing? And *which brain
+architectures* can sustain that: world-models are the first bet, but model-free,
+predictive-coding, evolved-plasticity, and other families are all in scope, run side by
+side in the same world through the architecture-agnostic `Brain` interface.
 
 - World-model literature (DreamerV3, TD-MPC2, Plan2Explore) is almost entirely episodic:
   the agent is reset thousands of times into a stationary MDP. Here, an agent has one
   life in a nonstationary world.
+- The architecture itself is a variable, not a fixed choice. A world-model may not be the
+  best substrate for lifelong embodied learning (or for the interiority questions below —
+  self-modeling, valence, identity); the platform exists partly to find out by trying
+  families against each other, including our own mechanism/param exploration rather than
+  only replicating published results.
 - Watch for: plasticity loss (prediction error plateauing then rising), catastrophic
   forgetting of distant regions, whether long replay buffers act as sufficient ballast.
 - Instruments: per-agent prediction-error trend (first-class metric), spatial revisit
