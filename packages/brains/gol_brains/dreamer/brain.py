@@ -50,12 +50,15 @@ from gol_brains.base import Brain
 from gol_brains.dreamer.buffer import ReplayBuffer
 from gol_brains.dreamer.interest import LearningProgress, OnlineRegions
 from gol_brains.dreamer.networks import (
+    DiscreteDist,
+    EnsembleMLP,
     RunningMeanStd,
     TanhNormal,
     TwoHot,
     mlp,
     percentile_scale,
 )
+from gol_brains.dreamer.optim import Muon
 from gol_brains.dreamer.rssm import RSSM, RSSMConfig
 
 PRESETS: dict[str, dict[str, int]] = {
@@ -111,11 +114,11 @@ class WorldModel(nn.Module):
         self.head_cont = mlp(feat, units, 1, layers=2)
         # Plan2Explore: each ensemble member predicts the NEXT observation
         # embedding from (state, action); their disagreement is epistemic
-        # uncertainty, which is the curiosity signal.
+        # uncertainty, which is the curiosity signal. Members are stacked into
+        # one batched module (K einsums, not K module calls); pre-swift
+        # checkpoints stored a ModuleList and are migrated on load.
         k = int(wm_cfg.get("ensemble_size", 8))
-        self.ensemble = nn.ModuleList(
-            mlp(feat + ACTION_DIM, units, units, layers=1) for _ in range(k)
-        )
+        self.ensemble = EnsembleMLP(k, feat + ACTION_DIM, units, units)
 
     def embed(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         flat = torch.cat(
@@ -134,8 +137,31 @@ class WorldModel(nn.Module):
     def disagreement(self, feat: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
         """Plan2Explore intrinsic signal: variance across ensemble predictions."""
         x = torch.cat([feat, action], dim=-1)
-        preds = torch.stack([net(x) for net in self.ensemble])  # (K, ..., stoch)
+        preds = self.ensemble(x)  # (K, ..., units)
         return preds.var(dim=0).mean(-1)
+
+
+def _migrate_ensemble_state(wm_state: dict[str, torch.Tensor]) -> None:
+    """Stack a pre-swift ModuleList ensemble checkpoint into the batched layout.
+
+    Old keys: ensemble.{k}.{0,1,3}.{weight,bias} (Linear, LayerNorm, Linear).
+    Mutates wm_state in place; a no-op on already-migrated checkpoints. Kept
+    so cloud lives (beta_08/09) load into current code for offline analysis.
+    """
+    if "ensemble.0.0.weight" not in wm_state:
+        return
+    k = 0
+    while f"ensemble.{k}.0.weight" in wm_state:
+        k += 1
+    members = [{key: wm_state.pop(f"ensemble.{j}.{key}") for key in
+                ("0.weight", "0.bias", "1.weight", "1.bias", "3.weight", "3.bias")}
+               for j in range(k)]
+    wm_state["ensemble.w1"] = torch.stack([m["0.weight"].T for m in members])
+    wm_state["ensemble.b1"] = torch.stack([m["0.bias"] for m in members])
+    wm_state["ensemble.ln_w"] = torch.stack([m["1.weight"] for m in members])
+    wm_state["ensemble.ln_b"] = torch.stack([m["1.bias"] for m in members])
+    wm_state["ensemble.w2"] = torch.stack([m["3.weight"].T for m in members])
+    wm_state["ensemble.b2"] = torch.stack([m["3.bias"] for m in members])
 
 
 class DreamerBrain(Brain):
@@ -292,9 +318,30 @@ class DreamerBrain(Brain):
         self.seq_len = int(replay.get("seq_len", 64))
         # ~2 sim-minutes of motor babbling; long warmups starve newborns.
         self.warmup_steps = int(replay.get("warmup_steps", 500))
+        # Burn-in: prefix steps unrolled without gradients purely to warm the
+        # recurrent state, so seq_len (the expensive grad-carrying part of the
+        # unroll) can shrink without every sequence starting from a zero-state
+        # lie. 0 = legacy zero-init.
+        self.burn_in = int(replay.get("burn_in", 0))
+        # Batch rows pinned to the newest experience (DreamerV3 online-queue
+        # mixing); the rest sample uniformly over the whole life. 0 = legacy.
+        self.recent_slots = int(replay.get("recent", 0))
 
         tr = dict(cfg.get("training", {}))
-        self.opt_model = torch.optim.Adam(self.wm.parameters(), lr=float(tr.get("model_lr", 1e-4)))
+        model_lr = float(tr.get("model_lr", 1e-4))
+        self.optimizer_kind = str(tr.get("optimizer", "adam"))
+        if self.optimizer_kind not in ("adam", "muon"):
+            raise ValueError(f"unknown optimizer: {self.optimizer_kind!r}")
+        self.opt_model_muon: Muon | None = None
+        if self.optimizer_kind == "muon":
+            # Muon conditions exactly-2D weight matrices; biases, LayerNorms,
+            # and the stacked 3D ensemble stay on Adam (the standard recipe).
+            matrices = [p for p in self.wm.parameters() if p.dim() == 2]
+            rest = [p for p in self.wm.parameters() if p.dim() != 2]
+            self.opt_model_muon = Muon(matrices, lr=float(tr.get("muon_lr", 0.02)))
+            self.opt_model = torch.optim.Adam(rest, lr=model_lr)
+        else:
+            self.opt_model = torch.optim.Adam(self.wm.parameters(), lr=model_lr)
         self.opt_actor = torch.optim.Adam(
             self.actor.parameters(), lr=float(tr.get("actor_lr", 3e-5))
         )
@@ -303,6 +350,14 @@ class DreamerBrain(Brain):
         )
         self.grad_clip = float(tr.get("grad_clip", 100.0))
         self.imag_starts = int(tr.get("imag_starts", 256))
+        # L2-towards-init on the world model: plasticity maintenance for one
+        # unbroken life on a nonstationary stream (Kumar et al. — regularizing
+        # toward *an* init-distribution draw preserves trainability; the
+        # anchor doesn't ride checkpoints because any draw serves). 0 = off.
+        self.l2_init_weight = float(tr.get("l2_init", 0.0))
+        self._wm_init: list[torch.Tensor] = (
+            [p.detach().clone() for p in self.wm.parameters()] if self.l2_init_weight > 0 else []
+        )
         # Updates per act-step the learner thread paces toward. Both counters
         # it paces with (_act_steps, _updates) ride state_dict, so the debt
         # math stays coherent across checkpoints and inheritance.
@@ -319,6 +374,21 @@ class DreamerBrain(Brain):
         self._gate_calm = 0.0  # boredom gate telemetry (imagination means)
         self._gate_dull = 0.0
         self._boredom_pressure = 0.0  # leaky-integrated mood (pressure mode)
+
+        # torch.compile on the sequential hot loops (RSSM steps + encoder):
+        # nano-scale unrolls are dispatch-bound, and compilation collapses the
+        # per-step Python/kernel-launch overhead. The act-path shape (B=1) is
+        # precompiled here so the sim thread never eats a compile stall
+        # mid-life; the learn-path shapes compile lazily on the learner
+        # thread, where a one-time pause is just a skipped update.
+        if bool(tr.get("compile", False)):
+            backend = "aot_eager" if self.device.type == "mps" else "inductor"
+            for owner, name in ((self.wm.rssm, "obs_step"), (self.wm.rssm, "img_step"),
+                                (self.wm, "embed")):
+                setattr(owner, name, torch.compile(getattr(owner, name), backend=backend))
+            with torch.no_grad():
+                embed = torch.zeros(1, preset["units"], device=self.device)
+                self.wm.rssm.obs_step(self.h, self.z, self.last_action, embed)
 
     def _apply_temperament(self) -> None:
         t, base = self.temperament, self._pre_temperament
@@ -344,9 +414,7 @@ class DreamerBrain(Brain):
             "events": torch.as_tensor(obs["events"], device=self.device).unsqueeze(0),
         }
 
-    def _policy_dists(
-        self, feat: torch.Tensor
-    ) -> tuple[TanhNormal, torch.distributions.Categorical]:
+    def _policy_dists(self, feat: torch.Tensor) -> tuple[TanhNormal, DiscreteDist]:
         out = self.actor(feat)
         mean = out[..., :CONT_DIM]
         raw_std = out[..., CONT_DIM : 2 * CONT_DIM]
@@ -354,7 +422,7 @@ class DreamerBrain(Brain):
         std = F.softplus(raw_std) + 0.1
         probs = torch.softmax(grip_logits, dim=-1)
         probs = 0.99 * probs + 0.01 / NUM_GRIP_MODES  # unimix keeps exploration alive
-        return TanhNormal(torch.tanh(mean), std), torch.distributions.Categorical(probs=probs)
+        return TanhNormal(torch.tanh(mean), std), DiscreteDist(probs)
 
     def _action_to_vec(self, cont: torch.Tensor, grip: int) -> npt.NDArray[np.float32]:
         vec = np.zeros(ACTION_DIM, dtype=np.float32)
@@ -529,12 +597,14 @@ class DreamerBrain(Brain):
         return self.train_ratio
 
     def learn(self) -> dict[str, float] | None:
-        batch_np = self.buffer.sample_sequences(self.batch_size, self.seq_len)
+        batch_np = self.buffer.sample_sequences(
+            self.batch_size, self.burn_in + self.seq_len, recent=self.recent_slots
+        )
         if batch_np is None or len(self.buffer) < self.warmup_steps:
             return None
         learn_began = time.monotonic()
         b = {k: torch.as_tensor(v, device=self.device) for k, v in batch_np.items()}
-        B, L = b["depth"].shape[:2]
+        B = b["depth"].shape[0]
         kind_idx = b["kind"].long()
         obs = {
             "depth": b["depth"],
@@ -545,17 +615,32 @@ class DreamerBrain(Brain):
             "events": b["events"],
         }
 
-        # --- world model: posterior unroll over the sequence
-        embed = self.wm.embed(obs)  # (B, L, units)
+        # --- world model: posterior unroll over the sequence. The burn-in
+        # prefix runs gradient-free purely to warm (h, z), then losses see
+        # only the seq_len suffix — the recurrent state entering the graded
+        # window is honest instead of the zero-state lie.
+        embed = self.wm.embed(obs)  # (B, burn_in + L, units)
         h, z = self.wm.rssm.initial(B, self.device)
-        feats, posts, priors = [], [], []
         zero_action = torch.zeros(B, ACTION_DIM, device=self.device)
-        for t in range(L):
+        if self.burn_in > 0:
+            with torch.no_grad():
+                for t in range(self.burn_in):
+                    prev_a = b["action"][:, t - 1] if t > 0 else zero_action
+                    h, z, _, _ = self.wm.rssm.obs_step(h, z, prev_a, embed[:, t])
+        feats, posts, priors = [], [], []
+        for t in range(self.burn_in, self.burn_in + self.seq_len):
             prev_a = b["action"][:, t - 1] if t > 0 else zero_action
             h, z, post, prior = self.wm.rssm.obs_step(h, z, prev_a, embed[:, t])
             feats.append(self.wm.rssm.feat(h, z))
             posts.append(post)
             priors.append(prior)
+        if self.burn_in > 0:
+            # Slice every downstream target to the graded window.
+            b = {k: v[:, self.burn_in :] for k, v in b.items()}
+            obs = {k: v[:, self.burn_in :] for k, v in obs.items()}
+            kind_idx = kind_idx[:, self.burn_in :]
+            embed = embed[:, self.burn_in :]
+        L = self.seq_len
         feat = torch.stack(feats, dim=1)  # (B, L, F)
         post = torch.stack(posts, dim=1)
         prior = torch.stack(priors, dim=1)
@@ -592,18 +677,27 @@ class DreamerBrain(Brain):
         ens_in_feat = feat[:, :-1].detach()
         ens_action = b["action"][:, 1:]  # action taken at t leads to obs_{t+1}
         x = torch.cat([ens_in_feat, ens_action], dim=-1)
-        ens_losses = [
-            F.mse_loss(net(x), ens_target, reduction="none").mean(-1) for net in self.wm.ensemble
-        ]
-        loss_ens = torch.stack(ens_losses).mean(0)
+        ens_preds = self.wm.ensemble(x)  # (K, B, L-1, units)
+        loss_ens = (ens_preds - ens_target).pow(2).mean(-1).mean(0)
 
         model_loss = (
             loss_depth + loss_rgb + loss_kind + loss_proprio + loss_reward + loss_cont + loss_kl
         ).mean() + loss_ens.mean()
+        l2_dist = 0.0
+        if self.l2_init_weight > 0:
+            reg = torch.zeros((), device=self.device)
+            for p, p0 in zip(self.wm.parameters(), self._wm_init, strict=True):
+                reg = reg + (p - p0).pow(2).sum()
+            model_loss = model_loss + self.l2_init_weight * reg
+            l2_dist = float(reg.detach())
         self.opt_model.zero_grad()
+        if self.opt_model_muon is not None:
+            self.opt_model_muon.zero_grad()
         model_loss.backward()
         nn.utils.clip_grad_norm_(self.wm.parameters(), self.grad_clip)
         self.opt_model.step()
+        if self.opt_model_muon is not None:
+            self.opt_model_muon.step()
 
         # Curiosity statistics on real experience (keeps normalization honest).
         lp_reward_mean = 0.0
@@ -746,6 +840,8 @@ class DreamerBrain(Brain):
             "learn_seconds": self._learn_seconds,
             "buffer": float(len(self.buffer)),
         }
+        if self.l2_init_weight > 0:
+            self._metrics["l2_init_dist"] = l2_dist
         if self.homeostasis_mode == "drive":
             self._metrics["drive_level"] = float(self._drive_level(b["proprio"]).mean())
         if self.curiosity_mode == "lp":
@@ -791,6 +887,7 @@ class DreamerBrain(Brain):
     # ----------------------------------------------------------- persistence
 
     def state_dict(self) -> dict[str, Any]:
+        state_muon = self.opt_model_muon.state_dict() if self.opt_model_muon else None
         return {
             "obs_version": OBS_VERSION,
             "wm": self.wm.state_dict(),
@@ -798,6 +895,7 @@ class DreamerBrain(Brain):
             "critic": self.critic.state_dict(),
             "critic_ema": self.critic_ema.state_dict(),
             "opt_model": self.opt_model.state_dict(),
+            "opt_model_muon": state_muon,
             "opt_actor": self.opt_actor.state_dict(),
             "opt_critic": self.opt_critic.state_dict(),
             "curiosity_norm": self.curiosity_norm.state_dict(),
@@ -822,11 +920,19 @@ class DreamerBrain(Brain):
                 f"brain checkpoint has obs_version {state.get('obs_version')}, "
                 f"world speaks {OBS_VERSION}: refusing to load across contract changes"
             )
+        migrated = "ensemble.0.0.weight" in state["wm"]
+        _migrate_ensemble_state(state["wm"])
         self.wm.load_state_dict(state["wm"])
         self.actor.load_state_dict(state["actor"])
         self.critic.load_state_dict(state["critic"])
         self.critic_ema.load_state_dict(state["critic_ema"])
-        self.opt_model.load_state_dict(state["opt_model"])
+        if not migrated:
+            # A migrated ensemble reshuffles the model's param list, so the
+            # stored Adam moments no longer map; the model optimizer restarts
+            # fresh (offline analysis of old lives, not live resumes).
+            self.opt_model.load_state_dict(state["opt_model"])
+            if self.opt_model_muon is not None and state.get("opt_model_muon") is not None:
+                self.opt_model_muon.load_state_dict(state["opt_model_muon"])
         self.opt_actor.load_state_dict(state["opt_actor"])
         self.opt_critic.load_state_dict(state["opt_critic"])
         self.curiosity_norm.load_state_dict(state["curiosity_norm"])

@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from gol_brains.dreamer.networks import mlp
+from gol_brains.dreamer.networks import mlp, sample_categorical
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ class RSSM(nn.Module):
 
     def _sample(self, probs: torch.Tensor) -> torch.Tensor:
         """Straight-through one-hot sample; returns flat (..., stoch_dim)."""
-        idx = torch.distributions.Categorical(probs=probs).sample()
+        idx = sample_categorical(probs)
         onehot = F.one_hot(idx, self.cfg.stoch_classes).to(probs.dtype)
         sample = onehot + probs - probs.detach()
         return sample.flatten(-2)

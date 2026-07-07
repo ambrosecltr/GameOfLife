@@ -46,14 +46,30 @@ class ReplayBuffer:
             self.full = True
 
     def sample_sequences(
-        self, batch: int, length: int
+        self, batch: int, length: int, recent: int = 0
     ) -> dict[str, npt.NDArray[np.float32]] | None:
-        """Contiguous sequences that do not cross the ring's write seam."""
+        """Contiguous sequences that do not cross the ring's write seam.
+
+        `recent` pins that many of the batch's rows to the newest experience
+        (row r ends r*length steps before the write head), DreamerV3's
+        online-queue mixing: without it, a long lifelong buffer means most
+        gradient flows to ancient experience and fresh events wait ~capacity/
+        batch*length updates for their first replay.
+        """
         n = len(self)
         if n < length + 2:
             return None
+        rows: list[npt.NDArray[np.int64]] = []
+        for r in range(min(recent, batch)):
+            end = self.pos - r * length
+            if end - length < self.pos - n:
+                break  # staggered window fell off the oldest edge; go uniform
+            # Modulo walks the ring across the array end — that crossing is
+            # time-contiguous; only the write seam at pos is a discontinuity,
+            # and these windows end at (or stagger back from) exactly there.
+            rows.append(np.arange(end - length, end, dtype=np.int64) % self.capacity)
         starts = []
-        for _ in range(batch):
+        for _ in range(batch - len(rows)):
             for _attempt in range(20):
                 s = int(self.rng.integers(0, n - length))
                 # Skip sequences spanning the seam (only matters once full).
@@ -63,7 +79,8 @@ class ReplayBuffer:
                 break
             else:
                 starts.append(0)
-        idx = np.stack([np.arange(s, s + length) for s in starts])  # (B, L)
+        rows.extend(np.arange(s, s + length, dtype=np.int64) for s in starts)
+        idx = np.stack(rows)  # (B, L)
         return {
             "depth": (self.depth[idx].astype(np.float32) / 255.0),
             "rgb": (self.rgb[idx].astype(np.float32) / 255.0),
