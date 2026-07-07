@@ -26,6 +26,13 @@ prefixed with the save name it produces:
 - `brain/beta_NN_dreamer[_slug].yaml` — referenced from that round's run config
 - `world/beta_NN_world.yaml` — only if the round changes world parameters
 
+Track prefixes (a prefix names a brain-family + bet, not the whole project;
+journal round numbers stay global across tracks):
+
+- `beta_` — the world-model/Dreamer track at the base-preset capacity bundle (cloud)
+- `swift_` — same Dreamer family, the efficiency bet: nano + the swift speed core at
+  real train_ratio 1.0 on local hardware (adopted round 010)
+
 Rules:
 
 1. **Config prefix = save dir name.** One run config per save; multi-arm rounds get one

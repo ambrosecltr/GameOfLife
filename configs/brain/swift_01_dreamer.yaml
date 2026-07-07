@@ -1,0 +1,110 @@
+# swift_01: the speed-core round — beta_09's conditioning bet at nano scale,
+# locally, at REAL update density. New track prefix per configs/README.md:
+# same world-model family as beta, different bet (efficiency: can a small
+# fast brain host the same conditioning behavior the base preset shows?).
+#
+# Held identical to beta_09_dreamer.yaml: every reward/conditioning knob
+# (anchored normalizers, trickle anneal, boredom pressure, HRRL drive,
+# temperament), imagination shape, train_ratio 1.0.
+#
+# The swift bundle (what this round actually tests, beyond speed):
+#   preset nano + mps        — ~4M params on the M1 GPU. Round 007 ran nano at
+#     achieved ratio ~0.023 (starved); the speed core makes ratio 1.0 real
+#     locally, so nano finally gets the update density that round 008 proved
+#     is the binding variable.
+#   replay 32x32 + burn_in 8 — same 1024 samples/update as beta's 16x64, but
+#     the grad-carrying unroll halves and each sequence's recurrent state is
+#     warmed by 8 gradient-free steps instead of starting on the zero-state
+#     lie. backward() was ~40% of a nano update.
+#   recent: 1                — one batch row always carries the newest window
+#     (DreamerV3 online-queue mixing); fresh experience stops waiting ~replay
+#     capacity for its first gradient.
+#   capacity 300k            — local-RAM/disk concession (nano buffer ~780B/
+#     step; checkpoints serialize the whole buffer). Deviation from beta's
+#     500k, noted, not part of the bet.
+#
+# Deliberately NOT in this round (staged ablations, swift_02+ candidates):
+#   training.optimizer: muon, training.l2_init > 0, training.compile
+#   (compile measured neutral on cpu once the var() hotspot died).
+
+kind: dreamer
+preset: nano                  # nano (~4M) | small (~12M) | base (~30M, the beta bundle)
+
+reward:
+  w_curiosity: 1.0
+  w_homeostasis: 1.0
+  # Freeze both curiosity normalizers (disagreement + LP) after this many
+  # real samples. Swift updates carry 32x31 ~= 992 real samples, essentially
+  # beta_09's 1008/update — the anchor lands at the same ~1000-update point.
+  norm_anchor_samples: 1000000
+  curiosity: lp
+  lp:
+    partition: latent
+    regions: 32
+    ema_fast: 0.02
+    ema_slow: 0.002
+    centroid_lr: 0.05
+    relative: true
+    mix_disagreement: 0.1
+    mix_anneal_steps: 1500    # act-steps of lived cold-start subsidy, as beta_09.
+                              # Post-anneal the imagination ensemble pass is skipped
+                              # entirely (multiply-by-zero), so adult LP updates run
+                              # faster than this round's benchmark headline.
+  boredom:
+    weight: 0.02
+    stim_threshold: 0.5
+    drive_threshold: 0.15
+    pressure: true
+    pressure_rise: 0.002
+    pressure_decay: 0.0002
+  homeostasis: drive
+  drive:
+    scale: 3.0
+    level_penalty: 0.01
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    energy_weight: 1.0
+    integrity_setpoint: 1.0
+    integrity_weight: 1.0
+    rested_setpoint: 1.0
+    rest_weight: 0.5
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  low_energy_graded: true
+  curiosity_mask_agents: false
+
+temperament:
+  enabled: true
+  sigma: 0.25
+  mutation_sigma: 0.1
+
+world_model:
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+
+replay:
+  capacity: 300000            # see header: local concession vs beta's 500k
+  batch_size: 32
+  seq_len: 32                 # grad-carrying steps; samples/update match beta's 16x64
+  burn_in: 8                  # gradient-free prefix that warms (h, z) per sequence
+  recent: 1                   # newest-window batch row (online-queue mixing)
+  warmup_steps: 500
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  imag_starts: 256
+  train_ratio: 1.0            # the whole point: real density, locally
+  optimizer: adam             # muon staged for swift_02 (ablation)
+  l2_init: 0.0                # plasticity anchor staged for swift_02 (ablation)
+  compile: false              # neutral post-var-fix; available for re-testing

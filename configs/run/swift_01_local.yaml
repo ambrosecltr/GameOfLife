@@ -1,0 +1,64 @@
+# Experiment: swift_01 — the speed-core round (round 010; local, M1 Pro).
+#
+# Question: with the swift speed core making train_ratio 1.0 real on a laptop,
+# does a nano dreamer show the beta_09 conditioning behaviors — anchored
+# curiosity reading convergence as satisfaction (not the 008 treadmill),
+# trickle annealing out, boredom pressure charging where stimulation sits on
+# the gate — or is the base preset's capacity part of the conditioning story?
+# Either answer moves the project: yes = local nano becomes the screening
+# testbed and the beta bundle inherits the swift core; no = capacity and
+# conditioning interact, which round 011 must untangle.
+#
+# Population mirrors beta_09 (3 dreamers + 3 foragers, lineage); world config,
+# seed protocol identical. Capacity bundle differs by design: nano + mps +
+# swift replay shape (see configs/brain/swift_01_dreamer.yaml header).
+#
+# PACING — same rule as rounds 008/009: run PACED, never --headless. Measured
+# on M1 Pro (bench_learn.py): nano learn() ~0.17s/update on mps at the swift
+# replay shape -> ~6 updates/s/brain solo; 3 workers contend on one GPU queue,
+# so budget ~8-10 updates/s aggregate. At tick_rate 20 / act_every 5, three
+# awake dreamers need 12 updates/s for ratio 1.0 — dormancy plus the debt cap
+# (sleep pays the day's debt) is expected to cover the gap, as it did on the
+# 3090 rounds. Read learn_seconds + train_ratio_eff off the first checkpoint:
+# holding >= 0.9, nudge `gol-ctl speed` up; sagging, drop to speed 0.75.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/swift_01 \
+#       --config configs/run/swift_01_local.yaml
+#
+# Watch list (canaries; kill criteria in docs/research_journal/010-swift-nano.md):
+#   - train_ratio_eff >= 0.9 by first checkpoint (else the round isn't testing
+#     density and needs a slower world)
+#   - curiosity_scaled must NOT re-inflate after the anchor freezes (~1000
+#     updates); if it does at nano too, conditioning — not capacity — is wrong
+#   - lp_mix_eff -> 0 by ~1500 act-steps/dreamer
+#   - boredom_pressure charges under sustained calm+dull (008's dead gauge)
+#   - eats/100k and death-ledger mix vs beta_09 (behavioral gauges)
+
+world_config: configs/world/default.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7302
+
+# Nano + speed core benchmarked fastest on mps at the swift replay shape
+# (166ms vs 204ms cpu); act() costs ~3ms there — nothing at 4 Hz. Learning
+# brains live entirely on the learning device.
+devices:
+  inference: mps
+  learning: mps
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/swift_01_dreamer.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: false                # screening run: metrics/events only; flip on
+                              # deliberately (low fps + rotation) to watch
+  metrics_every_ticks: 100
