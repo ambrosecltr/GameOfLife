@@ -96,7 +96,19 @@ def main() -> None:
         cfg = yaml.safe_load(fh)
     apply_sets(cfg, args.set)
     print(f"blob: {blob_path}")
-    state = pickle.loads(blob_path.read_bytes())
+    # Cloud blobs pickle CUDA storages, whose unpickling calls torch.load
+    # without map_location; pin it to the gym's device so a pod-grown life
+    # loads on a CPU-only laptop.
+    import functools
+
+    import torch
+
+    orig_load = torch.load
+    torch.load = functools.partial(orig_load, map_location=args.device)  # type: ignore[assignment]
+    try:
+        state = pickle.loads(blob_path.read_bytes())
+    finally:
+        torch.load = orig_load
 
     brain = DreamerBrain(cfg, seed=args.seed, device=args.device)
     if args.fresh_model:
