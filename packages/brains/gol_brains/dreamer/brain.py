@@ -345,6 +345,12 @@ class DreamerBrain(Brain):
             if self.prioritize == "reward"
             else 0
         )
+        # A step is salient when |realized homeostasis reward| clears this
+        # (same bar as the homeo_spike_frac metric). Salience — not event
+        # flags — is the priority signal: under HRRL drive reward a meal at
+        # satiety is an ate event worth zero (swift_01 measured exactly that).
+        self.prioritize_threshold = float(replay.get("prioritize_threshold", 0.1))
+        self._prev_drive: float | None = None  # act-stream drive level, for salience
 
         tr = dict(cfg.get("training", {}))
         model_lr = float(tr.get("model_lr", 1e-4))
@@ -454,6 +460,20 @@ class DreamerBrain(Brain):
     def act(self, obs: Observation) -> Action:
         with torch.no_grad():
             tensors = self._obs_to_tensors(obs)
+            # Reward salience of this lived step (recorded even when
+            # prioritization is off, so an old life can turn it on later).
+            # The first step after a stream break reads 0: the gap's drive
+            # delta was never experienced (same rule as reset_stream).
+            if self.homeostasis_mode == "drive":
+                d = float(self._drive_level(tensors["proprio"])[0])
+                salience = (
+                    abs(self.drive_scale * (self._prev_drive - d))
+                    if self._prev_drive is not None
+                    else 0.0
+                )
+                self._prev_drive = d
+            else:
+                salience = float(obs["events"][0] + obs["events"][1])
             embed = self.wm.embed(tensors)
             self.h, self.z, _, _ = self.wm.rssm.obs_step(self.h, self.z, self.last_action, embed)
             if len(self.buffer) < self.warmup_steps:
@@ -468,7 +488,7 @@ class DreamerBrain(Brain):
                 grip = int(dist_grip.sample()[0])
 
         action_vec = self._action_to_vec(cont, grip)
-        self.buffer.add(obs, action_vec)
+        self.buffer.add(obs, action_vec, salience=salience)
         self._act_steps += 1
         self.last_action = torch.as_tensor(action_vec, device=self.device).unsqueeze(0)
         return Action(
@@ -630,6 +650,7 @@ class DreamerBrain(Brain):
             recent=self.recent_slots,
             prioritized=self.prioritize_rows,
             spike_offset=self.burn_in,
+            spike_threshold=self.prioritize_threshold,
         )
         if batch_np is None or len(self.buffer) < self.warmup_steps:
             return None
@@ -929,6 +950,32 @@ class DreamerBrain(Brain):
         """The stream broke (respawn or wake): reset live recurrent state only."""
         self.h, self.z = self.wm.rssm.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
+        # The gap's drive delta was never experienced; don't fake a salience
+        # spike across it (pricing the blackout is a deliberate future round).
+        self._prev_drive = None
+
+    def _recompute_salience(self) -> None:
+        """Backfill per-step reward salience for a pre-salience checkpoint.
+
+        Right after ReplayBuffer.load_state_dict the ring is in time order,
+        so the drive deltas below pair consecutive lived steps (any stream
+        breaks inside the stored life are unrecoverable — those steps read
+        slightly wrong, which uniform fallback tolerates).
+        """
+        n = len(self.buffer)
+        if n == 0:
+            return
+        if self.homeostasis_mode == "drive":
+            proprio = torch.as_tensor(
+                self.buffer.proprio[:n].astype(np.float32), device=self.device
+            )
+            d = self._drive_level(proprio)
+            reduction = torch.zeros_like(d)
+            reduction[1:] = d[:-1] - d[1:]
+            sal = (self.drive_scale * reduction).abs().cpu().numpy()
+        else:
+            sal = self.buffer.events[:n, :2].astype(np.float32).sum(-1)
+        self.buffer.salience[:n] = sal.astype(np.float16)
 
     # ----------------------------------------------------------- persistence
 
@@ -1001,6 +1048,8 @@ class DreamerBrain(Brain):
         self._act_steps = int(state.get("act_steps", len(state["buffer"]["depth"])))
         self.rng.bit_generator.state = state["rng_state"]
         self.buffer.load_state_dict(state["buffer"])
+        if "salience" not in state["buffer"]:
+            self._recompute_salience()
         self.h = torch.as_tensor(state["h"], device=self.device)
         self.z = torch.as_tensor(state["z"], device=self.device)
         self.last_action = torch.as_tensor(state["last_action"], device=self.device)

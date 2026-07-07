@@ -101,6 +101,8 @@ def main() -> None:
     brain = DreamerBrain(cfg, seed=args.seed, device=args.device)
     if args.fresh_model:
         brain.buffer.load_state_dict(state["buffer"])
+        if "salience" not in state["buffer"]:
+            brain._recompute_salience()  # pre-salience blob: backfill for prioritized replay
         brain._act_steps = args.act_steps if args.act_steps is not None else len(brain.buffer)
     else:
         brain.load_state_dict(state)

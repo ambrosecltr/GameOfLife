@@ -200,7 +200,8 @@ def _spiked_buffer(capacity: int, fill: int, spike_steps: set[int]) -> ReplayBuf
         obs["events"][:] = 0.0
         if i in spike_steps:
             obs["events"][0] = 1.0  # ate
-        buf.add(obs, np.zeros(ACTION_DIM, dtype=np.float32))
+        buf.add(obs, np.zeros(ACTION_DIM, dtype=np.float32),
+                salience=1.0 if i in spike_steps else 0.0)
     return buf
 
 
@@ -254,6 +255,60 @@ def test_unknown_prioritize_rejected() -> None:
     cfg = dict(TINY, replay=dict(TINY["replay"], prioritize="vibes"))
     with pytest.raises(ValueError, match="prioritize"):
         DreamerBrain(cfg, seed=51)
+
+
+def _drive_obs(rng: np.random.Generator, energy: float) -> Observation:
+    obs = fake_obs(rng)
+    obs["proprio"][5] = energy  # energy
+    obs["proprio"][6] = 1.0  # full integrity
+    obs["proprio"][14] = 0.0  # fully rested
+    return obs
+
+
+def test_salience_is_drive_reduction_not_event_flag() -> None:
+    """A meal at satiety is worth zero salience; a starving meal is loud.
+
+    The swift_01 screen finding: all 4 recorded meals happened at energy
+    >= 0.96 (above the 0.85 setpoint), so event-flag priority would have fed
+    the reward head windows carrying exactly zero reward information.
+    """
+    cfg = dict(TINY, reward={"homeostasis": "drive"},
+               replay=dict(TINY["replay"], prioritize="reward"))
+    brain = DreamerBrain(cfg, seed=52)
+    rng = np.random.default_rng(52)
+    brain.act(_drive_obs(rng, 0.95))
+    brain.act(_drive_obs(rng, 0.99))  # sated nibble: no deficit moved
+    brain.act(_drive_obs(rng, 0.30))  # collapse into hunger
+    brain.act(_drive_obs(rng, 0.30))
+    brain.act(_drive_obs(rng, 0.80))  # the meal that matters
+    sal = brain.buffer.salience[:5].astype(np.float32)
+    assert sal[0] == 0.0, "first step has no predecessor"
+    assert sal[1] < 1e-3, "sated meal carries ~no salience"
+    assert sal[2] > 0.1, "crashing into hunger is salient"
+    assert sal[4] > 0.1, "a hungry meal is salient"
+    assert sal[4] > sal[1]
+    # A stream break severs the delta: no fake spike across the gap.
+    brain.reset_stream()
+    brain.act(_drive_obs(rng, 0.99))
+    assert brain.buffer.salience[5] == 0.0
+
+
+def test_salience_recomputed_for_old_checkpoints() -> None:
+    cfg = dict(TINY, reward={"homeostasis": "drive"},
+               replay=dict(TINY["replay"], prioritize="reward"))
+    brain = DreamerBrain(cfg, seed=53)
+    rng = np.random.default_rng(53)
+    for energy in (0.9, 0.9, 0.25, 0.25, 0.75, 0.9):
+        brain.act(_drive_obs(rng, energy))
+    state = brain.state_dict()
+    del state["buffer"]["salience"]  # pre-salience checkpoint
+    fresh = DreamerBrain(cfg, seed=54)
+    fresh.load_state_dict(state)
+    got = fresh.buffer.salience[:6].astype(np.float32)
+    want = brain.buffer.salience[:6].astype(np.float32)
+    # fp16 storage of the live path vs fp32 recompute: loose tolerance.
+    np.testing.assert_allclose(got, want, atol=2e-3)
+    assert got[2] > 0.1 and got[4] > 0.1
 
 
 def test_burn_in_brain_learns() -> None:

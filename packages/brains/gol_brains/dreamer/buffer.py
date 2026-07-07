@@ -26,14 +26,23 @@ class ReplayBuffer:
         self.sound = np.zeros((capacity, SOUND_DIM), dtype=np.float16)
         self.events = np.zeros((capacity, EVENTS_DIM), dtype=np.uint8)
         self.action = np.zeros((capacity, action_dim), dtype=np.float16)  # action taken AT obs
+        # Per-step reward salience (|realized homeostasis reward|), supplied
+        # by the brain at add(): the priority signal for reward-aware replay.
+        # Event flags are the wrong signal under HRRL drive reward — a meal
+        # at satiety is an ate event worth exactly zero (measured on
+        # swift_01: 4 meals, all at energy >= 0.96, all worthless).
+        self.salience = np.zeros(capacity, dtype=np.float16)
         self.pos = 0
         self.full = False
 
     def __len__(self) -> int:
         return self.capacity if self.full else self.pos
 
-    def add(self, obs: Observation, action: npt.NDArray[np.float32]) -> None:
+    def add(
+        self, obs: Observation, action: npt.NDArray[np.float32], salience: float = 0.0
+    ) -> None:
         i = self.pos
+        self.salience[i] = salience
         self.depth[i] = np.clip(obs["rays"][:, 0] * 255, 0, 255).astype(np.uint8)
         self.rgb[i] = np.clip(obs["rays"][:, 1:4] * 255, 0, 255).astype(np.uint8)
         self.kind[i] = obs["rays"][:, 4:].argmax(axis=1).astype(np.uint8)
@@ -52,6 +61,7 @@ class ReplayBuffer:
         recent: int = 0,
         prioritized: int = 0,
         spike_offset: int = 0,
+        spike_threshold: float = 0.1,
     ) -> dict[str, npt.NDArray[np.float32]] | None:
         """Contiguous sequences that do not cross the ring's write seam.
 
@@ -61,14 +71,15 @@ class ReplayBuffer:
         gradient flows to ancient experience and fresh events wait ~capacity/
         batch*length updates for their first replay.
 
-        `prioritized` rows are drawn from windows containing an ate/damage
-        event (reward-aware replay, round 009's reachability finding: ~53
-        meals in 2.8M ticks means a uniformly-sampled reward head trains on
-        essentially zero positive-homeostasis events — the actor cannot plan
-        toward a spike its head has never learned to predict). This changes
-        what is learned from, never what is rewarded. The spike lands at
-        window position >= `spike_offset` (callers pass burn_in so it falls
-        in the graded region). No events lived yet -> rows fall back uniform.
+        `prioritized` rows are drawn from windows containing a reward-salient
+        step (salience > spike_threshold; reward-aware replay, round 009's
+        reachability finding: ~53 meals in 2.8M ticks means a uniformly
+        sampled reward head trains on essentially zero loud-homeostasis
+        events — the actor cannot plan toward a spike its head has never
+        learned to predict). This changes what is learned from, never what
+        is rewarded. The spike lands at window position >= `spike_offset`
+        (callers pass burn_in so it falls in the graded region). No salient
+        steps lived yet -> those rows fall back uniform.
         """
         n = len(self)
         if n < length + 2:
@@ -83,7 +94,7 @@ class ReplayBuffer:
             # and these windows end at (or stagger back from) exactly there.
             rows.append(np.arange(end - length, end, dtype=np.int64) % self.capacity)
         if prioritized > 0:
-            spikes_raw = np.flatnonzero(self.events[:n, :2].max(axis=1) > 0)
+            spikes_raw = np.flatnonzero(self.salience[:n] > spike_threshold)
             if spikes_raw.size:
                 # Work in time coordinates (0 = oldest): windows clamped to
                 # [0, n - length] are seam-safe by construction, then map back
@@ -133,6 +144,7 @@ class ReplayBuffer:
             "sound": self.sound[order][-n:],
             "events": self.events[order][-n:],
             "action": self.action[order][-n:],
+            "salience": self.salience[order][-n:],
             "rng_state": self.rng.bit_generator.state,
         }
 
@@ -140,6 +152,10 @@ class ReplayBuffer:
         n = min(len(state["depth"]), self.capacity)
         for name in ("depth", "rgb", "kind", "proprio", "sound", "events", "action"):
             getattr(self, name)[:n] = state[name][-n:]
+        # Pre-salience checkpoints: leave zeros; DreamerBrain recomputes from
+        # stored proprio/events on load when prioritization is on.
+        if "salience" in state:
+            self.salience[:n] = state["salience"][-n:]
         self.pos = n % self.capacity
         self.full = n == self.capacity
         self.rng.bit_generator.state = state["rng_state"]

@@ -131,3 +131,19 @@ checkpoints serialize the buffer).
 - Offline conditioning gym (scripts/conditioning_gym.py): replay a recorded life's
   buffer through candidate conditioning stacks without running the world — the
   009-style knob rounds should be screened there in minutes first.
+- **Reward-aware replay built and pre-screened** (`replay.prioritize: none | reward`,
+  009's reachability fix). The first gym screen already earned findings:
+  1. *Event flags are the wrong priority signal under HRRL.* All 4 of dreamer_001's
+     recorded meals happened at energy ≥ 0.96 — above the 0.85 setpoint — worth
+     exactly 0.0 drive reward. Priority is therefore |realized drive reduction|
+     ("salience", recorded per step at act(), backfilled for old checkpoints), not
+     the ate flag. Also future-proof: a priced blackout is a salience spike with no
+     event attached.
+  2. *This blob can't discriminate the arms:* at 1,422 lived steps a uniform batch
+     already covers ~90% of the buffer, so oversampling adds nothing yet. The
+     discriminative screen needs a long life (grown swift_01, or a synced beta_09
+     blob) where uniform spike coverage is ~1% per batch, not 90%.
+  3. *Pre-registered caution:* with spikes in ~100% of batches for 400 updates, the
+     fresh head's spike error barely moved (~1.3 → ~1.15) in both arms — if the
+     beta-scale screen confirms, sampling alone may not suffice and the follow-up
+     knob is spike-weighted twohot loss (changes emphasis, not reward).
