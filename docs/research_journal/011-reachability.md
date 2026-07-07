@@ -9,7 +9,7 @@ runs:
   - save: saves/beta_10
     config: configs/run/beta_10_reachability.yaml
     brain: configs/brain/beta_10_dreamer.yaml
-    commit: pending          # set at launch
+    commit: 5dae6f2
     ticks: pending
     role: experiment
 baselines: [009, 008]
