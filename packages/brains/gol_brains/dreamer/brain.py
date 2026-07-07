@@ -231,6 +231,36 @@ class DreamerBrain(Brain):
             ],
             device=self.device,
         )
+        # Round-011 reachability: how the dormancy blackout enters the learned
+        # stream. "cut" (legacy) severs it — wake resets the live state and
+        # the salience chain, and near-zero energy trains the continuation
+        # head to 0, so imagination discount-terminates at the crash.
+        # "priced" makes the blackout one visible transition (the pre-collapse
+        # state is the predecessor of the wake observation, carrying the gap's
+        # real energy/integrity delta) so HRRL prices the crash with no new
+        # reward terms. Four decisions, each deliberate:
+        #   1. salience survives the wake (the delta is a real spike, so
+        #      reward-aware replay can find every blackout);
+        #   2. the buffer keeps the pair adjacent (true in both modes — add()
+        #      never breaks — so replayed windows can span the gap);
+        #   3. the live recurrent state still resets (the mind was off; only
+        #      the *consequence* was lived, not the gap);
+        #   4. blackout is no longer a termination: the continuation head
+        #      trains to 1 everywhere, since a survivable transition that
+        #      imagination discount-kills at would leave the priced crash
+        #      unreachable by the actor. Death stays unexperienced (the
+        #      stream just stops); that is a deliberately separate gap.
+        # Respawn into a new body remains a hard cut in both modes.
+        self.blackout = str(rw.get("blackout", "cut"))
+        if self.blackout not in ("cut", "priced"):
+            raise ValueError(f"unknown blackout mode: {self.blackout!r}")
+        if self.blackout == "priced" and self.homeostasis_mode != "drive":
+            raise ValueError("blackout: priced requires homeostasis: drive (HRRL prices the gap)")
+        # Spike-weighted reward loss (pre-registered 010/011 follow-up): the
+        # twohot head sees so few |reward| spikes that even oversampled meals
+        # can drown in the batch mean; weight > 0 multiplies spike samples'
+        # reward loss by (1 + weight). 0 = legacy unweighted loss.
+        self.spike_loss_weight = float(rw.get("spike_loss_weight", 0.0))
         self.low_energy_threshold = float(rw.get("low_energy_threshold", 0.25))
         self.low_energy_penalty = float(rw.get("low_energy_penalty", 0.02))
         self.low_energy_graded = bool(rw.get("low_energy_graded", True))
@@ -712,7 +742,18 @@ class DreamerBrain(Brain):
         homeo = self._homeostasis(b["events"], b["proprio"])
         reward_logits = self.wm.head_reward(feat)
         loss_reward = self.twohot.loss(reward_logits, homeo)
-        cont_target = (b["proprio"][..., 5] > 0.01).float()
+        if self.spike_loss_weight > 0.0:
+            spike_w = (homeo.abs() > self.prioritize_threshold).float()
+            loss_reward = loss_reward * (1.0 + self.spike_loss_weight * spike_w)
+        # cut: blackout is a termination (energy ~0 ends the imagined stream).
+        # priced: nothing observable terminates — the crash is a survivable
+        # transition the actor must be able to plan across, so the head
+        # trains to "continue" everywhere.
+        cont_target = (
+            torch.ones_like(homeo)
+            if self.blackout == "priced"
+            else (b["proprio"][..., 5] > 0.01).float()
+        )
         loss_cont = F.binary_cross_entropy_with_logits(
             self.wm.head_cont(feat).squeeze(-1), cont_target, reduction="none"
         )
@@ -947,12 +988,27 @@ class DreamerBrain(Brain):
         return out
 
     def reset_stream(self) -> None:
-        """The stream broke (respawn or wake): reset live recurrent state only."""
+        """The stream broke for good (respawn into a new body): reset live
+        recurrent state and sever the salience chain — a newborn must not
+        inherit a drive-delta spike across a gap nobody lived."""
         self.h, self.z = self.wm.rssm.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
-        # The gap's drive delta was never experienced; don't fake a salience
-        # spike across it (pricing the blackout is a deliberate future round).
         self._prev_drive = None
+
+    def wake(self) -> None:
+        """First act after a dormant spell (see the blackout flag's contract).
+
+        cut: the gap is a stream break like any other. priced: the live
+        recurrent state still resets (the mind was off) but _prev_drive
+        survives, so the wake act records the gap's real drive delta as
+        salience — the blackout becomes the one visible transition that
+        reward-aware replay can then keep feeding to the reward head.
+        """
+        if self.blackout == "cut":
+            self.reset_stream()
+            return
+        self.h, self.z = self.wm.rssm.initial(1, self.device)
+        self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
 
     def _recompute_salience(self) -> None:
         """Backfill per-step reward salience for a pre-salience checkpoint.
@@ -998,6 +1054,9 @@ class DreamerBrain(Brain):
             "lp_norm": self.lp_norm.state_dict(),
             "return_scale": self._return_scale[0],
             "boredom_pressure": self._boredom_pressure,
+            # Rides the checkpoint so a resume during a dormant spell doesn't
+            # silently cut a blackout the priced mode should have seen.
+            "prev_drive": self._prev_drive,
             "updates": self._updates,
             "act_steps": self._act_steps,
             "rng_state": self.rng.bit_generator.state,
@@ -1041,6 +1100,8 @@ class DreamerBrain(Brain):
         self._return_scale = [float(state["return_scale"])]
         # Guarded: pre-pressure checkpoints start with a fresh mood.
         self._boredom_pressure = float(state.get("boredom_pressure", 0.0))
+        prev_drive = state.get("prev_drive")
+        self._prev_drive = float(prev_drive) if prev_drive is not None else None
         self._updates = int(state["updates"])
         # Guarded: pre-pacing checkpoints carry no act-step counter; seed it
         # at the stored buffer's size so the update/act-step pair stays

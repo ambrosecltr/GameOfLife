@@ -41,11 +41,12 @@ class Population:
         }
         self._next_idx = 0
         self._respawn_queue: list[tuple[int, str]] = []  # (due_tick, brain kind)
-        # Waking from dormancy breaks the stream of experience (the gap is
-        # never observed); those brains get reset_stream() before their next
-        # act so a days-long discontinuity isn't stitched into one RSSM step.
+        # Waking from dormancy interrupts the stream of experience (the gap
+        # itself is never observed); those brains get wake() before their next
+        # act. The default wake() is a stream cut (reset_stream); brains that
+        # price the blackout keep the gap as one visible transition instead.
         self._dormant_ids: set[str] = set()
-        self._pending_stream_reset: set[str] = set()
+        self._pending_wake: set[str] = set()
         # inherit_weights == "lineage": dead learning brains wait here for a
         # new body — weights and replay memory persist across deaths.
         self._lineage_stash: dict[str, list[Brain]] = {}
@@ -133,7 +134,7 @@ class Population:
             self.locks.pop(rid, None)
             self.last_obs.pop(rid, None)
             self._dormant_ids.discard(rid)
-            self._pending_stream_reset.discard(rid)
+            self._pending_wake.discard(rid)
             self._act_attempts.pop(rid, None)
             self._act_latched.pop(rid, None)
             self._respawn_queue.append((world.tick + self.cfg.population.respawn_delay_ticks, kind))
@@ -192,7 +193,7 @@ class Population:
         )
         self.last_obs = obs
         # Robots observable again after a dormant spell just woke up.
-        self._pending_stream_reset |= self._dormant_ids & set(obs)
+        self._pending_wake |= self._dormant_ids & set(obs)
         self._dormant_ids = {r.id for r in world.robots.values() if r.dormant}
         for robot_id, o in obs.items():
             lock = self.locks[robot_id]
@@ -201,9 +202,9 @@ class Population:
                 self._act_latched[robot_id] = self._act_latched.get(robot_id, 0) + 1
                 continue
             try:
-                if robot_id in self._pending_stream_reset:
-                    self.brains[robot_id].reset_stream()
-                    self._pending_stream_reset.discard(robot_id)
+                if robot_id in self._pending_wake:
+                    self.brains[robot_id].wake()
+                    self._pending_wake.discard(robot_id)
                 action = self.brains[robot_id].act(o)
             finally:
                 lock.release()

@@ -62,8 +62,20 @@ class Brain(ABC):
         self.reset_stream()
 
     def reset_stream(self) -> None:  # noqa: B027 - optional hook, no-op by default
-        """Called when the stream of experience breaks: lineage respawn into a
-        new body, or waking from dormancy (the dormant gap is never observed).
+        """Called when the stream of experience breaks for good: lineage
+        respawn into a new body (the previous body's end was never observed,
+        and a newborn must not inherit a salience spike it didn't live).
 
         Weights and memory persist; only the live recurrent state resets.
         """
+
+    def wake(self) -> None:
+        """Called on the first act after a dormant spell, before that act.
+
+        Default: the dormant gap is a stream break like any other (the
+        legacy cut). Brains that price the blackout override this to keep
+        the pre-collapse state as the predecessor of the wake observation —
+        one visible transition carrying the gap's real energy/integrity
+        delta — instead of severing the stream.
+        """
+        self.reset_stream()

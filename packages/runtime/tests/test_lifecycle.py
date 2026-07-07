@@ -47,22 +47,38 @@ def test_death_triggers_respawn(tmp_path: Path) -> None:
     assert "walker_001" not in population.brains
 
 
-def test_wake_from_dormancy_resets_brain_stream() -> None:
+def test_wake_from_dormancy_calls_wake_hook() -> None:
     world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
     population = Population(world, RUN)
     rid = "walker_000"
     calls: list[str] = []
-    population.brains[rid].reset_stream = lambda: calls.append(rid)  # type: ignore[method-assign]
+    population.brains[rid].wake = lambda: calls.append(rid)  # type: ignore[method-assign]
 
-    population.act_step(world)  # awake baseline: no reset
+    population.act_step(world)  # awake baseline: no wake
     assert calls == []
     robot = world.robots[rid]
     robot.dormant = True
-    population.act_step(world)  # dormant: unobserved, still no reset
+    population.act_step(world)  # dormant: unobserved, still no wake
     assert calls == []
     robot.dormant = False
     robot.energy = 50.0
     population.act_step(world)  # first awake cycle after the gap
     assert calls == [rid]
-    population.act_step(world)  # reset fires once, not every cycle
+    population.act_step(world)  # wake fires once, not every cycle
     assert calls == [rid]
+
+
+def test_default_wake_is_a_stream_cut() -> None:
+    """Brains that don't override wake() keep the legacy reset semantics."""
+    world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, RUN)
+    rid = "walker_000"
+    resets: list[str] = []
+    population.brains[rid].reset_stream = lambda: resets.append(rid)  # type: ignore[method-assign]
+    robot = world.robots[rid]
+    robot.dormant = True
+    population.act_step(world)
+    robot.dormant = False
+    robot.energy = 50.0
+    population.act_step(world)
+    assert resets == [rid]

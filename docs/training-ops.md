@@ -80,6 +80,24 @@ the journal entry's "What changed."
   barely moved with spikes in every batch (tiny buffer, weak evidence). If
   that replicates on a long life, the follow-up knob is spike-weighted loss.
 
+`reward:`
+- `blackout: cut | priced` — how the dormancy gap enters the learned stream
+  (round 011's reachability fix). `cut` (legacy) severs it: wake resets the
+  live state and the salience chain, and near-zero energy trains the
+  continuation head to 0, so imagination discount-terminates at the crash.
+  `priced` makes the blackout one visible transition — the pre-collapse step
+  stays the predecessor of the wake observation, the gap's real
+  energy/integrity delta lands as wake-step salience (so reward-aware replay
+  can find every blackout), the live recurrent state still resets (the mind
+  was off), and nothing observable terminates (cont trains to 1: a crash the
+  actor can't plan across can't be avoided). Requires `homeostasis: drive`.
+  Respawn into a new body remains a hard cut in both modes; death stays
+  unexperienced.
+- `spike_loss_weight: w` — multiplies the twohot reward-head loss by
+  (1 + w) on |reward| > `prioritize_threshold` samples. The pre-registered
+  follow-up if prioritized replay gets spikes into batches but the head
+  still can't fit them. 0 = legacy unweighted loss.
+
 `training:`
 - `optimizer: adam | muon` — Muon (vendored, `dreamer/optim.py`) on the
   world model's 2D matrices, Adam elsewhere. `muon_lr` (default 0.02).

@@ -41,6 +41,96 @@ def fake_obs(rng: np.random.Generator, bias: float = 0.0) -> Observation:
     )
 
 
+def body_obs(rng: np.random.Generator, energy: float, integrity: float) -> Observation:
+    """fake_obs with a controlled internal state (drive reads proprio 5/6/14)."""
+    obs = fake_obs(rng)
+    obs["proprio"][5] = energy
+    obs["proprio"][6] = integrity
+    obs["proprio"][14] = 0.0  # rested
+    return obs
+
+
+DRIVE = {"homeostasis": "drive"}
+
+
+def test_priced_blackout_wake_carries_salience() -> None:
+    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "blackout": "priced"}}, seed=3)
+    rng = np.random.default_rng(2)
+    brain.act(body_obs(rng, energy=0.9, integrity=1.0))
+    brain.act(body_obs(rng, energy=0.02, integrity=1.0))  # pre-collapse step
+    brain.wake()
+    # The mind was off: live recurrent state resets even in priced mode...
+    assert float(brain.h.abs().sum()) == 0.0 and float(brain.z.abs().sum()) == 0.0
+    # ...but the salience chain survives the gap.
+    assert brain._prev_drive is not None
+    brain.act(body_obs(rng, energy=0.4, integrity=0.6))  # wake observation
+    assert float(brain.buffer.salience[2]) > 0.1, "the gap's drive delta must be a real spike"
+
+
+def test_cut_blackout_wake_severs_salience() -> None:
+    brain = DreamerBrain({**TINY, "reward": dict(DRIVE)}, seed=3)  # blackout defaults to cut
+    rng = np.random.default_rng(2)
+    brain.act(body_obs(rng, energy=0.9, integrity=1.0))
+    brain.act(body_obs(rng, energy=0.02, integrity=1.0))
+    brain.wake()
+    assert brain._prev_drive is None
+    brain.act(body_obs(rng, energy=0.4, integrity=0.6))
+    assert float(brain.buffer.salience[2]) == 0.0, "legacy wake must not fake a spike"
+
+
+def test_respawn_severs_salience_even_when_priced() -> None:
+    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "blackout": "priced"}}, seed=3)
+    rng = np.random.default_rng(2)
+    brain.act(body_obs(rng, energy=0.02, integrity=1.0))
+    brain.reset_stream()  # new body: nobody lived this gap
+    assert brain._prev_drive is None
+
+
+def test_priced_blackout_requires_drive_homeostasis() -> None:
+    with pytest.raises(ValueError, match="blackout"):
+        DreamerBrain({**TINY, "reward": {"blackout": "priced"}}, seed=0)
+    with pytest.raises(ValueError, match="blackout"):
+        DreamerBrain({**TINY, "reward": {**DRIVE, "blackout": "banana"}}, seed=0)
+
+
+def test_prev_drive_rides_checkpoint() -> None:
+    cfg = {**TINY, "reward": {**DRIVE, "blackout": "priced"}}
+    brain = DreamerBrain(cfg, seed=3)
+    rng = np.random.default_rng(2)
+    brain.act(body_obs(rng, energy=0.3, integrity=0.9))
+    assert brain._prev_drive is not None
+    twin = DreamerBrain(cfg, seed=9)
+    twin.load_state_dict(brain.state_dict())
+    assert twin._prev_drive == pytest.approx(brain._prev_drive)
+
+
+def test_spike_weighted_reward_loss() -> None:
+    base_cfg = {**TINY, "reward": dict(DRIVE)}
+    weighted_cfg = {**TINY, "reward": {**DRIVE, "spike_loss_weight": 4.0}}
+    losses = []
+    for cfg in (base_cfg, weighted_cfg):
+        brain = DreamerBrain(cfg, seed=5)
+        rng = np.random.default_rng(4)
+        for _ in range(80):
+            brain.act(fake_obs(rng))
+        metrics = brain.learn()
+        assert metrics is not None and np.isfinite(metrics["loss_reward"])
+        losses.append(metrics["loss_reward"])
+    # Identical seed and data: weights >= 1 elementwise, so the weighted
+    # batch's reward loss can only match or exceed the unweighted one.
+    assert losses[1] >= losses[0]
+
+
+def test_priced_blackout_brain_learns() -> None:
+    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "blackout": "priced"}}, seed=6)
+    rng = np.random.default_rng(5)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    metrics = brain.learn()
+    assert metrics is not None
+    assert np.isfinite(metrics["loss_model"])
+
+
 def test_symlog_symexp_inverse() -> None:
     x = torch.linspace(-100, 100, 41)
     torch.testing.assert_close(symexp(symlog(x)), x, atol=1e-3, rtol=1e-4)
