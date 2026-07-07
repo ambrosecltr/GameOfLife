@@ -47,7 +47,7 @@ visible, but making its price *honest*.
 
 ## What changed vs beta_09 (the only knobs)
 
-Config (both in `beta_10_dreamer.yaml`):
+Config (all in `beta_10_dreamer.yaml`):
 
 - `reward.blackout: priced` — on wake, the pre-collapse state is the
   predecessor of the wake observation: one visible transition carrying the
@@ -68,10 +68,14 @@ zeroed across them — respawn always, wake only under `cut`. So beta_10's
 baseline is *cleaner* than beta_09's, and the census numbers above are the
 measured size of the artifact this removes.
 
+Plus one screened-in knob, same constraint: `reward.spike_loss_weight: 4`
+(spikes count 5× in the twohot reward loss) — journal 010's pre-registered
+follow-up, taken because the gym showed the head fits spikes better under
+weighting *even when oversampled* (see Screens). Three knobs, one indicted
+constraint — the round-009 precedent; per-knob ablation flags remain.
+
 Deliberately untouched: the conditioning stack (it works), capacity bundle,
-world, population, seed protocol. `spike_loss_weight` stays 0: in the gym
-screen, prioritization alone moved the head's spike error and adding loss
-weighting on top gave no additional improvement (see Screens).
+world, population, seed protocol.
 
 ## Screens (offline gym, dreamer_043's life, --fresh-model, nano, seed 0)
 
@@ -79,10 +83,16 @@ Four arms × 2000 updates, replay shaped to beta (16×64, no burn-in/recent),
 the only surviving beta_09 blob — n=1 life, wake-spike-dominated buffer, so
 these earn the knobs, they don't license behavioral claims:
 
-- A `prioritize=none`  vs  B `prioritize=reward`: RESULTS_PLACEHOLDER_AB
-- C = B + `spike_loss_weight=4`: RESULTS_PLACEHOLDER_C
-- D = B + `blackout=priced` (machinery smoke: cont→1 path runs): finite
-  losses, no divergence.
+Windowed mean `reward_head_spike_err` (0–500 / 500–1000 / 1000–1500 /
+1500–2000 updates):
+
+- A `prioritize=none`: 0.81 / 0.78 / 0.76 / **0.68**
+- B `prioritize=reward`: 0.68 / 0.65 / 0.61 / **0.57** (−16% vs A, every window)
+- C = B + `spike_loss_weight=4`: 0.68 / 0.63 / 0.56 / **0.50** (−12% vs B,
+  best in every window; its raw loss_reward is 2× B's by construction —
+  the weighted metric isn't comparable across arms)
+- D = B + `blackout=priced`: ≡ B to the 4th decimal on reward metrics —
+  the cont→1 change is orthogonal to the reward head, machinery clean.
 
 Screen caveats: the blob predates salience and break markers, so backfill
 fakes 8 rebirth spikes among the ~271 salient steps (documented, kept — the
@@ -94,11 +104,9 @@ on meals is understated by this data.
 ## Predictions (written before launch)
 
 - **P1 — the head learns the loud moments.** `reward_head_spike_err` falls
-  within-run and stays below beta_09-era levels once spikes flow
-  (`spike_row_frac` ≥ 0.25 by construction); `loss_reward` does not
-  regress. If spike error stays flat with spikes in every batch at base
-  scale over a long life, the pre-registered follow-up is
-  `spike_loss_weight` (screened: no harm, no gym-visible gain).
+  within-run (`spike_row_frac` ≥ 0.25 by construction). If it stays flat
+  with spikes flowing and weighted, reachability's head-side mechanism is
+  falsified at base scale and P5 branches on the actor instead.
 - **P2 — collapse stops paying, dormancy restructures.** With the wake
   jackpot replaced by the honest net delta (energy recovery MINUS the
   integrity crash) and rebirth stitches zeroed, the collapse-wake-collapse

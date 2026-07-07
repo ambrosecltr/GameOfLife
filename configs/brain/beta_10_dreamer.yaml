@@ -21,11 +21,16 @@
 #     reward head. Changes what is learned from, never what is rewarded.
 #     Gym-screened on the beta_09 life before launch (journal 011).
 #
+#   reward.spike_loss_weight: 4 — journal 010's pre-registered follow-up,
+#     screened IN: with spikes oversampled the head still fit them 12%
+#     better under weighting, best arm in every gym window. Same shared
+#     constraint (reachability = spikes must reach the head AND be fit);
+#     round-009 precedent for moving a bundle when one constraint is
+#     indicted. Per-knob ablation flags remain for attribution.
+#
 # Deliberately NOT here (unvalidated at base scale, would confound
 # reachability attribution): replay.burn_in, replay.recent,
 # training.optimizer: muon, training.l2_init, training.compile.
-# reward.spike_loss_weight stays 0 unless the gym screen says the head
-# cannot fit spikes even when oversampled (pre-registered follow-up).
 
 kind: dreamer
 preset: base                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
@@ -67,9 +72,10 @@ reward:
   # transition instead of a stream cut (semantics in dreamer/brain.py and
   # docs/training-ops.md).
   blackout: priced
-  # Pre-registered follow-up, OFF at base: enable only if the gym screen
-  # shows oversampled spikes still don't move reward_head_spike_err.
-  spike_loss_weight: 0
+  # ROUND KNOB 3 (screened in): gym on dreamer_043's life, final-500-update
+  # spike error — uniform 0.68, prioritized 0.57, prioritized+weight4 0.50,
+  # best in every window. Spikes count 5x in the twohot reward loss.
+  spike_loss_weight: 4
   # events-mode knobs (legacy ablation):
   low_energy_threshold: 0.25
   low_energy_penalty: 0.02

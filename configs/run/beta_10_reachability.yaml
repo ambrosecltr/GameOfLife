@@ -4,10 +4,12 @@
 # Round 009's verdict: conditioning works (boredom is a thermostat at ~0.39
 # equilibrium and drove the first within-run eating rise ever), but the binge
 # collapsed the moment hunger had to carry it — the HRRL reward is
-# well-shaped and UNREACHABLE. Two structural gaps, two knobs, both in
+# well-shaped and UNREACHABLE. Two structural gaps, three knobs, all in
 # beta_10_dreamer.yaml: reward.blackout: priced (the dormancy crash becomes
-# one visible HRRL-priced transition) and replay.prioritize: reward (salient
-# steps actually reach the twohot reward head). Everything else — the
+# one visible HRRL-priced transition), replay.prioritize: reward (salient
+# steps actually reach the twohot reward head), and reward.spike_loss_weight
+# 4 (the head fits the spikes it now sees — gym-screened in). Everything
+# else — the
 # conditioning stack, capacity bundle (base preset, train_ratio 1.0, cuda),
 # world, seed protocol, population — identical to beta_09, the A/B baseline.
 # Foragers remain the cross-run anchor.
