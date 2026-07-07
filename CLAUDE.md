@@ -71,4 +71,8 @@ into "episodic RL training pipeline." These rules exist so that never happens ag
   the expensive part, not the world.
 - Determinism: world stepping is deterministic given seed + actions; `--sync` mode
   exists for determinism tests.
+- Training speed/pacing, dreamer config flags, checkpoint compatibility, and the
+  offline screening gym are in `docs/training-ops.md` — read it before staging a
+  round; benchmark with `scripts/bench_learn.py` on the round's hardware before
+  picking a world speed.
 - The full design plan lives in `docs/architecture.md`.
