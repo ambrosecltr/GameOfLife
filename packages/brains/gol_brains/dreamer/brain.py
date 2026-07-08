@@ -250,7 +250,15 @@ class DreamerBrain(Brain):
         self.via_i_safe = float(via.get("integrity_safe", 0.5))
         self.via_w_energy = float(via.get("energy_weight", 1.0))
         self.via_w_integ = float(via.get("integrity_weight", 1.0))
-        if self.via_scale > 0.0 and self.homeostasis_mode != "drive":
+        # The drive is "on" if EITHER term is active: the reduction reward
+        # (scale, HRRL-style movement away from the floor) or the standing
+        # danger tax (floor, a cost of *being* near the floor). Offline
+        # calibration on dreamer_042 showed the reduction term alone recreates
+        # the hibernation attractor — near-floor states become high-value
+        # launchpads because escaping pays — so the standing cost carries the
+        # mortality gradient; both are kept as separable knobs.
+        self.via_on = self.via_scale > 0.0 or self.via_floor > 0.0
+        if self.via_on and self.homeostasis_mode != "drive":
             raise ValueError("reward.viability requires homeostasis: drive")
         # True death (integrity → lethal) terminates the imagined stream so its
         # absorbing ~0 return backs up through the critic — a functional fear of
@@ -552,7 +560,7 @@ class DreamerBrain(Brain):
                 else:
                     salience = 0.0
                 self._prev_drive = d
-                if self.via_scale > 0.0:
+                if self.via_on:
                     # The barrier's realized reward and spikes ride the same
                     # lived stream, so near-death moments become salient to
                     # prioritized replay and the per-life integral is exact.
@@ -853,7 +861,7 @@ class DreamerBrain(Brain):
         # comfort drive (their sum is what the actor should maximize); the two
         # stay separated only for the forensic channels, so we can read which
         # drive paid for each real transition (round-011 asked for exactly this).
-        if self.via_scale > 0.0:
+        if self.via_on:
             via = self._viability_reward(b["proprio"], b["first"])
         else:
             via = torch.zeros_like(homeo_drive)
@@ -1079,7 +1087,7 @@ class DreamerBrain(Brain):
             self._metrics["l2_init_dist"] = l2_dist
         if self.homeostasis_mode == "drive":
             self._metrics["drive_level"] = float(self._drive_level(b["proprio"]).mean())
-        if self.via_scale > 0.0:
+        if self.via_on:
             self._metrics["reward_viability"] = float(via.mean())
             self._metrics["viability_level"] = float(self._viability(b["proprio"]).mean())
             self._metrics["viability_max"] = float(self._viability(b["proprio"]).max())
@@ -1121,7 +1129,7 @@ class DreamerBrain(Brain):
         # could only infer from the batch-mean sign.
         if self.homeostasis_mode == "drive":
             out["life_return_homeo"] = self._life_return_homeo
-            if self.via_scale > 0.0:
+            if self.via_on:
                 out["life_return_via"] = self._life_return_via
         return out
 
@@ -1174,7 +1182,7 @@ class DreamerBrain(Brain):
             reduction = torch.zeros_like(d)
             reduction[1:] = d[:-1] - d[1:]
             spike = self.drive_scale * reduction
-            if self.via_scale > 0.0:
+            if self.via_on:
                 # Near-death moments are salient too, so a screen with the
                 # barrier on oversamples them from the recorded life.
                 V = self._viability(proprio)
