@@ -114,32 +114,67 @@ setpoints. Add a **viability potential** `V` that is annihilation-*avoiding*, a 
 on the distance from each survival-critical variable to its lethal floor:
 
 ```
-V(t) = Σ_i  w_i · ( −log( (x_i(t) − lethal_i) / (safe_i − lethal_i) ) )₊     # 0 above safe_i, ↑∞ toward lethal_i
+V(t) = Σ_i  w_i · ( −log( (x_i(t) − lethal_i) / (safe_i − lethal_i) ) )₊   # 0 above safe_i, ↑ toward lethal_i, capped
 r_via(t) = viability_scale · ( V(t-1) − V(t) )   −   viability_floor · V(t)
 ```
 
-for the survival variables (energy, integrity), with `lethal_i` the death floor and `safe_i`
-a comfortable margin above it. Three properties, each targeting a specific failure:
+over the survival variables (energy, integrity), with `lethal_i` the death floor and `safe_i`
+a comfortable margin above it. The term has two parts — a **reduction reward** (`scale`, HRRL
+movement away from the floor) and a **standing danger tax** (`floor`, a cost of *being* near
+it) — and **offline calibration (below) changed which one carries the weight**. The reduction
+part was the original bet; it turned out to reproduce the very attractor it was meant to
+break (escaping the floor pays, so the floor becomes a valuable launchpad — the census's
+"collapse → free energy" logic reappearing in *value* space). The **standing tax** is what
+actually installs a mortality gradient. So the launch default is standing-cost-dominant
+(`scale` low or 0, `floor` carrying the term); `scale` stays an ablation knob.
 
-1. **It does not telescope to a loss.** Far from the boundary `V ≈ 0`; the return of a life
-   spent *staying* far from death is bounded near zero from below and dominated by the
-   reduction spikes when you claw back from an excursion — the integral of viable living is
-   ≈ 0⁺, not the strongly-negative of the current drive. Combined with any residual positive
-   curiosity, the lived stream clears the 0 of cessation. This is the sign-fix the death
-   theorem demands, achieved through geometry rather than a bolted-on "+1 alive" (which would
-   be a survival task — invariant #2).
-2. **The marginal value of a calorie explodes as you starve.** `−log` → ∞ near the floor, so
-   eating-while-hungry is worth *unboundedly more* than eating-while-full — a far steeper
-   asymmetry than the convex setpoint drive gives. This is exactly the "eat to survive ≫ eat
-   for fun" gradient round 011 measured the absence of (104 sated meals : 1 hungry). And it is
-   dense and low-frequency — no reliance on the twohot head catching rare spikes, so it is
-   *cheaper for a nano brain* than sparse-meal reachability was.
-3. **It is not a task.** It rewards no action and names no behaviour; it is a pure function of
+Two properties survive that redesign, one was wrong:
+
+1. ~~It does not telescope to a loss.~~ **Corrected.** The reduction form telescopes exactly
+   like the comfort drive (born safe, die in danger → negative endpoint), and worse, its
+   *value* rewards approaching the floor. It is the **standing tax** that fixes the sign:
+   being safe costs ≈ 0 (ties cessation from above; positive curiosity clears the bar), being
+   in danger costs continuously, so the value function prefers safety without any bonus for
+   the *act* of escaping. Geometry, not a bolted-on "+1 alive" (which would be a survival
+   task — invariant #2).
+2. **The cost of a lost calorie explodes as you approach death.** `−log` rises steeply toward
+   the floor, so a unit of energy/integrity when near-lethal is worth far more than at
+   satiety — the "survive ≫ pass the time" asymmetry round 011 measured absent (104 sated
+   meals : 1 hungry). Dense and low-frequency: no reliance on the twohot head catching rare
+   spikes, so *cheaper for a nano brain* than sparse-meal reachability was.
+3. **It is not a task.** It rewards no action and names no behaviour; a pure function of
    internal state, like every other drive. Moving away from the boundary by any means —
    eating, resting, being fed by a peer — relieves it. Charter-clean.
 
-`viability_scale = 0` recovers beta_10 exactly (ablation switch). The whole proposal is one
-config-flagged additive term plus the two decouplings below.
+`viability_scale = 0` **and** `viability_floor = 0` recovers beta_10 exactly (either term
+alone is "on"). The whole proposal is one config-flagged additive term plus the two
+decouplings below.
+
+### Offline calibration (dreamer_042, --fresh-model nano, 1500 updates, 2026-07-08)
+
+`value_vs_energy.py` trains a fresh critic over the recorded life, then reads `value` on real
+buffer states binned by proximity to a floor. **The lethal variable is integrity** (energy→0
+is *recoverable* dormancy in this world; integrity→0 is the only true death, world.py:590) —
+binning by energy is confounded, since the recorded life recovered from low energy hundreds
+of times, so low-energy states correctly carry high in-data return. On the integrity axis:
+
+- **baseline (beta_10):** value flat across integrity — near-death (int<0.1) 140.2 vs safe
+  (int>0.35) 139.9, **gap −0.3**. The critic is mortality-blind: a body at 5% integrity is
+  worth the same as a healthy one.
+- **reduction barrier (scale 3, floor .02):** bent value the *wrong* way (near-floor
+  launchpad effect); killed.
+- **standing tax (scale 0, floor 1.0, death_terminal, gate viability):** integrity **gap flips
+  to +4.5** — safe bodies now out-value dying ones — while the energy gap stays negative
+  (−8.2, correctly: recoverable states keep their value). First mortality gradient in the
+  project, on the variable that kills.
+
+**Honest limits.** Open-loop, one survivor-lineage nano life; the gradient is modest and
+noisy, and the *sign of a counterfactual value function* is inherently closed-loop (the
+recorded policy generated these outcomes). So calibration did the two things it can — it
+**chose the formulation** (standing tax, not reduction) and **confirmed the signal is sane**
+(`viability_level` ~1.1 ≪ cap 4.0; death_terminal has ~1,250 real terminal states in the
+lineage buffer to learn from) — but whether the gradient is *behaviourally sufficient* is the
+question 012a exists to answer. It cannot be screened away.
 
 ## Decoupling boredom from hunger (the user's structural concern, made concrete)
 
@@ -250,13 +285,12 @@ closes. This is a world-config change (`configs/world/`), ablatable, and touches
    (422≈433 / 494≈495 / 212≈212)" was a metric artifact — `value` is state-unconditioned and
    dormant states aren't in the buffer (retraction detailed above). Withdrawn; the sign result
    stands on its own.
-2. **Calibrate the barrier offline, and measure the value-vs-energy gradient.** Train a fresh
-   critic over dreamer_042's buffer (011's designated screen blob) under a candidate
-   `viability {scale, floor, safe}` and read `value` on real buffer states binned by energy
-   (scratchpad `value_vs_energy.py`). Baseline (beta_10) gives the reference gradient; the
-   barrier arm should bend value downward toward the floor and keep it finite/non-saturating
-   (check `viability_level` ≪ `barrier_cap`). This is the proper replacement for the retracted
-   indifference metric and the gate on whether the geometry is calibrated before a launch.
+2. **Calibrate the barrier offline. ✓ DONE 2026-07-08 — see the calibration block above.**
+   Outcome: reduction form rejected, standing-tax form chosen, signal confirmed sane, and the
+   first mortality gradient (integrity value-gap −0.3 → +4.5). Also surfaced that the value
+   *sign* is a closed-loop property the offline probe cannot settle — behavioural sufficiency
+   is 012a's job, not screenable away. Method note for future rounds: bin value by the
+   **lethal** variable (integrity), not the recoverable one (energy).
 
 ## Deliberately not in scope
 
