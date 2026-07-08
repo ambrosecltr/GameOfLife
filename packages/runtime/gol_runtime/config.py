@@ -23,7 +23,7 @@ class DevicesConfig:
 class PopulationConfig:
     target: int = 8
     respawn_delay_ticks: int = 1200
-    inherit_weights: str = "none"  # none | random_living
+    inherit_weights: str = "none"  # none | random_living | lineage
     mix: tuple[dict[str, Any], ...] = ()
 
 

@@ -109,7 +109,10 @@ the journal entry's "What changed."
   `viability_level`, `viability_max`, and per-life `life_return_via` /
   `life_return_homeo` (exact realized return, accumulated in `act()`).
   Requires `homeostasis: drive`. Near-death moments also become salient to
-  prioritized replay. Motivation: the comfort drive telescopes to a *negative*
+  prioritized replay: the barrier's salience is `|scale·ΔV| + floor·V`, so the
+  standing tax carries the priority in the floor-only form (deltas are small
+  when the drift toward the floor is slow). Motivation: the comfort drive
+  telescopes to a *negative*
   return over any mortal life, so the reward gives no positive stake in
   survival; the barrier's marginal value explodes toward the floor without
   telescoping to a loss.
@@ -117,7 +120,13 @@ the journal entry's "What changed."
   terminates the imagined stream (cont target = integrity above the floor), so
   its absorbing ~0 return backs up through the critic: a functional fear of
   death from prediction. Recoverable dormancy stays non-terminal. Independent
-  of `blackout`/`viability` (ablatable alone). false = beta_10.
+  of `blackout`/`viability` (ablatable alone). false = beta_10. The terminal
+  targets come from the runtime death hook: a dying body is never observable
+  from inside (dormant bodies don't act; the death tick removes the robot
+  before sensing), so on death the scheduler hands the body's last observation
+  to its brain (`Brain.record_death`, non-blocking — the sim never waits) and
+  the brain records it with vitals at the floor. Lineage runs only: the record
+  needs a replay buffer that outlives the body.
 - `boredom.gate: drive | viability` — what "calm enough to be bored" reads.
   `drive` (beta_10) reads the comfort drive, so any deficit below setpoint
   shuts the boredom gate (couples boredom to hunger — the round-011 concern).

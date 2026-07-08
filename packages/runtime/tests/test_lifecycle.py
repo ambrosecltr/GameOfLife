@@ -82,3 +82,56 @@ def test_default_wake_is_a_stream_cut() -> None:
     robot.energy = 50.0
     population.act_step(world)
     assert resets == [rid]
+
+
+LINEAGE_RUN = RunConfig(
+    checkpoint_interval_ticks=100_000,
+    population=PopulationConfig(
+        target=3,
+        respawn_delay_ticks=50,
+        inherit_weights="lineage",
+        mix=({"brain": {"kind": "random_walker"}, "count": 3},),
+    ),
+)
+
+
+def test_death_delivers_final_observation_to_brain() -> None:
+    """A body's end is real experience the brain could never sense (dormant
+    bodies don't act; the death tick removes the robot before observation) —
+    the scheduler delivers the last observation via record_death, flagged
+    with how the body died (hibernating or awake)."""
+    world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, LINEAGE_RUN)
+    rid = "walker_000"
+    calls: list[bool] = []
+    brain = population.brains[rid]
+    brain.record_death = (  # type: ignore[method-assign]
+        lambda obs, dormant=False: calls.append(dormant)
+    )
+    population.act_step(world)  # records a last observation while awake
+    world.robots[rid].dormant = True
+    population.act_step(world)  # dormant: unobserved, tracked as hibernating
+    del world.robots[rid]  # the body dies on the hibernation clock
+    population.act_step(world)
+    assert calls == [True]
+
+
+def test_death_delivery_never_blocks_on_a_busy_learner() -> None:
+    """The learner worker may hold the brain's lock mid-update when the body
+    dies: the sim never waits — delivery defers and retries next act-step."""
+    world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, LINEAGE_RUN)
+    rid = "walker_000"
+    calls: list[bool] = []
+    population.brains[rid].record_death = (  # type: ignore[method-assign]
+        lambda obs, dormant=False: calls.append(dormant)
+    )
+    population.act_step(world)
+    lock = population.locks[rid]
+    lock.acquire()  # a learn() in flight
+    del world.robots[rid]  # an awake death (fall/poison)
+    population.act_step(world)
+    assert calls == [], "delivery must not block the sim"
+    lock.release()
+    population.act_step(world)
+    assert calls == [False]

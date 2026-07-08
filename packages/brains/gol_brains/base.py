@@ -79,3 +79,16 @@ class Brain(ABC):
         delta — instead of severing the stream.
         """
         self.reset_stream()
+
+    def record_death(self, obs: Observation, dormant: bool = False) -> None:  # noqa: B027
+        """Called once by the runtime after the body died (integrity crossed
+        the lethal floor and the world removed it).
+
+        A dying body is never observable from inside — dormant bodies don't
+        act, and the death tick removes the robot before sensing — so the
+        runtime delivers the last observation it had for the body, with
+        `dormant` saying whether the body was hibernating when it died.
+        Brains that learn a continuation/terminal signal override this to
+        record the stream's real end; the default is a no-op (scripted
+        brains, and learners that don't model death).
+        """

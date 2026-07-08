@@ -91,7 +91,15 @@ Two composed knobs, same constraint:
   death from prediction, though the body is never experienced dying (invariant:
   no episodes). Composes with `blackout: priced` via `cont = integrity>lethal`,
   so the recoverable energy collapse stays non-terminal and only integrity death
-  terminates.
+  terminates. The terminal targets need a delivery path: a dying body is never
+  observable from inside (dormant bodies don't act, and the death tick removes
+  the robot before sensing), so without one the cont head would train "continue"
+  everywhere and the knob would be inert (pre-launch review). The runtime
+  therefore hands the dead body's last observation to its brain
+  (`Brain.record_death`, non-blocking — the sim never waits), and the brain
+  records it with the vitals at the state the world actually reached: integrity
+  0, energy 0 too for a hibernation death. One real sample per death, at the
+  floor, priced like any lived transition.
 - **`boredom.gate: viability`** — the round-011 decoupling: an agent far from
   the lethal floor can be safely bored (honest play) while merely peckish;
   only true danger shuts the boredom gate.
@@ -101,6 +109,13 @@ separate from `reward_homeostasis` so we can read which drive paid for each
 transition), and **`life_return_homeo` / `life_return_via`** — the exact
 per-life realized return, accumulated per lived tick in `act()`, which makes
 the telescoping-sign claim measurable directly instead of inferred.
+
+Replay salience under the staged form: the barrier's priority signal is
+`|scale·ΔV| + floor·V` — the standing tax, not just the delta. With the
+reduction at 0 the delta term contributes nothing, and near-floor drift is
+slow, so per-step deltas are small anyway; it's the tax level that makes
+near-death excursions loud to reward-aware replay, exactly as they are to the
+reward head.
 
 ## The affordance precondition (world)
 

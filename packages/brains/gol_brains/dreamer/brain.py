@@ -554,22 +554,25 @@ class DreamerBrain(Brain):
                 d = float(self._drive_level(tensors["proprio"])[0])
                 if self._prev_drive is not None:
                     salience = abs(self.drive_scale * (self._prev_drive - d))
-                    self._life_return_homeo += (
-                        self.drive_scale * (self._prev_drive - d) - self.drive_level_penalty * d
-                    )
+                    self._life_return_homeo += self.drive_scale * (self._prev_drive - d)
                 else:
                     salience = 0.0
+                # Level terms accrue every lived step (reduction masks at a
+                # stream break, the standing costs don't — same contract as
+                # _homeostasis/_viability_reward), so the integral is exact.
+                self._life_return_homeo -= self.drive_level_penalty * d
                 self._prev_drive = d
                 if self.via_on:
-                    # The barrier's realized reward and spikes ride the same
-                    # lived stream, so near-death moments become salient to
-                    # prioritized replay and the per-life integral is exact.
+                    # The barrier's realized reward rides the lived stream so
+                    # near-death moments are salient to prioritized replay.
+                    # BOTH terms: the delta (scale) and the standing tax
+                    # (floor·V) — the staged form is floor-only, and without
+                    # the tax the barrier added zero replay priority.
                     v = float(self._viability(tensors["proprio"])[0])
                     if self._prev_via is not None:
-                        salience += abs(self.via_scale * (self._prev_via - v))
-                        self._life_return_via += (
-                            self.via_scale * (self._prev_via - v) - self.via_floor * v
-                        )
+                        salience += abs(self.via_scale * (self._prev_via - v)) + self.via_floor * v
+                        self._life_return_via += self.via_scale * (self._prev_via - v)
+                    self._life_return_via -= self.via_floor * v
                     self._prev_via = v
             else:
                 salience = float(obs["events"][0] + obs["events"][1])
@@ -1161,6 +1164,61 @@ class DreamerBrain(Brain):
         self.h, self.z = self.wm.rssm.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
 
+    def record_death(self, obs: Observation, dormant: bool = False) -> None:
+        """The body's true end, delivered by the runtime (see Brain.record_death).
+
+        Recorded only when death_terminal is on: this is the sample that gives
+        the continuation head a real terminal target (cont = integrity >
+        lethal). Without it no at-the-floor observation can ever exist —
+        dormant bodies are unobserved and the death tick removes the robot
+        before sensing — so the head would train "continue" everywhere and
+        death_terminal would be inert (round-012 review). Off keeps the buffer
+        contents identical to beta_10.
+
+        The delivered obs is the last one the body produced (stale by the
+        length of a dormant spell), with the vitals set to the state the world
+        actually reached: integrity 0 always; energy 0 too when the body died
+        hibernating (the energy collapse is what started the integrity clock).
+        Events are cleared and the action recorded is zero — nothing happened
+        at death but death. Under priced blackout the step reads the real
+        drive/barrier plunge from its predecessor (the same one-visible-
+        transition contract as wake()); under cut a dormant death is a stream
+        break, so no fictional delta is read across the gap.
+        """
+        if not self.death_terminal:
+            return
+        proprio = np.array(obs["proprio"], dtype=np.float32, copy=True)
+        proprio[6] = 0.0  # integrity: the death condition itself
+        if dormant:
+            proprio[5] = 0.0  # hibernation death: energy had already collapsed
+        dead_obs = Observation(
+            rays=obs["rays"],
+            proprio=proprio,
+            sound=obs["sound"],
+            events=np.zeros_like(obs["events"]),
+        )
+        first = self._stream_first or (dormant and self.blackout == "cut")
+        salience = 0.0
+        with torch.no_grad():
+            if self.homeostasis_mode == "drive":
+                tensors = self._obs_to_tensors(dead_obs)
+                d = float(self._drive_level(tensors["proprio"])[0])
+                prev_d = None if first else self._prev_drive
+                if prev_d is not None:
+                    salience = abs(self.drive_scale * (prev_d - d))
+                    self._life_return_homeo += self.drive_scale * (prev_d - d)
+                self._life_return_homeo -= self.drive_level_penalty * d
+                if self.via_on:
+                    v = float(self._viability(tensors["proprio"])[0])
+                    prev_v = None if first else self._prev_via
+                    if prev_v is not None:
+                        salience += abs(self.via_scale * (prev_v - v)) + self.via_floor * v
+                    self._life_return_via -= self.via_floor * v
+        self.buffer.add(
+            dead_obs, np.zeros(ACTION_DIM, dtype=np.float32), salience=salience, first=first
+        )
+        self._stream_first = False
+
     def _recompute_salience(self) -> None:
         """Backfill per-step reward salience for a pre-salience checkpoint.
 
@@ -1181,15 +1239,17 @@ class DreamerBrain(Brain):
             d = self._drive_level(proprio)
             reduction = torch.zeros_like(d)
             reduction[1:] = d[:-1] - d[1:]
-            spike = self.drive_scale * reduction
+            spike = (self.drive_scale * reduction).abs()
             if self.via_on:
                 # Near-death moments are salient too, so a screen with the
-                # barrier on oversamples them from the recorded life.
+                # barrier on oversamples them from the recorded life. Same
+                # form as act(): |scale·ΔV| + floor·V — the standing tax is
+                # what carries it in the staged floor-only configuration.
                 V = self._viability(proprio)
                 v_red = torch.zeros_like(V)
                 v_red[1:] = V[:-1] - V[1:]
-                spike = spike + self.via_scale * v_red
-            sal = spike.abs().cpu().numpy()
+                spike = spike + (self.via_scale * v_red).abs() + self.via_floor * V
+            sal = spike.cpu().numpy()
             sal[self.buffer.first[:n] == 1] = 0.0
         else:
             sal = self.buffer.events[:n, :2].astype(np.float32).sum(-1)

@@ -33,7 +33,10 @@
 #     death from prediction, though the body is never experienced dying.
 #     Composes with blackout: priced — cont = (integrity > lethal), so the
 #     recoverable ENERGY collapse stays non-terminal and only INTEGRITY death
-#     terminates.
+#     terminates. The terminal targets exist because the runtime delivers the
+#     dead body's final observation (Brain.record_death) — a dying body is
+#     never observable from inside, so without that hook the cont head would
+#     train "continue" everywhere and this knob would be inert.
 #   - boredom.gate: viability — decouples boredom from mere hunger (the
 #     round-011 concern): a fed agent far from the lethal floor can be safely
 #     bored (honest play) while only true danger shuts the gate.
@@ -134,8 +137,9 @@ replay:
   batch_size: 16
   seq_len: 64
   warmup_steps: 500
-  # carried from beta_10: reward-aware replay (near-death moments are now
-  # salient too — the viability barrier's spikes ride the same salience chain).
+  # carried from beta_10: reward-aware replay. The barrier's salience is
+  # |scale·ΔV| + floor·V — the standing tax, not just the delta, so the
+  # floor-only form staged here still makes near-death moments loud.
   prioritize: reward
 
 training:

@@ -50,6 +50,18 @@ class Population:
         # inherit_weights == "lineage": dead learning brains wait here for a
         # new body — weights and replay memory persist across deaths.
         self._lineage_stash: dict[str, list[Brain]] = {}
+        # Deaths whose final observation hasn't reached the brain yet: the
+        # learner worker may hold the brain's lock mid-update when the body
+        # dies, and the sim never waits, so delivery is non-blocking with a
+        # retry each act-step. (brain, its lock, last obs, died dormant.)
+        self._pending_deaths: list[tuple[Brain, threading.Lock, Observation, bool]] = []
+        # Sticky per-robot last observation: last_obs holds only THIS step's
+        # awake obs (the frame logger's contract), so a hibernating body —
+        # the dominant death mode — vanishes from it long before it dies.
+        # Its final pre-blackout view survives here for record_death. Not
+        # checkpointed: a resume during a dormant spell sheds that body's
+        # death record if it never wakes — skip, don't stall.
+        self._death_obs: dict[str, Observation] = {}
         # Action-latch accounting: act-steps where the learner held the lock
         # and the robot repeated its previous command. The artifact grows with
         # world speed (a 200ms update spans more ticks the faster ticks go);
@@ -129,21 +141,73 @@ class Population:
         for rid in died:
             kind = self.kinds.pop(rid, "random_walker")
             brain = self.brains.pop(rid)
+            lock = self.locks.pop(rid, None)
+            self.last_obs.pop(rid, None)
+            last = self._death_obs.pop(rid, None)
+            # The body's end is real experience the brain could never sense
+            # (dormant bodies don't act, and the death tick removes the robot
+            # before observation) — deliver the final state so terminal-aware
+            # brains can record it (Brain.record_death). Only meaningful when
+            # the brain's memory outlives the body (lineage).
+            if (
+                last is not None
+                and lock is not None
+                and self.cfg.population.inherit_weights == "lineage"
+            ):
+                self._pending_deaths.append((brain, lock, last, rid in self._dormant_ids))
             if self.cfg.population.inherit_weights == "lineage":
                 self._lineage_stash.setdefault(kind, []).append(brain)
-            self.locks.pop(rid, None)
-            self.last_obs.pop(rid, None)
             self._dormant_ids.discard(rid)
             self._pending_wake.discard(rid)
             self._act_attempts.pop(rid, None)
             self._act_latched.pop(rid, None)
             self._respawn_queue.append((world.tick + self.cfg.population.respawn_delay_ticks, kind))
+        self._deliver_deaths()
         if len(world.robots) < self.cfg.population.target:
             due = [entry for entry in self._respawn_queue if entry[0] <= world.tick]
             for entry in due:
                 self._respawn_queue.remove(entry)
                 _, kind = entry
                 self._spawn(kind)
+
+    def _deliver_deaths(self) -> None:
+        """Hand each dead body's final observation to its brain, non-blocking.
+
+        The worker thread may be mid-learn() holding the brain's lock; the sim
+        never waits, so an undeliverable death stays pending and retries next
+        act-step. The worker exits once it sees the body gone, so an entry
+        outlives at most one in-flight update. (Not checkpointed: a checkpoint
+        landing inside that window sheds one death record — skip, don't stall.)
+        """
+        still_pending = []
+        for entry in self._pending_deaths:
+            brain, lock, obs, dormant = entry
+            if lock.acquire(blocking=False):
+                try:
+                    brain.record_death(obs, dormant=dormant)
+                finally:
+                    lock.release()
+            else:
+                still_pending.append(entry)
+        self._pending_deaths = still_pending
+
+    def _flush_death(self, brain: Brain) -> None:
+        """Last call for a stashed brain's pending death before it respawns.
+
+        The record must precede the newborn's first step or it would land out
+        of order in the replay stream. After a full respawn delay the old
+        worker is long gone, so the acquire only fails if something is badly
+        wedged — then the record is shed rather than stalling the sim.
+        """
+        for entry in list(self._pending_deaths):
+            if entry[0] is brain:
+                self._pending_deaths.remove(entry)
+                _, lock, obs, dormant = entry
+                if lock.acquire(blocking=False):
+                    try:
+                        brain.record_death(obs, dormant=dormant)
+                    finally:
+                        lock.release()
 
     def _spawn(self, kind: str) -> None:
         # Ids carry the kind so every surface (labels, charts, events) reads
@@ -159,6 +223,7 @@ class Population:
         if mode == "lineage" and stash:
             # Reincarnation: same mind, new body.
             brain = stash.pop(0)
+            self._flush_death(brain)
             brain.reset_stream()
         else:
             brain = build_brain(spec, seed=self._seed_for(robot_id), device=self._device_for(spec))
@@ -192,6 +257,7 @@ class Population:
             toxic_mimic=world.cfg.ecology.toxic_mimic,
         )
         self.last_obs = obs
+        self._death_obs.update(obs)
         # Robots observable again after a dormant spell just woke up.
         self._pending_wake |= self._dormant_ids & set(obs)
         self._dormant_ids = {r.id for r in world.robots.values() if r.dormant}

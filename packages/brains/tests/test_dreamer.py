@@ -161,6 +161,9 @@ def test_priced_blackout_brain_learns() -> None:
 # ------------------------------------------------------------ viability drive
 
 VIA = {"scale": 1.0, "energy_safe": 0.25, "integrity_safe": 0.5, "barrier_cap": 4.0}
+# The STAGED round-012 operating point: reduction off, the standing tax alone
+# carries the mortality gradient (offline calibration, proposal 003).
+VIA_STAGED = {**VIA, "scale": 0.0, "floor": 1.0}
 
 
 def test_viability_barrier_zero_when_safe_rises_toward_floor() -> None:
@@ -190,14 +193,12 @@ def test_viability_reward_rewards_escaping_the_boundary() -> None:
 
 
 def test_viability_off_is_beta10_exactly() -> None:
-    """scale 0 (default) must leave the reward-head target untouched."""
+    """No viability block (default) must leave the reward-head target untouched."""
     off = DreamerBrain({**TINY, "reward": dict(DRIVE)}, seed=1)
+    assert not off.via_on, "no scale and no floor: the drive is off"
     proprio = torch.rand(2, 4, PROPRIO_DIM)
-    events = torch.zeros(2, 4, EVENTS_DIM)
-    homeo = off._homeostasis(events, proprio)
-    via = off._viability_reward(proprio)  # via_scale 0 → only the (0) floor term
+    via = off._viability_reward(proprio)  # both terms zero-scaled
     assert float(via.abs().sum()) == pytest.approx(0.0)
-    assert torch.allclose(homeo, off._homeostasis(events, proprio))
 
 
 def test_viability_requires_drive_homeostasis() -> None:
@@ -223,13 +224,23 @@ def test_life_return_goes_negative_and_rides_checkpoint() -> None:
     assert brain._life_return_homeo == 0.0 and brain._prev_via is None
 
 
-def test_viability_salience_spikes_near_death() -> None:
-    """A plunge toward the floor is salient even absent an eat event."""
-    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "viability": dict(VIA)}}, seed=4)
-    rng = np.random.default_rng(2)
-    brain.act(body_obs(rng, energy=0.20, integrity=0.9))
-    brain.act(body_obs(rng, energy=0.03, integrity=0.9))  # a step deep into the barrier
-    assert float(brain.buffer.salience[1]) > 0.1
+@pytest.mark.parametrize("via", [VIA, VIA_STAGED], ids=["reduction", "floor-tax"])
+def test_viability_salience_spikes_near_death(via: dict[str, float]) -> None:
+    """A plunge toward the floor adds salience BEYOND the comfort drive's — in
+    both barrier forms. The floor-tax case is the staged round-012 config and
+    is the regression: with only the |scale·ΔV| term, scale 0 contributed
+    exactly zero replay priority and near-death was never oversampled."""
+
+    def plunge_salience(cfg: dict[str, object]) -> float:
+        brain = DreamerBrain({**TINY, "reward": cfg}, seed=4)
+        rng = np.random.default_rng(2)
+        brain.act(body_obs(rng, energy=0.20, integrity=0.9))
+        brain.act(body_obs(rng, energy=0.03, integrity=0.9))  # deep into the barrier
+        return float(brain.buffer.salience[1])
+
+    with_barrier = plunge_salience({**DRIVE, "viability": dict(via)})
+    without = plunge_salience(dict(DRIVE))
+    assert with_barrier > without + 0.1, "the barrier must add its own priority"
 
 
 def test_viability_brain_learns_with_full_stack() -> None:
@@ -253,6 +264,70 @@ def test_viability_brain_learns_with_full_stack() -> None:
     assert np.isfinite(metrics["loss_model"])
     assert np.isfinite(metrics["reward_viability"])
     assert "viability_level" in metrics
+
+
+def test_record_death_writes_terminal_sample() -> None:
+    """The runtime-delivered death lands in the buffer AT the lethal floor, so
+    the cont head has real terminal targets (integrity <= lethal) to learn
+    from — without it death_terminal trains 'continue' everywhere, because a
+    dying body is never observable from inside (round-012 review)."""
+    cfg = {
+        **TINY,
+        "reward": {
+            **DRIVE,
+            "blackout": "priced",
+            "viability": dict(VIA_STAGED),
+            "death_terminal": True,
+        },
+    }
+    brain = DreamerBrain(cfg, seed=5)
+    rng = np.random.default_rng(3)
+    brain.act(body_obs(rng, energy=0.30, integrity=0.4))
+    last = body_obs(rng, energy=0.05, integrity=0.2)
+    brain.act(last)
+    n = len(brain.buffer)
+    brain.record_death(last, dormant=True)
+    assert len(brain.buffer) == n + 1
+    dead = brain.buffer.proprio[n]
+    assert float(dead[6]) == 0.0, "integrity at the lethal floor — the terminal target"
+    assert float(dead[5]) == 0.0, "a hibernation death's energy had already collapsed"
+    assert not np.any(brain.buffer.action[n]), "dead bodies don't act"
+    assert brain.buffer.first[n] == 0, "priced: the plunge is a real transition"
+    assert float(brain.buffer.salience[n]) > 1.0, "the terminal plunge is maximally salient"
+
+
+def test_record_death_is_gated_on_death_terminal() -> None:
+    """Without the terminal knob the buffer stays byte-identical to beta_10 —
+    the A/B against beta_10 must not gain samples it never had."""
+    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "blackout": "priced"}}, seed=5)
+    rng = np.random.default_rng(3)
+    obs = body_obs(rng, energy=0.05, integrity=0.2)
+    brain.act(obs)
+    n = len(brain.buffer)
+    brain.record_death(obs, dormant=True)
+    assert len(brain.buffer) == n
+
+
+def test_record_death_under_cut_blackout_is_a_stream_break() -> None:
+    """cut severs the dormant gap: a hibernation death is recorded, but no
+    fictional drive delta is read across the unlived blackout."""
+    cfg = {
+        **TINY,
+        "reward": {
+            **DRIVE,
+            "blackout": "cut",
+            "viability": dict(VIA_STAGED),
+            "death_terminal": True,
+        },
+    }
+    brain = DreamerBrain(cfg, seed=5)
+    rng = np.random.default_rng(3)
+    obs = body_obs(rng, energy=0.9, integrity=0.9)
+    brain.act(obs)
+    n = len(brain.buffer)
+    brain.record_death(obs, dormant=True)
+    assert brain.buffer.first[n] == 1
+    assert float(brain.buffer.salience[n]) == 0.0
 
 
 def test_symlog_symexp_inverse() -> None:
