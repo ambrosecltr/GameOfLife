@@ -231,6 +231,34 @@ class DreamerBrain(Brain):
             ],
             device=self.device,
         )
+        # Round-012 viability drive: a log-barrier on distance to the LETHAL
+        # floor (energy→dormancy, integrity→true death), added to the HRRL
+        # comfort drive. The comfort drive is convex distance to a comfort
+        # SETPOINT (0.85 energy is nice); viability is unbounded distance to a
+        # BOUNDARY (0 energy is annihilation), so the marginal value of a
+        # calorie explodes as you starve and being deep in the danger zone
+        # carries a standing cost the comfort drive never imposes. It rewards
+        # no action and names no behaviour — a pure function of internal state,
+        # like every other drive. scale 0 = off (recovers beta_10 exactly).
+        via = dict(rw.get("viability", {}))
+        self.via_scale = float(via.get("scale", 0.0))
+        self.via_floor = float(via.get("floor", 0.0))  # standing cost on V (the danger-zone tax)
+        self.via_barrier_cap = float(via.get("barrier_cap", 4.0))  # keep −log finite at the floor
+        self.via_e_lethal = float(via.get("energy_lethal", 0.0))
+        self.via_e_safe = float(via.get("energy_safe", 0.25))  # normalized brownout threshold
+        self.via_i_lethal = float(via.get("integrity_lethal", 0.0))
+        self.via_i_safe = float(via.get("integrity_safe", 0.5))
+        self.via_w_energy = float(via.get("energy_weight", 1.0))
+        self.via_w_integ = float(via.get("integrity_weight", 1.0))
+        if self.via_scale > 0.0 and self.homeostasis_mode != "drive":
+            raise ValueError("reward.viability requires homeostasis: drive")
+        # True death (integrity → lethal) terminates the imagined stream so its
+        # absorbing ~0 return backs up through the critic — a functional fear of
+        # death from prediction, though the body is never actually experienced
+        # dying (invariant: no episodes). Recoverable dormancy (the energy
+        # floor) stays non-terminal — fear the slope, not the sleep. false =
+        # beta_10 (blackout flag decides cont alone).
+        self.death_terminal = bool(rw.get("death_terminal", False))
         # Round-011 reachability: how the dormancy blackout enters the learned
         # stream. "cut" (legacy) severs it — wake resets the live state and
         # the salience chain, and near-zero energy trains the continuation
@@ -312,6 +340,16 @@ class DreamerBrain(Brain):
         self.boredom_weight = float(bd.get("weight", 0.0))
         self.boredom_stim_threshold = float(bd.get("stim_threshold", 0.5))
         self.boredom_drive_threshold = float(bd.get("drive_threshold", 0.15))
+        # What "calm" (safe enough to be bored) reads. "drive" (beta_10): the
+        # comfort drive, so any deficit below setpoint shuts the boredom gate —
+        # which couples boredom to hunger, the round-011 concern (an agent a
+        # little peckish can't be bored). "viability": read the barrier, so an
+        # agent far from the lethal floor is safe-to-be-bored even while below
+        # its comfort setpoint — boredom-play decouples from mere hunger and
+        # only true danger shuts the gate. Read against the same threshold.
+        self.boredom_gate = str(bd.get("gate", "drive"))
+        if self.boredom_gate not in ("drive", "viability"):
+            raise ValueError(f"unknown boredom gate: {self.boredom_gate!r}")
         # Pressure mode: boredom as a leaky-integrated mood over real
         # experience, not an instantaneous gate product. Sustained
         # gate-touching accumulates pressure; relief drains it (beta_08:
@@ -381,6 +419,12 @@ class DreamerBrain(Brain):
         # satiety is an ate event worth zero (swift_01 measured exactly that).
         self.prioritize_threshold = float(replay.get("prioritize_threshold", 0.1))
         self._prev_drive: float | None = None  # act-stream drive level, for salience
+        self._prev_via: float | None = None  # act-stream barrier level, for salience
+        # Exact per-life realized return, accumulated on the lived stream (the
+        # replay batch mean can only infer the sign). Reset at a stream break;
+        # exposed via introspect so metrics.ndjson carries the running integral.
+        self._life_return_homeo = 0.0
+        self._life_return_via = 0.0
         # The next recorded step has no lived predecessor (fresh mind, respawn,
         # or a cut wake): it lands in the buffer as a stream-break marker so
         # replayed windows never read a fictional drive delta across the gap.
@@ -500,12 +544,25 @@ class DreamerBrain(Brain):
             # delta was never experienced (same rule as reset_stream).
             if self.homeostasis_mode == "drive":
                 d = float(self._drive_level(tensors["proprio"])[0])
-                salience = (
-                    abs(self.drive_scale * (self._prev_drive - d))
-                    if self._prev_drive is not None
-                    else 0.0
-                )
+                if self._prev_drive is not None:
+                    salience = abs(self.drive_scale * (self._prev_drive - d))
+                    self._life_return_homeo += (
+                        self.drive_scale * (self._prev_drive - d) - self.drive_level_penalty * d
+                    )
+                else:
+                    salience = 0.0
                 self._prev_drive = d
+                if self.via_scale > 0.0:
+                    # The barrier's realized reward and spikes ride the same
+                    # lived stream, so near-death moments become salient to
+                    # prioritized replay and the per-life integral is exact.
+                    v = float(self._viability(tensors["proprio"])[0])
+                    if self._prev_via is not None:
+                        salience += abs(self.via_scale * (self._prev_via - v))
+                        self._life_return_via += (
+                            self.via_scale * (self._prev_via - v) - self.via_floor * v
+                        )
+                    self._prev_via = v
             else:
                 salience = float(obs["events"][0] + obs["events"][1])
             embed = self.wm.embed(tensors)
@@ -571,6 +628,37 @@ class DreamerBrain(Brain):
         deficit = (self.drive_setpoints - x.clamp(0.0, 1.0)).clamp(min=0.0)
         d = (self.drive_weights * deficit.pow(self.drive_pow_m)).sum(-1)
         return d.pow(1.0 / self.drive_pow_n)
+
+    def _viability(self, proprio: torch.Tensor) -> torch.Tensor:
+        """Log-barrier distance to the lethal floor, for the survival-critical
+        state only (energy → dormancy, integrity → death; fatigue is not
+        lethal, so restedness is a comfort drive, not a viability one). 0 at or
+        above `safe`, rising toward the floor and capped at `barrier_cap` so it
+        stays finite exactly at the boundary. Unlike the convex comfort drive,
+        the marginal cost of a lost unit grows without bound as the floor
+        nears — the "a calorie when starving is worth everything" asymmetry.
+        """
+
+        def barrier(x: torch.Tensor, lethal: float, safe: float) -> torch.Tensor:
+            frac = ((x.clamp(0.0, 1.0) - lethal) / (safe - lethal)).clamp(min=1e-6, max=1.0)
+            return (-torch.log(frac)).clamp(max=self.via_barrier_cap)
+
+        return self.via_w_energy * barrier(
+            proprio[..., 5], self.via_e_lethal, self.via_e_safe
+        ) + self.via_w_integ * barrier(proprio[..., 6], self.via_i_lethal, self.via_i_safe)
+
+    def _viability_reward(
+        self, proprio: torch.Tensor, first: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """HRRL on the barrier: reward for moving *away* from the lethal floor,
+        minus a standing tax for sitting in the danger zone. Same telescoping
+        form and stream-break mask as the comfort drive (`_homeostasis`)."""
+        V = self._viability(proprio)
+        reduction = torch.zeros_like(V)
+        reduction[..., 1:] = V[..., :-1] - V[..., 1:]
+        if first is not None:
+            reduction = reduction * (1.0 - first)
+        return self.via_scale * reduction - self.via_floor * V
 
     def _homeostasis(
         self, events: torch.Tensor, proprio: torch.Tensor, first: torch.Tensor | None = None
@@ -653,10 +741,18 @@ class DreamerBrain(Brain):
         bored = torch.zeros_like(reward)
         if self.boredom_weight > 0:
             # Safe AND learning nothing: both gates must open. An agent in
-            # need is never bored (survival is stimulation enough), and an
-            # agent making progress is never bored no matter how sated.
-            drive = self._drive_level(self.wm.head_proprio(img_feat))
-            calm = (1.0 - drive / self.boredom_drive_threshold).clamp(min=0.0)
+            # danger is never bored (survival is stimulation enough), and an
+            # agent making progress is never bored no matter how safe. Under
+            # gate:viability "safe" means far from the lethal floor (a merely
+            # peckish agent can still be bored); under gate:drive it means at
+            # the comfort setpoint (beta_10 — couples boredom to any hunger).
+            img_proprio = self.wm.head_proprio(img_feat)
+            safety = (
+                self._viability(img_proprio)
+                if self.boredom_gate == "viability"
+                else self._drive_level(img_proprio)
+            )
+            calm = (1.0 - safety / self.boredom_drive_threshold).clamp(min=0.0)
             dull = (1.0 - r_cur / self.boredom_stim_threshold).clamp(min=0.0)
             # Gate telemetry: the product collapses to 0 whenever either gate
             # is shut, hiding how close the other came — log them separately.
@@ -752,21 +848,33 @@ class DreamerBrain(Brain):
             .sum(-1)
         )
         loss_proprio = F.mse_loss(pred_proprio, b["proprio"], reduction="none").sum(-1)
-        homeo = self._homeostasis(b["events"], b["proprio"], b["first"])
+        homeo_drive = self._homeostasis(b["events"], b["proprio"], b["first"])
+        # The viability barrier is priced through the same reward head as the
+        # comfort drive (their sum is what the actor should maximize); the two
+        # stay separated only for the forensic channels, so we can read which
+        # drive paid for each real transition (round-011 asked for exactly this).
+        if self.via_scale > 0.0:
+            via = self._viability_reward(b["proprio"], b["first"])
+        else:
+            via = torch.zeros_like(homeo_drive)
+        homeo = homeo_drive + via
         reward_logits = self.wm.head_reward(feat)
         loss_reward = self.twohot.loss(reward_logits, homeo)
         if self.spike_loss_weight > 0.0:
             spike_w = (homeo.abs() > self.prioritize_threshold).float()
             loss_reward = loss_reward * (1.0 + self.spike_loss_weight * spike_w)
-        # cut: blackout is a termination (energy ~0 ends the imagined stream).
-        # priced: nothing observable terminates — the crash is a survivable
-        # transition the actor must be able to plan across, so the head
-        # trains to "continue" everywhere.
-        cont_target = (
-            torch.ones_like(homeo)
-            if self.blackout == "priced"
-            else (b["proprio"][..., 5] > 0.01).float()
-        )
+        # death_terminal: true death (integrity → lethal) is absorbing so its
+        # ~0 return backs up through the critic; recoverable dormancy is not.
+        # else cut: blackout is a termination (energy ~0 ends the imagined
+        # stream). else priced: nothing observable terminates — the crash is a
+        # survivable transition the actor must plan across, head continues
+        # everywhere.
+        if self.death_terminal:
+            cont_target = (b["proprio"][..., 6] > self.via_i_lethal + 1e-3).float()
+        elif self.blackout == "priced":
+            cont_target = torch.ones_like(homeo)
+        else:
+            cont_target = (b["proprio"][..., 5] > 0.01).float()
         loss_cont = F.binary_cross_entropy_with_logits(
             self.wm.head_cont(feat).squeeze(-1), cont_target, reduction="none"
         )
@@ -839,8 +947,12 @@ class DreamerBrain(Brain):
                     stim = stim + self._lp_mix() * r_dis_real.reshape(-1)
                 else:
                     stim = r_dis_real.reshape(-1)
-                drive = self._drive_level(b["proprio"][:, :-1]).reshape(-1)
-                calm_r = (1.0 - drive / self.boredom_drive_threshold).clamp(min=0.0)
+                safety_r = (
+                    self._viability(b["proprio"][:, :-1])
+                    if self.boredom_gate == "viability"
+                    else self._drive_level(b["proprio"][:, :-1])
+                ).reshape(-1)
+                calm_r = (1.0 - safety_r / self.boredom_drive_threshold).clamp(min=0.0)
                 dull_r = (1.0 - stim / self.boredom_stim_threshold).clamp(min=0.0)
                 gate = float((calm_r * dull_r).mean())
                 pressure = self._boredom_pressure
@@ -932,9 +1044,11 @@ class DreamerBrain(Brain):
             "curiosity_scaled": float(
                 self.curiosity_norm.normalize(real_disagreement).clamp(0, 5).mean()
             ),
-            "reward_homeostasis": float(homeo.mean()),
-            # Batch mean hides meal spikes; max + spike share make the
-            # drive-reward's loud instants visible next to curiosity.
+            # The comfort-drive channel alone (continuous with beta_08–10);
+            # the barrier channel is logged separately below so "which drive
+            # paid" is readable. homeo_max/spike_frac stay on the SUM — that is
+            # what the reward head actually sees.
+            "reward_homeostasis": float(homeo_drive.mean()),
             "homeo_max": float(homeo.max()),
             "homeo_spike_frac": float((homeo > 0.1).float().mean()),
             "loss_reward": float(loss_reward.detach().mean()),
@@ -965,6 +1079,10 @@ class DreamerBrain(Brain):
             self._metrics["l2_init_dist"] = l2_dist
         if self.homeostasis_mode == "drive":
             self._metrics["drive_level"] = float(self._drive_level(b["proprio"]).mean())
+        if self.via_scale > 0.0:
+            self._metrics["reward_viability"] = float(via.mean())
+            self._metrics["viability_level"] = float(self._viability(b["proprio"]).mean())
+            self._metrics["viability_max"] = float(self._viability(b["proprio"]).max())
         if self.curiosity_mode == "lp":
             self._metrics["lp_reward"] = lp_reward_mean
             self._metrics["lp_regions"] = float(self.lp.regions_seen())
@@ -998,6 +1116,13 @@ class DreamerBrain(Brain):
         out = dict(self._metrics)
         if self.temperament_enabled:
             out.update({f"temperament_{k}": v for k, v in self.temperament.items()})
+        # Exact per-life realized return (updated per lived tick in act(), so
+        # it is fresh even between learns) — the direct integral the reframe
+        # could only infer from the batch-mean sign.
+        if self.homeostasis_mode == "drive":
+            out["life_return_homeo"] = self._life_return_homeo
+            if self.via_scale > 0.0:
+                out["life_return_via"] = self._life_return_via
         return out
 
     def reset_stream(self) -> None:
@@ -1007,6 +1132,9 @@ class DreamerBrain(Brain):
         self.h, self.z = self.wm.rssm.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
         self._prev_drive = None
+        self._prev_via = None
+        self._life_return_homeo = 0.0
+        self._life_return_via = 0.0
         self._stream_first = True
 
     def wake(self) -> None:
@@ -1045,7 +1173,15 @@ class DreamerBrain(Brain):
             d = self._drive_level(proprio)
             reduction = torch.zeros_like(d)
             reduction[1:] = d[:-1] - d[1:]
-            sal = (self.drive_scale * reduction).abs().cpu().numpy()
+            spike = self.drive_scale * reduction
+            if self.via_scale > 0.0:
+                # Near-death moments are salient too, so a screen with the
+                # barrier on oversamples them from the recorded life.
+                V = self._viability(proprio)
+                v_red = torch.zeros_like(V)
+                v_red[1:] = V[:-1] - V[1:]
+                spike = spike + self.via_scale * v_red
+            sal = spike.abs().cpu().numpy()
             sal[self.buffer.first[:n] == 1] = 0.0
         else:
             sal = self.buffer.events[:n, :2].astype(np.float32).sum(-1)
@@ -1075,6 +1211,9 @@ class DreamerBrain(Brain):
             # Ride the checkpoint so a resume during a dormant spell doesn't
             # silently cut a blackout the priced mode should have seen.
             "prev_drive": self._prev_drive,
+            "prev_via": self._prev_via,
+            "life_return_homeo": self._life_return_homeo,
+            "life_return_via": self._life_return_via,
             "stream_first": self._stream_first,
             "updates": self._updates,
             "act_steps": self._act_steps,
@@ -1121,6 +1260,11 @@ class DreamerBrain(Brain):
         self._boredom_pressure = float(state.get("boredom_pressure", 0.0))
         prev_drive = state.get("prev_drive")
         self._prev_drive = float(prev_drive) if prev_drive is not None else None
+        # Guarded: pre-viability checkpoints carry no barrier/return state.
+        prev_via = state.get("prev_via")
+        self._prev_via = float(prev_via) if prev_via is not None else None
+        self._life_return_homeo = float(state.get("life_return_homeo", 0.0))
+        self._life_return_via = float(state.get("life_return_via", 0.0))
         self._stream_first = bool(state.get("stream_first", False))
         self._updates = int(state["updates"])
         # Guarded: pre-pacing checkpoints carry no act-step counter; seed it

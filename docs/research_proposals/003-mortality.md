@@ -44,43 +44,44 @@ is loss-mitigation on a debt the body keeps re-incurring.
 The only strictly positive term in the whole reward is curiosity (`r_cur`, `brain.py:652`).
 Boredom (`brain.py:673`) is a *penalty*, i.e. more negative reward.
 
-**This is checkable now, and it checks out — with one correction to the clean story.** On
-beta_10's logs, mean `reward_homeostasis` is negative in every 400k window (−0.0043 →
-−0.0065, trending *more* negative over the run): the homeostatic stream is a net drag on
-being alive, confirmed empirically and by the telescoping arithmetic above. But the naive
-conclusion — "so value goes below the 0 of dormancy and the critic turns suicidal" — is
-**not** what the data shows, and honesty demands the amendment. Median critic `value` is
-~212 and, tellingly, **identical whether the agent is dormant or awake** (212 vs 212 across
-70k dormant and 9k awake samples). Value stays positive because curiosity, under 009's
-anchoring, did *not* collapse in beta_10 — `curiosity_scaled` rose 0.20 → 0.93 across the
-run. (The "curiosity → 0" collapse was beta_08's unanchored regime; anchoring fixed it, as
-intended.)
+**This is checkable now, and the durable half checks out.** On beta_10's logs (and beta_08,
+09 — see Pre-work), mean `reward_homeostasis` is negative in every 400k window (beta_10:
+−0.0043 → −0.0065, worsening): the homeostatic stream is a net drag on being alive, confirmed
+empirically and by the telescoping arithmetic above, across every capacity/conditioning/
+reachability regime. Value stays positive throughout only because curiosity, under 009's
+anchoring, did *not* collapse in beta_10 (`curiosity_scaled` rose 0.20 → 0.93; the "→ 0"
+collapse was beta_08's unanchored regime). So the reward gives an agent **no positive stake in
+its own body's survival** — living is a net cost that only a survival-agnostic exploration
+signal offsets.
 
-So the real geometry is subtler and, if anything, a cleaner target: the agents are not
-suicidal, they are **indifferent to their own aliveness**. Homeostasis supplies *no positive
-reason to be awake* and a small standing reason not to be; curiosity — an exploration signal
-that is earned in imagination and pays the same whether the body lives or sleeps — is the
-only thing holding value up, and it rates dormancy exactly as good as activity. The
-hibernation attractor is not "death beats life"; it is "sleep is free and being awake costs,
-and nothing values the difference." Martin, Everitt & Hutter (2016), *Death and Suicide in
+*A retraction, for the record.* An earlier draft of this proposal claimed the critic was
+"indifferent to aliveness — value identical dormant (212) vs awake (212)." That was a
+**measurement artifact** and is withdrawn. `value` is a single per-update batch mean over
+imagined rollouts; it is not conditioned on the acting body's state, and dormant bodies never
+call `act()` (scheduler.py:198) so **dormant states are not in the buffer at all**. Splitting
+that one slowly-varying metric by a robot's dormancy flag compares a number to itself — the
+212≈212 is near-tautological and shows nothing about how the critic values near-death states.
+The telescoping-negative-reward result is untouched by this; the specific "indifference"
+framing was not earned by the data. Martin, Everitt & Hutter (2016), *Death and Suicide in
 Universal AI*, still supplies the governing principle — cessation sits at an implicit reward
-of 0, and self-preservation requires the *lived* stream to clear that bar by a margin — but
-our regime clears it only via a survival-agnostic curiosity term, while the one drive that
-is *about* the body clears it by a **negative** margin. There is no signal in the system for
-which "this body, alive and far from the boundary" is worth more than "this body asleep, or
-gone." That absence is what proposal 003 adds.
+of 0, self-preservation needs the *lived* stream to clear that bar by a margin, and here the
+one drive that is *about* the body clears it by a **negative** margin.
+
+The honest open question the artifact was pretending to answer: **does the critic actually
+devalue states near the lethal floor, or is value roughly flat in energy?** That is directly
+measurable — train a critic over a recorded life and read `value` on real buffer states binned
+by energy — and it is the proper success target for the intervention (Pre-work item 2).
 
 This is not a bug in reachability or capacity — those were all real and all fixed. It is that
 the reward geometry gives a mind no positive stake in its own continued viability. The
-replay-subsidy census (011) found one artifact *paying* the attractor; this is why it was an
-attractor for the artifact to feed.
+replay-subsidy census (011) found one artifact *paying* the attractor; this is the standing
+reason it was an attractor for the artifact to feed.
 
-**Testable, falsifiable form (partly pre-confirmed):** cumulative homeostatic return over a
-dreamer life is negative and worsens with lifespan (✓ on beta_10); critic value is
-insensitive to dormancy-vs-activity (✓, 212≈212); both should reverse under the intervention
-below — value should become *strictly higher* for viable-and-active than for dormant. The
-remaining pre-work is to confirm the sign and the indifference replicate on beta_08/09 and to
-measure the per-life cumulative directly (see Pre-work).
+**Testable, falsifiable form (sign pre-confirmed):** cumulative homeostatic return over a
+dreamer life is negative and worsens with lifespan (✓ on beta_08/09/10, from the per-update
+sign + telescoping; a per-tick reward log makes it exact — cheap 012 add). The behavioural
+target: critic value should *fall* toward the lethal floor and rise into safety under the
+viability drive, where beta_10's does not — measured directly in Pre-work item 2.
 
 ## What the literature offers, and where we go past it
 
@@ -214,12 +215,12 @@ closes. This is a world-config change (`configs/world/`), ablatable, and touches
 
 ## Predictions (to pre-register at launch, not before)
 
-- **P1 — the indifference breaks.** Today critic value is ≈equal for dormant and awake
-  bodies (212≈212 on beta_10) and homeostatic return is net-negative. After the viability
-  drive, value should be *strictly higher* for a viable-and-active body than for a dormant
-  one, and per-life cumulative homeostatic+viability return should clear 0. If it doesn't,
-  the viability geometry is miscalibrated (scale/floor/lethal), not the theory — retune the
-  barrier before concluding anything about behaviour.
+- **P1 — value acquires a mortality gradient.** Under beta_10 the critic's value is roughly
+  flat in energy (near-floor states are valued about the same as safe ones — Pre-work item 2
+  measures the baseline). Under the viability drive, value should *fall* as the body nears the
+  lethal floor and rise into safety, and per-life realized homeostatic+viability return should
+  clear 0. If value stays flat with the barrier on, the geometry is miscalibrated
+  (scale/floor/lethal) — retune before concluding anything about behaviour.
 - **P2 — eating decouples from boredom.** The forensic channels show a rising share of eats
   paid for by `r_via` while hungry (the 104:1 ratio moves), not by `bored` while sated.
 - **P3 — dormancy stops being an attractor.** Hibernation-ledger death share falls below
@@ -237,24 +238,25 @@ closes. This is a world-config change (`configs/world/`), ablatable, and touches
 
 ## Pre-work before any code (cheap, decisive, do first)
 
-1. **Confirm the reframe on existing data. ✓ DONE 2026-07-08 — confirmed on all three runs.**
-   Mean `reward_homeostasis` is negative in every 400k window of beta_08, beta_09 *and*
-   beta_10 (−0.004 to −0.006, worsening start→end in each): the body-drive is a net drag on
-   living, universally, across capacity/conditioning/reachability regimes. And the linchpin:
-   median critic **value is identical dormant vs awake in all three runs** — 422≈433 (08),
-   494≈495 (09), 212≈212 (10). The indifference-to-aliveness is a robust three-run invariant,
-   not a beta_10 artifact; value tracks curiosity magnitude (08/09 curiosity higher → value
-   ~420–495; 10 lower → 212), confirming curiosity is the sole prop holding value above the
-   cessation floor. Deaths deep in deficit (16/19, 26/26, 23/24 hibernation-main) confirm
-   `d_death ≫ d_birth`, i.e. the telescoping endpoint is negative. Caveat: `reward_homeostasis`
-   logs as a per-update batch mean, so the per-life integral is inferred from sign+telescoping,
-   not summed exactly — a per-tick reward log would make it exact (cheap add for 012). **The
-   intervention now has a precise measurable target: break the `value_dormant == value_awake`
-   identity.**
-2. **Calibrate the barrier offline.** The conditioning gym (docs/training-ops.md) can replay
-   dreamer_042's buffer (011's designated screen blob) through a candidate `viability_scale /
-   floor / lethal / safe` and check that (a) the lived-return sign flips and (b) the hungry
-   marginal value dominates — before committing a launch.
+1. **Confirm the reframe on existing data. ✓ DONE 2026-07-08 — sign confirmed on all three
+   runs; the value claim corrected.** Mean `reward_homeostasis` is negative in every 400k
+   window of beta_08, beta_09 *and* beta_10 (−0.004 to −0.006, worsening start→end in each):
+   the body-drive is a net drag on living, universally, across capacity/conditioning/
+   reachability regimes. Deaths deep in deficit (16/19, 26/26, 23/24 hibernation-main) confirm
+   `d_death ≫ d_birth`, the negative telescoping endpoint. Caveat: `reward_homeostasis` logs as
+   a per-update batch mean, so the per-life integral is inferred from sign+telescoping, not
+   summed — a per-tick reward log makes it exact (added in the 012 build: `life_return_homeo`/
+   `life_return_via`). **Correction:** the first draft's "value identical dormant vs awake
+   (422≈433 / 494≈495 / 212≈212)" was a metric artifact — `value` is state-unconditioned and
+   dormant states aren't in the buffer (retraction detailed above). Withdrawn; the sign result
+   stands on its own.
+2. **Calibrate the barrier offline, and measure the value-vs-energy gradient.** Train a fresh
+   critic over dreamer_042's buffer (011's designated screen blob) under a candidate
+   `viability {scale, floor, safe}` and read `value` on real buffer states binned by energy
+   (scratchpad `value_vs_energy.py`). Baseline (beta_10) gives the reference gradient; the
+   barrier arm should bend value downward toward the floor and keep it finite/non-saturating
+   (check `viability_level` ≪ `barrier_cap`). This is the proper replacement for the retracted
+   indifference metric and the gate on whether the geometry is calibrated before a launch.
 
 ## Deliberately not in scope
 

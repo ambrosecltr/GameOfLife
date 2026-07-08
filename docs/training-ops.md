@@ -97,6 +97,32 @@ the journal entry's "What changed."
   (1 + w) on |reward| > `prioritize_threshold` samples. The pre-registered
   follow-up if prioritized replay gets spikes into batches but the head
   still can't fit them. 0 = legacy unweighted loss.
+- `viability:` (round 012, proposal 003) — an *additive* second homeostatic
+  term: a log-barrier on distance to the LETHAL floor (energy→dormancy,
+  integrity→death), where the comfort drive is convex distance to a comfort
+  SETPOINT. `scale` is its HRRL weight (0 = off, recovers beta_10 exactly);
+  `floor` a standing danger-zone tax on `V`; `{energy,integrity}_safe` the
+  margins above the floor where `V` is 0; `{energy,integrity}_lethal` the
+  floors (default 0); `barrier_cap` clamps −log so `V` is finite at the
+  boundary. Priced through the same reward head as the comfort drive (their
+  sum is what the actor maximizes) but logged separately: `reward_viability`,
+  `viability_level`, `viability_max`, and per-life `life_return_via` /
+  `life_return_homeo` (exact realized return, accumulated in `act()`).
+  Requires `homeostasis: drive`. Near-death moments also become salient to
+  prioritized replay. Motivation: the comfort drive telescopes to a *negative*
+  return over any mortal life, so the reward gives no positive stake in
+  survival; the barrier's marginal value explodes toward the floor without
+  telescoping to a loss.
+- `death_terminal: true` — true death (integrity → `integrity_lethal`)
+  terminates the imagined stream (cont target = integrity above the floor), so
+  its absorbing ~0 return backs up through the critic: a functional fear of
+  death from prediction. Recoverable dormancy stays non-terminal. Independent
+  of `blackout`/`viability` (ablatable alone). false = beta_10.
+- `boredom.gate: drive | viability` — what "calm enough to be bored" reads.
+  `drive` (beta_10) reads the comfort drive, so any deficit below setpoint
+  shuts the boredom gate (couples boredom to hunger — the round-011 concern).
+  `viability` reads the barrier, so an agent far from the lethal floor can be
+  bored while merely peckish; only true danger shuts the gate.
 
 `training:`
 - `optimizer: adam | muon` — Muon (vendored, `dreamer/optim.py`) on the

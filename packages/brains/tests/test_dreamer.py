@@ -158,6 +158,103 @@ def test_priced_blackout_brain_learns() -> None:
     assert np.isfinite(metrics["loss_model"])
 
 
+# ------------------------------------------------------------ viability drive
+
+VIA = {"scale": 1.0, "energy_safe": 0.25, "integrity_safe": 0.5, "barrier_cap": 4.0}
+
+
+def test_viability_barrier_zero_when_safe_rises_toward_floor() -> None:
+    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "viability": dict(VIA)}}, seed=0)
+    rng = np.random.default_rng(0)
+    # Above both safety margins: no viability cost at all.
+    safe = brain._viability(brain._obs_to_tensors(body_obs(rng, 0.9, 0.9))["proprio"])
+    assert float(safe[0]) == pytest.approx(0.0, abs=1e-6)
+    # Approaching the energy floor: strictly rising, capped at barrier_cap.
+    mild = brain._viability(brain._obs_to_tensors(body_obs(rng, 0.10, 0.9))["proprio"])
+    dire = brain._viability(brain._obs_to_tensors(body_obs(rng, 0.02, 0.9))["proprio"])
+    assert 0.0 < float(mild[0]) < float(dire[0]) <= brain.via_barrier_cap + 1e-5
+
+
+def test_viability_reward_rewards_escaping_the_boundary() -> None:
+    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "viability": dict(VIA)}}, seed=0)
+    # proprio[t]: step 0 near the floor, step 1 recovered — moving away from
+    # death must pay a positive viability reward.
+    proprio = torch.zeros(1, 2, PROPRIO_DIM)
+    proprio[0, 0, 5], proprio[0, 0, 6] = 0.03, 0.9
+    proprio[0, 1, 5], proprio[0, 1, 6] = 0.5, 0.9
+    r = brain._viability_reward(proprio)
+    assert float(r[0, 1]) > 0.0, "escaping the barrier is rewarded"
+    # And sliding toward it is punished (reverse the pair).
+    r_rev = brain._viability_reward(proprio.flip(1))
+    assert float(r_rev[0, 1]) < 0.0
+
+
+def test_viability_off_is_beta10_exactly() -> None:
+    """scale 0 (default) must leave the reward-head target untouched."""
+    off = DreamerBrain({**TINY, "reward": dict(DRIVE)}, seed=1)
+    proprio = torch.rand(2, 4, PROPRIO_DIM)
+    events = torch.zeros(2, 4, EVENTS_DIM)
+    homeo = off._homeostasis(events, proprio)
+    via = off._viability_reward(proprio)  # via_scale 0 → only the (0) floor term
+    assert float(via.abs().sum()) == pytest.approx(0.0)
+    assert torch.allclose(homeo, off._homeostasis(events, proprio))
+
+
+def test_viability_requires_drive_homeostasis() -> None:
+    with pytest.raises(ValueError, match="viability"):
+        DreamerBrain({**TINY, "reward": {"viability": {"scale": 1.0}}}, seed=0)
+
+
+def test_life_return_goes_negative_and_rides_checkpoint() -> None:
+    """The reframe as a live measurement: a lived stream of decaying energy
+    integrates to a negative homeostatic return."""
+    cfg = {**TINY, "reward": {**DRIVE, "viability": dict(VIA)}}
+    brain = DreamerBrain(cfg, seed=3)
+    rng = np.random.default_rng(1)
+    for e in (0.9, 0.8, 0.7, 0.6, 0.5, 0.4):  # a body draining toward the floor
+        brain.act(body_obs(rng, energy=e, integrity=0.9))
+    assert brain._life_return_homeo < 0.0, "draining life earns negative homeostatic return"
+    twin = DreamerBrain(cfg, seed=9)
+    twin.load_state_dict(brain.state_dict())
+    assert twin._life_return_homeo == pytest.approx(brain._life_return_homeo)
+    assert twin._life_return_via == pytest.approx(brain._life_return_via)
+    # A stream break zeroes the per-life integral (a new body starts fresh).
+    brain.reset_stream()
+    assert brain._life_return_homeo == 0.0 and brain._prev_via is None
+
+
+def test_viability_salience_spikes_near_death() -> None:
+    """A plunge toward the floor is salient even absent an eat event."""
+    brain = DreamerBrain({**TINY, "reward": {**DRIVE, "viability": dict(VIA)}}, seed=4)
+    rng = np.random.default_rng(2)
+    brain.act(body_obs(rng, energy=0.20, integrity=0.9))
+    brain.act(body_obs(rng, energy=0.03, integrity=0.9))  # a step deep into the barrier
+    assert float(brain.buffer.salience[1]) > 0.1
+
+
+def test_viability_brain_learns_with_full_stack() -> None:
+    cfg = {
+        **TINY,
+        "reward": {
+            **DRIVE,
+            "blackout": "priced",
+            "viability": dict(VIA),
+            "death_terminal": True,
+            "boredom": {"weight": 0.02, "gate": "viability", "pressure": True},
+            "curiosity": "lp",
+        },
+    }
+    brain = DreamerBrain(cfg, seed=6)
+    rng = np.random.default_rng(5)
+    for _ in range(80):
+        brain.act(body_obs(rng, energy=0.5, integrity=0.7))
+    metrics = brain.learn()
+    assert metrics is not None
+    assert np.isfinite(metrics["loss_model"])
+    assert np.isfinite(metrics["reward_viability"])
+    assert "viability_level" in metrics
+
+
 def test_symlog_symexp_inverse() -> None:
     x = torch.linspace(-100, 100, 41)
     torch.testing.assert_close(symexp(symlog(x)), x, atol=1e-3, rtol=1e-4)
