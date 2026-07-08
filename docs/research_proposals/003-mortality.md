@@ -237,10 +237,20 @@ closes. This is a world-config change (`configs/world/`), ablatable, and touches
 
 ## Pre-work before any code (cheap, decisive, do first)
 
-1. **Confirm the reframe on existing data.** Run era_stats / a one-off over beta_08, 09, 10
-   metrics+events: cumulative homeostatic return per life vs lifespan (predict: negative,
-   slope negative), and value-at-dormancy vs value-at-fed-bored. If the sign story does *not*
-   hold in the logs, this whole proposal is wrong and we've spent an afternoon, not a round.
+1. **Confirm the reframe on existing data. ✓ DONE 2026-07-08 — confirmed on all three runs.**
+   Mean `reward_homeostasis` is negative in every 400k window of beta_08, beta_09 *and*
+   beta_10 (−0.004 to −0.006, worsening start→end in each): the body-drive is a net drag on
+   living, universally, across capacity/conditioning/reachability regimes. And the linchpin:
+   median critic **value is identical dormant vs awake in all three runs** — 422≈433 (08),
+   494≈495 (09), 212≈212 (10). The indifference-to-aliveness is a robust three-run invariant,
+   not a beta_10 artifact; value tracks curiosity magnitude (08/09 curiosity higher → value
+   ~420–495; 10 lower → 212), confirming curiosity is the sole prop holding value above the
+   cessation floor. Deaths deep in deficit (16/19, 26/26, 23/24 hibernation-main) confirm
+   `d_death ≫ d_birth`, i.e. the telescoping endpoint is negative. Caveat: `reward_homeostasis`
+   logs as a per-update batch mean, so the per-life integral is inferred from sign+telescoping,
+   not summed exactly — a per-tick reward log would make it exact (cheap add for 012). **The
+   intervention now has a precise measurable target: break the `value_dormant == value_awake`
+   identity.**
 2. **Calibrate the barrier offline.** The conditioning gym (docs/training-ops.md) can replay
    dreamer_042's buffer (011's designated screen blob) through a candidate `viability_scale /
    floor / lethal / safe` and check that (a) the lived-return sign flips and (b) the hungry
