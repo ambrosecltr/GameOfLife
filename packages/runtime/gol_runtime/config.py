@@ -33,6 +33,12 @@ class ObservabilityConfig:
     rerun_fps: int = 10
     metrics_every_ticks: int = 100
     rrd_rotate_sim_hours: int = 6
+    # Live-viewer memory ceiling: the spawned viewer garbage-collects the OLDEST
+    # timepoints once it exceeds this, so watching a long run keeps a sliding
+    # window of recent past instead of growing without bound. Accepts an
+    # absolute size ("2GB") or a fraction of system RAM ("75%"). Only affects the
+    # spawned viewer; file recording (--rrd) is bounded by rotation instead.
+    rerun_memory_limit: str = "2GB"
 
 
 @dataclass(frozen=True)

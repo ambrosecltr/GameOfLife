@@ -74,6 +74,7 @@ class RerunLogger:
         spawn: bool = True,
         save_path: Path | None = None,
         rotate_ticks: int = 0,
+        memory_limit: str = "2GB",
     ) -> None:
         self.tick_rate = tick_rate
         self.save_path = save_path
@@ -85,9 +86,14 @@ class RerunLogger:
         self._styled: set[str] = set()
         self._dreamers: tuple[str, ...] = ()
         self._robot_paths: set[str] = set()
-        rr.init(APP_ID, spawn=spawn)
+        rr.init(APP_ID)
         if save_path is not None:
             rr.save(str(self._rotation_path(world.tick)))
+        elif spawn:
+            # Spawn the viewer with a bounded memory ceiling so a long live watch
+            # keeps only a sliding window of recent past (rr.init(spawn=True)
+            # would use the 75%-of-RAM default and grow massive before GC).
+            rr.spawn(memory_limit=memory_limit)
         self._log_scene_base(world)
 
     def _rotation_path(self, tick: int) -> Path:

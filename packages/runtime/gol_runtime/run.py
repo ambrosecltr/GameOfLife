@@ -94,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             spawn=not args.headless and args.rrd is None,
             save_path=args.rrd,
             rotate_ticks=run_cfg.observability.rrd_rotate_sim_hours * 3600 * run_cfg.tick_rate,
+            memory_limit=run_cfg.observability.rerun_memory_limit,
         )
         event_sink = logger.log_events
 
