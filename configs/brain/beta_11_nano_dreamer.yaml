@@ -1,0 +1,103 @@
+# Round-012 mortality brain, NANO arm (save prefix beta_11_nano; the
+# local/M1 side-quest 012b). IDENTICAL to beta_11_dreamer.yaml except
+# preset: nano — keep the two in lockstep if the viability stack changes.
+#
+# The question this arm asks (user, at 011 close): was brain SIZE ever the
+# problem, or was it always our approach? Eat-to-survive is a basic mental
+# function that arguably shouldn't need a large brain; if a mortality gradient
+# and survival behaviour can emerge on nano, base brains are then free to host
+# the complex emergence (communication, social) on a survival substrate that
+# already works. Honest caveat (round 008): nano never converged the obs-v3
+# world model — relative LP never decayed, conditioning preconditions unmet —
+# and if the model can't predict the approach to the lethal floor, imagination
+# can't fear it. So this arm is PAIRED with the 2× food precondition and judged
+# on a converged-enough criterion, NOT against 012a's absolute behaviour. A null
+# here with a win on 012a is a clean result ("survival has a capacity floor"); a
+# win here is the bigger prize. It is a cheap background side-quest, not the
+# verdict-bearing round — 012a (base/cloud) is.
+
+kind: dreamer
+preset: nano                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
+
+reward:
+  w_curiosity: 1.0
+  w_homeostasis: 1.0
+  norm_anchor_samples: 1000000
+  curiosity: lp
+  lp:
+    partition: latent
+    regions: 32
+    ema_fast: 0.02
+    ema_slow: 0.002
+    centroid_lr: 0.05
+    relative: true
+    mix_disagreement: 0.1
+    mix_anneal_steps: 1500
+  boredom:
+    weight: 0.02
+    stim_threshold: 0.5
+    drive_threshold: 0.15
+    pressure: true
+    pressure_rise: 0.002
+    pressure_decay: 0.0002
+    gate: viability
+  homeostasis: drive
+  drive:
+    scale: 3.0
+    level_penalty: 0.01
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    energy_weight: 1.0
+    integrity_setpoint: 1.0
+    integrity_weight: 1.0
+    rested_setpoint: 1.0
+    rest_weight: 0.5
+  viability:
+    scale: 0.0
+    floor: 1.0
+    barrier_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  death_terminal: true
+  blackout: priced
+  spike_loss_weight: 4
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  low_energy_graded: true
+  curiosity_mask_agents: false
+
+temperament:
+  enabled: true
+  sigma: 0.25
+  mutation_sigma: 0.1
+
+world_model:
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  replay_ac: false
+
+replay:
+  capacity: 500000
+  batch_size: 16
+  seq_len: 64
+  warmup_steps: 500
+  prioritize: reward
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  train_ratio: 1.0

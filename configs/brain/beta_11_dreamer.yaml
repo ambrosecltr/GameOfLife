@@ -1,0 +1,146 @@
+# Round-012 mortality brain (save prefix beta_11; the base/cloud arm 012a).
+# The A/B control for this round is beta_10 itself: this file is
+# beta_10_dreamer.yaml plus ONE new thing — the viability drive (proposal 003).
+# Everything else (the validated conditioning stack, the capacity bundle, and
+# beta_10's three reachability knobs) is carried forward byte-identical, so the
+# only variable under test is whether a mortality drive breaks the five-round
+# competence wall.
+#
+# WHY (the reframe, docs/research_proposals/003-mortality.md): rounds 004–011
+# each fixed a different suspected constraint — curiosity collapse, capacity,
+# conditioning, reachability — verified the fix worked mechanically, and watched
+# behaviour not move. The constraint is upstream of all of them, in the reward
+# GEOMETRY: the HRRL comfort drive telescopes to a NEGATIVE return over any
+# mortal life (born full, die hungry/hurt), so eating is loss-mitigation on a
+# debt the body keeps re-incurring, and the reward gives an agent no positive
+# stake in its own survival. Confirmed on beta_08/09/10 (reward_homeostasis
+# negative every window); and beta_10's critic is mortality-BLIND — offline it
+# values a body at 5% integrity the same as a healthy one (value-vs-integrity
+# gap −0.3).
+#
+# THE KNOB — reward.viability (a log-barrier on distance to the LETHAL floor,
+# where the comfort drive is convex distance to a comfort SETPOINT). Offline
+# calibration on dreamer_042 (value_vs_energy.py, 2026-07-08) chose the form:
+# the REDUCTION part (scale·ΔV) reproduces the hibernation attractor in value
+# space (escaping the floor pays → the floor becomes a valuable launchpad), so
+# it is left at 0; the STANDING TAX (floor·V) is what installs a mortality
+# gradient — it flipped the value-vs-integrity gap from −0.3 (beta_10, blind)
+# to +4.5 (safe out-values dying), while correctly KEEPING recoverable
+# low-energy states valued (energy gap stayed negative). floor 1.0 is the
+# operating point (2.0 over-taxes and crushes the value scale toward 0).
+#   - death_terminal: true — true death (integrity → lethal) is absorbing in
+#     imagination, so its ~0 return backs up through the critic: a fear of
+#     death from prediction, though the body is never experienced dying.
+#     Composes with blackout: priced — cont = (integrity > lethal), so the
+#     recoverable ENERGY collapse stays non-terminal and only INTEGRITY death
+#     terminates.
+#   - boredom.gate: viability — decouples boredom from mere hunger (the
+#     round-011 concern): a fed agent far from the lethal floor can be safely
+#     bored (honest play) while only true danger shuts the gate.
+#
+# Paired precondition (world, not here): configs/world/beta_11_2x_food.yaml
+# doubles bush density so the round-011 spawn-luck confound can't mask a
+# working survival drive. Foragers remain the cross-run anchor.
+#
+# Deliberately NOT here (would confound attribution): burn_in, recent, muon,
+# l2_init, compile. Ablations for a later round: viability.scale (turn the
+# reduction term back on), death_terminal alone, boredom.gate alone.
+
+kind: dreamer
+preset: base                  # nano (~4M, local M1) | small (~12M) | base (~30M, cloud)
+
+reward:
+  w_curiosity: 1.0
+  w_homeostasis: 1.0
+  norm_anchor_samples: 1000000
+  curiosity: lp
+  lp:
+    partition: latent
+    regions: 32
+    ema_fast: 0.02
+    ema_slow: 0.002
+    centroid_lr: 0.05
+    relative: true
+    mix_disagreement: 0.1
+    mix_anneal_steps: 1500
+  boredom:
+    weight: 0.02
+    stim_threshold: 0.5
+    drive_threshold: 0.15
+    pressure: true
+    pressure_rise: 0.002
+    pressure_decay: 0.0002
+    # ROUND-012 KNOB: gate "calm enough to be bored" on viability (far from the
+    # lethal floor), not the comfort drive — decouples boredom from mere hunger.
+    gate: viability
+  homeostasis: drive
+  drive:
+    scale: 3.0
+    level_penalty: 0.01
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    energy_weight: 1.0
+    integrity_setpoint: 1.0
+    integrity_weight: 1.0
+    rested_setpoint: 1.0
+    rest_weight: 0.5
+  # ROUND-012 KNOB: the viability drive. Standing-cost form (scale 0, floor
+  # carries it) — chosen by offline calibration; scale is the reduction-term
+  # ablation. The barrier reads energy (proprio 5, recoverable dormancy floor)
+  # and integrity (proprio 6, the true death floor); rest is not lethal, so it
+  # stays a comfort drive only.
+  viability:
+    scale: 0.0                # reduction reward OFF (reproduces the attractor in value space)
+    floor: 1.0                # standing danger tax — the mortality gradient (calibrated operating point)
+    barrier_cap: 4.0          # clamp −log so V is finite at the boundary
+    energy_lethal: 0.0
+    energy_safe: 0.25         # normalized brownout threshold
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  # ROUND-012 KNOB: true death terminates the imagined stream (fear of death
+  # from prediction). Composes with blackout: priced via cont = integrity>lethal.
+  death_terminal: true
+  # carried from beta_10 (reachability round; this round's A/B baseline):
+  blackout: priced
+  spike_loss_weight: 4
+  # events-mode knobs (legacy ablation):
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  low_energy_graded: true
+  curiosity_mask_agents: false
+
+temperament:
+  enabled: true
+  sigma: 0.25
+  mutation_sigma: 0.1
+
+world_model:
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  replay_ac: false
+
+replay:
+  capacity: 500000
+  batch_size: 16
+  seq_len: 64
+  warmup_steps: 500
+  # carried from beta_10: reward-aware replay (near-death moments are now
+  # salient too — the viability barrier's spikes ride the same salience chain).
+  prioritize: reward
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  train_ratio: 1.0

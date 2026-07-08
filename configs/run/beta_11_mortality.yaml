@@ -1,0 +1,76 @@
+# Experiment: the mortality round (journal round 012, arm A — base/cloud).
+#
+# Round 011 exonerated reward reachability — the third clean exoneration after
+# capacity (008) and conditioning (009). The reframe (proposal 003): the beta
+# competence wall is the reward GEOMETRY. The HRRL comfort drive telescopes to
+# a negative return over any mortal life, so the reward gives no positive stake
+# in survival, and beta_10's critic is mortality-blind (offline: values a body
+# at 5% integrity the same as a healthy one). This round adds ONE thing — a
+# viability drive (a standing danger tax on distance to the LETHAL floor) —
+# which offline flipped the value-vs-integrity gap from −0.3 to +4.5, the first
+# mortality gradient in the project. The A/B control is beta_10 itself; the
+# only brain variable is the viability stack (beta_11_dreamer.yaml).
+#
+# Paired precondition: 2× food density (configs/world/beta_11_2x_food.yaml) so
+# round-011's spawn-luck confound (perfect scripted foragers starved 4–8× on
+# geography) can't mask a working survival drive. This is a PRECONDITION not a
+# treatment — titrate back down once the survival loop closes. Foragers remain
+# the cross-run anchor, and their intake in the 2× world is itself the check
+# that the affordance change did what it should.
+#
+# PACING — same rule as 008–011: train_ratio is updates per lived act-step; run
+# PACED (no --headless), read learn_seconds off early metrics, set gol-ctl speed
+# so train_ratio_eff holds ~1.0. Verify at first checkpoint: updates ==
+# act_steps - warmup (±1024 debt cap). Benchmark on the round's box before
+# launch (bench_learn.py --devices cuda + the 3-thread contention probe). A
+# working mortality drive should REDUCE dormancy (fewer hibernation-clock
+# deaths — that is the point), which CUTS sleep-learning catch-up headroom, so
+# watch the awake fraction and drop speed if the ratio slips. NOTE: 2× food may
+# raise the awake fraction from the start (more foraging), so budget the launch
+# speed against a higher-awake world than beta_10's.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/beta_11 \
+#       --config configs/run/beta_11_mortality.yaml
+#
+# Watch list (first checkpoint + mid-run):
+#   - reward_viability / viability_level (the new channel; V should sit well
+#     below barrier_cap 4.0 — ~1 in offline calibration);
+#   - life_return_homeo / life_return_via (EXACT per-life realized return — the
+#     reframe made measurable: homeo should still integrate negative, via should
+#     price the danger excursions);
+#   - eats-while-hungry (THE win condition: dreamer meals eaten at low energy,
+#     not only bored-sated — round 011 was 104 sated : 1 hungry);
+#   - hibernation-ledger death fraction (beta_10: 23/24 on the ~347k clock) and
+#     death ages (should leave the clock if the mortality gradient works);
+#   - dormant fraction trend (should fall, or consolidate, not the chronic crash
+#     cycle) and value at low-integrity states via introspection (P4);
+#   - boredom_pressure (~0.55 in beta_10 under the drive gate; under the
+#     viability gate a fed-but-peckish agent can now be bored — watch whether it
+#     equilibrates differently);
+#   - forager anchor eats (the 2× food check — should be reliably fed now, no
+#     generational starvation swings).
+
+world_config: configs/world/beta_11_2x_food.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7302
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/beta_11_dreamer.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: false                # round-008 disk lesson stands
+  metrics_every_ticks: 100

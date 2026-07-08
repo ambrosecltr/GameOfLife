@@ -1,0 +1,45 @@
+# Experiment: the mortality round (journal round 012, arm B — nano/local).
+# The cheap M1 background side-quest to 012a's base/cloud verdict. Same world
+# (2× food) and same viability stack as 012a, at nano capacity, on the laptop.
+# See configs/brain/beta_11_nano_dreamer.yaml for the "was size ever the
+# problem?" framing and the round-008 nano-never-converged caveat.
+#
+# Local, CPU (cpu beats mps at 3 concurrent workers — swift-track finding).
+# Runs in the background; not the verdict arm. PACED like every other round:
+# read learn_seconds off the first metrics and set gol-ctl speed so
+# train_ratio_eff holds ~1.0 (nano/M1 CPU was ~0.87s/update ≈ 1.15 upd/s/brain
+# solo in the swift bench — measure on the actual machine, three concurrent
+# learners contend). Verify updates == act_steps - warmup at first checkpoint.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/beta_11_nano \
+#       --config configs/run/beta_11_nano_mortality.yaml
+#
+# Watch the same list as 012a, but read it as "can nano even host this?": if
+# loss_model never converges (relative LP never decays, 008's wall), the
+# mortality gradient can't form and a behavioural null is a CAPACITY null, not a
+# mechanism null — that is the whole point of running both arms.
+
+world_config: configs/world/beta_11_2x_food.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7303
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/beta_11_nano_dreamer.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: false
+  metrics_every_ticks: 100
