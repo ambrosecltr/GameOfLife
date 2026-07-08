@@ -41,6 +41,14 @@ class Population:
         }
         self._next_idx = 0
         self._respawn_queue: list[tuple[int, str]] = []  # (due_tick, brain kind)
+        # Proposal 004 — earned reproduction. Per-kind founder counts (the caps
+        # budding fills toward, and the counts scripted anchors are held at) and
+        # each parent's last-bud tick (the cooldown clock).
+        self._kind_targets: dict[str, int] = {
+            str(resolve_brain_config(e["brain"]).get("kind")): int(e.get("count", 0))
+            for e in run_cfg.population.mix
+        }
+        self._last_bud: dict[str, int] = {}
         # Waking from dormancy interrupts the stream of experience (the gap
         # itself is never observed); those brains get wake() before their next
         # act. The default wake() is a stream cut (reset_stream); brains that
@@ -112,6 +120,7 @@ class Population:
                 state = pickle.loads(blob)
                 self._next_idx = state["next_idx"]
                 self._respawn_queue = state["respawn_queue"]
+                self._last_bud = state.get("last_bud", {})
             elif robot_id.startswith("__lineage__"):
                 kind = robot_id.split("__")[2]
                 spec = self._specs_by_kind.get(kind, {"kind": kind})
@@ -131,12 +140,18 @@ class Population:
             for i, brain in enumerate(stash):
                 blobs[f"__lineage__{kind}__{i}"] = pickle.dumps(brain.state_dict())
         blobs["__scheduler__"] = pickle.dumps(
-            {"next_idx": self._next_idx, "respawn_queue": self._respawn_queue}
+            {
+                "next_idx": self._next_idx,
+                "respawn_queue": self._respawn_queue,
+                "last_bud": self._last_bud,
+            }
         )
         return blobs
 
     def _process_lifecycle(self, world: World) -> None:
-        """Queue respawns for the dead; spawn queued newborns when due."""
+        """Replace the dead. Legacy mode respawns on a timer; budding mode has
+        evolving lineages continue only by thriving bodies budding (proposal 004)."""
+        budding = self.cfg.reproduction.mode == "budding"
         died = [rid for rid in self.brains if rid not in world.robots]
         for rid in died:
             kind = self.kinds.pop(rid, "random_walker")
@@ -161,14 +176,84 @@ class Population:
             self._pending_wake.discard(rid)
             self._act_attempts.pop(rid, None)
             self._act_latched.pop(rid, None)
-            self._respawn_queue.append((world.tick + self.cfg.population.respawn_delay_ticks, kind))
+            self._last_bud.pop(rid, None)
+            # Evolving kinds under budding are NOT replaced on the timer — their
+            # continuation is earned by a living body budding, not owed on death.
+            if not (budding and self._is_evolving(kind)):
+                self._respawn_queue.append(
+                    (world.tick + self.cfg.population.respawn_delay_ticks, kind)
+                )
         self._deliver_deaths()
-        if len(world.robots) < self.cfg.population.target:
+        if budding:
+            self._maintain_budding(world)
+        elif len(world.robots) < self.cfg.population.target:
             due = [entry for entry in self._respawn_queue if entry[0] <= world.tick]
             for entry in due:
                 self._respawn_queue.remove(entry)
                 _, kind = entry
                 self._spawn(kind)
+
+    def _is_evolving(self, kind: str) -> bool:
+        """Evolving kinds reproduce by budding; scripted anchors (foragers,
+        walkers) are instruments, held at their mix count by respawn."""
+        return kind not in ("scripted_forager", "random_walker")
+
+    def _is_thriving(self, robot: Any, tick: int) -> bool:
+        """A body eligible to bud: awake, past juvenile age, well-fed and intact,
+        and off cooldown. No fitness score — a physiological gate on state."""
+        r = self.cfg.reproduction
+        if robot.dormant or robot.age_ticks < r.min_bud_age:
+            return False
+        if robot.energy < r.thrive_energy or robot.integrity < r.thrive_integrity:
+            return False
+        return tick - self._last_bud.get(robot.id, -r.bud_cooldown) >= r.bud_cooldown
+
+    def _maintain_budding(self, world: World) -> None:
+        """Keep scripted anchors at count via respawn; let evolving kinds bud
+        from thriving parents toward their cap, with a low floor against extinction."""
+        for kind, cap in self._kind_targets.items():
+            living = [rid for rid, k in self.kinds.items() if k == kind and rid in world.robots]
+            if not self._is_evolving(kind):
+                if len(living) < cap:  # anchor: refill from the respawn queue
+                    due = [e for e in self._respawn_queue if e[1] == kind and e[0] <= world.tick]
+                    for entry in due[: cap - len(living)]:
+                        self._respawn_queue.remove(entry)
+                        self._spawn(kind)
+                continue
+            # evolving: thriving parents spend surplus to bud toward the cap
+            for pid in list(living):
+                if len(living) >= cap:
+                    break
+                if self._is_thriving(world.robots[pid], world.tick):
+                    living.append(self._bud(world, pid, kind))
+            # extinction guard: a hibernating generation buds nobody
+            while len(living) < self.cfg.reproduction.floor:
+                living.append(self._spawn(kind))
+
+    def _bud(self, world: World, parent_id: str, kind: str) -> str:
+        """A thriving parent buds a child that inherits its mutated genome, and
+        pays for it out of its own body (reproduction is costly, not free)."""
+        r = self.cfg.reproduction
+        prefix = kind.rsplit("_", 1)[-1] if kind else "bot"
+        child_id = f"{prefix}_{self._next_idx:03d}"
+        self._next_idx += 1
+        spec = self._specs_by_kind.get(kind, {"kind": kind})
+        body = body_from_config(resolve_brain_config(spec))
+        world.spawn_robot(child_id, brain_name=kind, body=body)
+        brain = build_brain(spec, seed=self._seed_for(child_id), device=self._device_for(spec))
+        parent_brain = self.brains.get(parent_id)
+        if parent_brain is not None:
+            brain.inherit(parent_brain.state_dict())
+        self.brains[child_id] = brain
+        self.kinds[child_id] = kind
+        self.locks[child_id] = threading.Lock()
+        parent = world.robots[parent_id]
+        parent.energy = max(0.0, parent.energy - r.bud_cost_energy)
+        parent.integrity = max(0.0, parent.integrity - r.bud_cost_integrity)
+        self._last_bud[parent_id] = world.tick
+        self._last_bud[child_id] = world.tick
+        world._emit("bud", parent, child=child_id)
+        return child_id
 
     def _deliver_deaths(self) -> None:
         """Hand each dead body's final observation to its brain, non-blocking.
@@ -209,7 +294,7 @@ class Population:
                     finally:
                         lock.release()
 
-    def _spawn(self, kind: str) -> None:
+    def _spawn(self, kind: str) -> str:
         # Ids carry the kind so every surface (labels, charts, events) reads
         # meaningfully: dreamer_000, forager_001, walker_002.
         prefix = kind.rsplit("_", 1)[-1] if kind else "bot"
@@ -241,6 +326,7 @@ class Population:
         self.brains[robot_id] = brain
         self.kinds[robot_id] = kind
         self.locks[robot_id] = threading.Lock()
+        return robot_id
 
     def act_step(self, world: World) -> None:
         """One perception-action cycle for every awake robot.
@@ -255,6 +341,7 @@ class Population:
             world.light_level,
             world.active_sounds(),
             toxic_mimic=world.cfg.ecology.toxic_mimic,
+            senescence_halflife=world.cfg.economy.senescence_halflife,
         )
         self.last_obs = obs
         self._death_obs.update(obs)

@@ -209,7 +209,9 @@ def _overlay_robots(
         rgb[hits] = np.clip(color * lit, 0.0, 1.0)
 
 
-def _proprio(robot: Robot, light_level: float) -> npt.NDArray[np.float32]:
+def _proprio(
+    robot: Robot, light_level: float, senescence_halflife: float = 0.0
+) -> npt.NDArray[np.float32]:
     body = robot.body
     c, s = math.cos(robot.yaw), math.sin(robot.yaw)
     vx, vy, vz = robot.vel
@@ -228,6 +230,13 @@ def _proprio(robot: Robot, light_level: float) -> npt.NDArray[np.float32]:
     out[14] = robot.fatigue
     out[15] = robot.gaze[0]  # head pitch, fraction of gaze_pitch_max
     out[16] = robot.gaze[1]  # head yaw, fraction of gaze_yaw_max
+    # v4: senescence — how worn the body is (0 young → 1 aged), = 1 − repair
+    # efficiency, the same 0.5^(age/halflife) curve that governs repair. With
+    # aging disabled (halflife 0) this reads 0: no felt finitude (ablation).
+    if senescence_halflife > 0:
+        out[17] = 1.0 - 0.5 ** (robot.age_ticks / senescence_halflife)
+    else:
+        out[17] = 0.0
     return out
 
 
@@ -271,6 +280,7 @@ def observe(
     light_level: float,
     world_sounds: Sequence[tuple[float, float, float, float]] = (),
     toxic_mimic: bool = False,
+    senescence_halflife: float = 0.0,
 ) -> dict[str, Observation]:
     """Build observations for every awake robot (one batched raycast)."""
     awake = [r for r in robots if not r.dormant]
@@ -315,7 +325,7 @@ def observe(
 
         obs[robot.id] = Observation(
             rays=rays,
-            proprio=_proprio(robot, light_level),
+            proprio=_proprio(robot, light_level, senescence_halflife),
             sound=_sound(robot, others, world_sounds),
             events=robot.drain_events().astype(F32),
         )

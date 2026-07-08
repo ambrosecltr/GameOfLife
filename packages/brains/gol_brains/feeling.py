@@ -11,15 +11,16 @@ These are pure functions of `proprio` plus scalar parameters — no module state
 device assumptions beyond the input tensor's. Each works on any leading batch/time
 shape; the drive/viability reduce over the last (feature) dimension.
 
-Proprio layout (OBS_VERSION 3): index 5 = energy, 6 = integrity, 14 = fatigue.
-All are "higher is better" except fatigue (restedness = 1 - fatigue).
+Proprio layout: index 5 = energy, 6 = integrity, 14 = fatigue (stable across
+OBS_VERSION 3→4; v4 only appends senescence at index 17). All are "higher is
+better" except fatigue (restedness = 1 - fatigue).
 """
 
 from __future__ import annotations
 
 import torch
 
-# proprio feature indices (OBS_VERSION 3)
+# proprio feature indices (stable across OBS_VERSION 3→4)
 ENERGY_IDX = 5
 INTEGRITY_IDX = 6
 FATIGUE_IDX = 14

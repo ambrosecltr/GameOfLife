@@ -42,6 +42,29 @@ class ObservabilityConfig:
 
 
 @dataclass(frozen=True)
+class ReproductionConfig:
+    """How the population replaces the dead (proposal 004).
+
+    "respawn" (default): the legacy timer — the dead are replaced after a delay,
+    regardless of how anyone lived. "budding": earned, endogenous reproduction —
+    an evolving lineage continues only by a THRIVING body spending its own
+    surplus to bud a child, so lineages that sleep their lives away leave fewer
+    descendants and a survival instinct can be selected for rather than taught.
+    A low respawn floor guards against extinction for evolving kinds; scripted
+    anchor kinds (foragers) are always kept at their mix count by respawn.
+    """
+
+    mode: str = "respawn"  # respawn | budding
+    thrive_energy: float = 75.0  # sustained energy above this makes a body eligible to bud
+    thrive_integrity: float = 70.0  # an intact body — reproduction needs a well-lived one
+    min_bud_age: int = 20000  # no budding before this age (a juvenile can't reproduce)
+    bud_cooldown: int = 15000  # ticks a parent must wait between buds
+    bud_cost_energy: float = 40.0  # energy the parent spends to bud (reproduction is costly)
+    bud_cost_integrity: float = 5.0  # integrity the parent spends to bud
+    floor: int = 4  # emergency respawn if an evolving kind falls below this (extinction guard)
+
+
+@dataclass(frozen=True)
 class RunConfig:
     world_config: str = "configs/world/default.yaml"
     tick_rate: int = 20
@@ -50,6 +73,7 @@ class RunConfig:
     control_port: int = 7301
     devices: DevicesConfig = field(default_factory=DevicesConfig)
     population: PopulationConfig = field(default_factory=PopulationConfig)
+    reproduction: ReproductionConfig = field(default_factory=ReproductionConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
 
 
@@ -90,6 +114,7 @@ def load_run_config(
 __all__ = [
     "DevicesConfig",
     "PopulationConfig",
+    "ReproductionConfig",
     "ObservabilityConfig",
     "RunConfig",
     "apply_overrides",

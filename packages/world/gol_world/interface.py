@@ -17,7 +17,11 @@ import numpy.typing as npt
 # instead of a block-class oracle: what a block *is* must now be read from how
 # it looks. Gaze control adds 2 action dims and 2 proprio dims; the ray fan
 # grows to 6 pitch rows (including upward — hills and skylines are visible).
-OBS_VERSION = 3
+# v4 (proposal 004, finitude): one proprio channel for the body's SENESCENCE —
+# how worn/old it is (0 young → 1 aged, = 1 − repair efficiency). The literal
+# substrate for "time awareness": the agent can feel its finite life running
+# down the way it feels hunger. We never say what it means; behaviour discovers it.
+OBS_VERSION = 4
 
 # Ray hit kinds: an animacy channel, not a semantic oracle. Blocks are told
 # apart only by color; other robots stay perceptually salient as "alive".
@@ -30,7 +34,7 @@ NUM_RAY_KINDS = 4
 # Per-ray features: depth, r, g, b, kind one-hot.
 RAY_DIM = 1 + 3 + NUM_RAY_KINDS
 
-PROPRIO_DIM = 17
+PROPRIO_DIM = 18  # v4: +1 for the senescence channel (index 17)
 SOUND_DIM = 4
 EVENTS_DIM = 4
 SIGNAL_DIM = 2
