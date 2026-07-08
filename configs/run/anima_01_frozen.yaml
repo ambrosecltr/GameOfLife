@@ -1,0 +1,47 @@
+# anima_01 frozen-net control (P3) — the paired arm to configs/run/anima_01.yaml.
+#
+# IDENTICAL to the flagship run in every respect (same world + seed, same
+# population shape, same forager anchor) EXCEPT the plastic brains have
+# plasticity OFF (configs/brain/anima_01_frozen.yaml, `plasticity.enabled:
+# false`): W_fast is frozen at zero, so these agents are pure EVOLVED REFLEXES —
+# all adaptation is genetic (founder diversity + inherit/mutate + differential
+# survival), none is within-life. The comparison this arm buys: does within-life
+# plasticity beat a frozen reflex in this world, or is all the adaptation the
+# gene drift? (At the flagship's ~666k-tick check-in, plastic looked like beta's
+# hibernation attractor and the viability gate was net-suppressing — so this
+# control is exactly what interprets that result.)
+#
+# Same world_config as the flagship ⇒ same seed 7 ⇒ same terrain/bush layout, so
+# the two arms are directly comparable. Separate save + control port so both can
+# run at once without collision.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/anima_01_frozen \
+#       --config configs/run/anima_01_frozen.yaml --headless
+# (drop --headless to watch it live in rerun; --headless to run it as a quiet
+# background control, same as the flagship.)
+
+world_config: configs/world/beta_11_2x_food.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7312            # flagship holds 7311; keep them distinct
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 48                  # same shape as the flagship: 42 frozen-plastic + 6 forager
+  respawn_delay_ticks: 1200
+  inherit_weights: random_living   # Darwinian warm-start (genome + wiring mutate; W_fast stays 0 anyway)
+  mix:
+    - brain: configs/brain/anima_01_frozen.yaml
+      count: 42
+    - brain: { kind: scripted_forager }
+      count: 6                # the cross-round forage anchor, fixed
+
+observability:
+  rerun: true
+  rerun_memory_limit: "2GB"   # only matters if you run it live (no --headless)
+  metrics_every_ticks: 100

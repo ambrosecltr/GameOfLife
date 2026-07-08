@@ -46,6 +46,7 @@ from gol_world.interface import (
     Observation,
 )
 
+from gol_brains import feeling
 from gol_brains.base import Brain
 from gol_brains.dreamer.buffer import ReplayBuffer
 from gol_brains.dreamer.interest import LearningProgress, OnlineRegions
@@ -625,38 +626,23 @@ class DreamerBrain(Brain):
         return {**obs, "depth": masked_depth, "rgb": masked_rgb, "kind_onehot": masked_kind}
 
     def _drive_level(self, proprio: torch.Tensor) -> torch.Tensor:
-        """Keramati–Gutkin drive: convex distance from internal setpoints.
-
-        Internal state comes straight from proprio — energy, integrity, and
-        restedness (1 - fatigue), all "higher is better". Only deficits below
-        setpoint count (surplus is not a drive), and the convex exponents
-        (m > n) let the neediest variable dominate: a starving agent is not
-        consoled by being well-rested.
-        """
-        x = torch.stack([proprio[..., 5], proprio[..., 6], 1.0 - proprio[..., 14]], dim=-1)
-        # Clamp to the physical range: decoded proprio (boredom's gate reads
-        # imagined bodies) can stray outside [0, 1].
-        deficit = (self.drive_setpoints - x.clamp(0.0, 1.0)).clamp(min=0.0)
-        d = (self.drive_weights * deficit.pow(self.drive_pow_m)).sum(-1)
-        return d.pow(1.0 / self.drive_pow_n)
+        """Keramati–Gutkin comfort drive (shared definition, gol_brains.feeling)."""
+        return feeling.drive_level(
+            proprio, self.drive_setpoints, self.drive_weights, self.drive_pow_m, self.drive_pow_n
+        )
 
     def _viability(self, proprio: torch.Tensor) -> torch.Tensor:
-        """Log-barrier distance to the lethal floor, for the survival-critical
-        state only (energy → dormancy, integrity → death; fatigue is not
-        lethal, so restedness is a comfort drive, not a viability one). 0 at or
-        above `safe`, rising toward the floor and capped at `barrier_cap` so it
-        stays finite exactly at the boundary. Unlike the convex comfort drive,
-        the marginal cost of a lost unit grows without bound as the floor
-        nears — the "a calorie when starving is worth everything" asymmetry.
-        """
-
-        def barrier(x: torch.Tensor, lethal: float, safe: float) -> torch.Tensor:
-            frac = ((x.clamp(0.0, 1.0) - lethal) / (safe - lethal)).clamp(min=1e-6, max=1.0)
-            return (-torch.log(frac)).clamp(max=self.via_barrier_cap)
-
-        return self.via_w_energy * barrier(
-            proprio[..., 5], self.via_e_lethal, self.via_e_safe
-        ) + self.via_w_integ * barrier(proprio[..., 6], self.via_i_lethal, self.via_i_safe)
+        """Log-barrier distance to the lethal floor (shared, gol_brains.feeling)."""
+        return feeling.viability(
+            proprio,
+            barrier_cap=self.via_barrier_cap,
+            energy_lethal=self.via_e_lethal,
+            energy_safe=self.via_e_safe,
+            integrity_lethal=self.via_i_lethal,
+            integrity_safe=self.via_i_safe,
+            energy_weight=self.via_w_energy,
+            integrity_weight=self.via_w_integ,
+        )
 
     def _viability_reward(
         self, proprio: torch.Tensor, first: torch.Tensor | None = None
@@ -665,11 +651,7 @@ class DreamerBrain(Brain):
         minus a standing tax for sitting in the danger zone. Same telescoping
         form and stream-break mask as the comfort drive (`_homeostasis`)."""
         V = self._viability(proprio)
-        reduction = torch.zeros_like(V)
-        reduction[..., 1:] = V[..., :-1] - V[..., 1:]
-        if first is not None:
-            reduction = reduction * (1.0 - first)
-        return self.via_scale * reduction - self.via_floor * V
+        return self.via_scale * feeling.reduction(V, first) - self.via_floor * V
 
     def _homeostasis(
         self, events: torch.Tensor, proprio: torch.Tensor, first: torch.Tensor | None = None
@@ -687,11 +669,7 @@ class DreamerBrain(Brain):
             # dreamer_043; a real meal is +0.5). Priced blackouts don't mark
             # the wake, so their true cross-gap delta stays in.
             d = self._drive_level(proprio)
-            reduction = torch.zeros_like(d)
-            reduction[..., 1:] = d[..., :-1] - d[..., 1:]
-            if first is not None:
-                reduction = reduction * (1.0 - first)
-            return self.drive_scale * reduction - self.drive_level_penalty * d
+            return self.drive_scale * feeling.reduction(d, first) - self.drive_level_penalty * d
         ate, damage = events[..., 0], events[..., 1]
         energy = proprio[..., 5]
         if self.low_energy_graded:

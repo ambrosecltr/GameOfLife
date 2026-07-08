@@ -47,6 +47,10 @@ def build_brain(spec: str | dict[str, Any], seed: int, device: str = "cpu") -> B
         from gol_brains.dreamer import DreamerBrain
 
         return DreamerBrain(cfg, seed=seed, device=device, body=body)
+    if kind == "plastic":
+        from gol_brains.plastic import PlasticBrain
+
+        return PlasticBrain(cfg, seed=seed, device=device, body=body)
     raise ValueError(f"unknown brain kind: {kind!r}")
 
 

@@ -1,0 +1,54 @@
+# anima_01 frozen-net control (P3) — anima_01_plastic.yaml with plasticity OFF.
+#
+# A pure evolved reflex agent: W_fast stays frozen at zero, so all adaptation is
+# genetic (founder diversity + inherit/mutate + differential survival), none is
+# within-life. If the plastic arm does not out-forage this one, within-life
+# plasticity is contributing nothing in this world — itself a strong result.
+# Identical in every other respect so the comparison is clean.
+
+kind: plastic
+
+core:
+  hidden: 256
+
+plasticity:
+  enabled: false               # THE control: W_fast frozen at 0 (alpha effectively 0)
+  alpha: 0.1
+  tau: 20.0
+  decay: 1.0e-3
+  w_clip: 2.0
+
+restlessness: 0.2
+
+valence:
+  comfort_gain: 3.0
+  drive:
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    integrity_setpoint: 1.0
+    rested_setpoint: 1.0
+    energy_weight: 1.0
+    integrity_weight: 1.0
+    rest_weight: 0.5
+  viability:
+    viability_gain: 3.0
+    standing_gain: 0.0
+    barrier_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  modulator:
+    gain: 1.0
+    clip: 5.0
+
+genome:
+  enabled: true
+  sigma: 0.25
+  mutation_sigma: 0.1
+  weight_mutation_sigma: 0.05
+
+inherit_mode: genome

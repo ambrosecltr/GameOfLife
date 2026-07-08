@@ -1,0 +1,53 @@
+# anima_01 — first round of the plastic-valence track (proposal 002), flagship
+# arm. Local M1, CPU, large cheap founder population (no cuda, no learner-thread
+# pacing — plasticity is a per-act-step local update, so the sim never waits on
+# learning and speed is bounded only by forward passes).
+#
+# Same world as beta_11 (2× food, the 012 affordance precondition) so anima↔beta
+# stays a clean same-world comparison, and so P1 ("does it forage at all?") is
+# attributable to the brain and not the map (round 011: even a perfect policy
+# starved on spawn luck at 1× food).
+#
+# Darwinian inheritance: `random_living` warm-starts a newborn from a living
+# donor's genome + innate wiring (mutated); the plastic brain reinits W_fast
+# (inherit_mode: genome). The frozen-net control (P3) is the paired arm —
+# swap the brain mix to configs/brain/anima_01_frozen.yaml (anima_01_frozen.yaml
+# run), same world and seed protocol.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/anima_01 \
+#       --config configs/run/anima_01.yaml
+# (omit --headless to spawn the rerun viewer and WATCH it live.)
+#
+# CALIBRATED on the M1 (2026-07-08): one plastic act() = 0.8 ms; world stepping
+# (raycasts scale with robot COUNT) is the binding cost, not the brains. Real-
+# time ceiling ≈ 96 total robots (~20 t/s = speed 1). This founder is 42 plastic
+# + 6 forager = 48 total → ~2× real-time headroom, comfortable for a live viewer
+# at speed 1 while still a LARGE population (14× the old 3-dreamer runs). Push
+# plastic toward ~90 if running headless/faster-than-real-time. Foragers stay at
+# 6 — the fixed cross-round anchor; we're testing the brains, not the foragers.
+
+world_config: configs/world/beta_11_2x_food.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7311            # no collision with beta_10 (7301) / beta_11 (7302/7303)
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 48                  # calibrated: 42 plastic + 6 forager, ~2× real-time headroom
+  respawn_delay_ticks: 1200
+  inherit_weights: random_living   # Darwinian warm-start (brain reinits W_fast)
+  mix:
+    - brain: configs/brain/anima_01_plastic.yaml
+      count: 42
+    - brain: { kind: scripted_forager }
+      count: 6                # the cross-round forage anchor, fixed (we're testing the brains)
+
+observability:
+  rerun: true
+  rerun_memory_limit: "2GB"   # live viewer keeps a bounded sliding window of recent past
+  metrics_every_ticks: 100

@@ -1,0 +1,71 @@
+# anima_01 — the plastic-valence brain (track `anima`, proposal 002).
+#
+# A backprop-free, world-model-free brain: a GRU core whose fast weights adapt
+# online via a three-factor neuromodulated Hebbian rule, gated by the shared
+# `gol_brains.feeling` valence M (comfort drive + viability barrier) — the same
+# feeling beta computes, used here as a NEUROMODULATOR that decides what sticks,
+# not a reward to maximize. Nothing sums M into a return, so anima is
+# structurally immune to beta's telescoping-negative-return wall (the price:
+# mortality is reactive-only — no critic, so no imagined death_terminal).
+#
+# FULLY PLASTIC (round-A decision): every content transform (encoder, GRU
+# candidate, readout) carries W_slow (innate, evolved) + W_fast (plastic); the
+# GRU's sigmoid gates stay innate control structure. Stability guards are ON by
+# default (bounded M, per-layer decay, W_fast clip) because a fully-plastic net
+# can diverge.
+#
+# The viability barrier is MIRRORED vs beta_11: beta uses the standing tax
+# (scale 0, floor 1) and rejected the reduction form (value-space launchpad).
+# anima has no value function, so no launchpad — the REDUCTION is the right
+# survival teacher (escape-death consolidates, magnitude-scaled by −log). Hence
+# viability_gain ON, standing_gain ~0. This bet is offline-screened before the
+# real run (proposal calibration step 3) and pre-registered as P5.
+
+kind: plastic
+
+core:
+  hidden: 256                  # small GRU; no world model to size
+
+plasticity:
+  enabled: true                # false = the frozen-net control (P3), see anima_01_frozen.yaml
+  alpha: 0.1                   # base plasticity coefficient (per-layer alpha is a gene)
+  tau: 20.0                    # eligibility-trace time constant (act-steps)
+  decay: 1.0e-3                # fast-weight decay toward zero
+  w_clip: 2.0                  # |W_fast| clip — keeps a fully-plastic net finite
+
+restlessness: 0.2              # motor-noise scale + discrete-exploration floor (a gene); keeps EAT reachable
+
+# --- the feeling signal M, forked from beta_11 (comfort drive + viability barrier) ---
+valence:
+  comfort_gain: 3.0            # weight on comfort drive-reduction (signed) in M
+  drive:                       # Keramati–Gutkin comfort drive (verbatim from beta_11)
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    integrity_setpoint: 1.0
+    rested_setpoint: 1.0
+    energy_weight: 1.0
+    integrity_weight: 1.0
+    rest_weight: 0.5
+  viability:                   # log-barrier to the LETHAL floor (from beta_11), MIRRORED for a gate
+    viability_gain: 3.0        # reduction gate ON — the survival teacher (beta uses 0 here)
+    standing_gain: 0.0         # standing danger tax ~0 (beta's operating point; an ablation here)
+    barrier_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  modulator:
+    gain: 1.0                  # global M gain (a gene); tuned in the offline screen
+    clip: 5.0                  # |M| clamp — stability guard
+
+genome:
+  enabled: true
+  sigma: 0.25                  # founder diversity (log-stddev over gene multipliers)
+  mutation_sigma: 0.1          # gene drift on inherit
+  weight_mutation_sigma: 0.05  # innate W_slow jitter on inherit (evolvable wiring)
+
+# genome = Darwinian (reinit W_fast on inherit); lineage = Lamarckian (carry W_fast).
+inherit_mode: genome
