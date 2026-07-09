@@ -4,7 +4,7 @@ title: plastic-valence — a backprop-free, world-model-free brain that learns b
 date: 2026-07-07
 revised: 2026-07-08          # folded in the round 011/012 mortality reframe + viability drive
 track: anima                 # provisional name for the plastic-neuroevolution track (vs beta = world-model)
-status: proposed
+status: closed               # bet falsified after 7 rounds (anima_01–07); see research_journal/anima/007-centered-valence.md
 targets_round: anima_01      # first round of a new track; forks beta's base, runs local on M1
 question: Can a brain with no gradient descent and no world model — a recurrent net whose fast weights adapt online via neuromodulated Hebbian plasticity, gated by an evolved homeostatic valence signal — keep itself alive in beta's world, and does the evolved valence map diverge across lineages into persistent individuality?
 depends_on: [009, 011, 012]  # forks beta's drive block AND inherits the viability drive + 2x-food world from 012; does NOT wait for 012's live verdict
@@ -15,6 +15,17 @@ tags: [architecture, neuroevolution, plasticity, neuromodulation, affect, homeos
 ---
 
 # 002 — plastic-valence
+
+> **CLOSED (2026-07-10).** The track ran 7 rounds (anima_01–07) and the founding bet —
+> that feeling alone, with no learned predictor, can gate Hebbian consolidation into
+> survival competence — is falsified: a three-factor rule needs a ~zero-mean modulator,
+> and every unlearned geometry of felt-state valence (reduction, level, level−EMA)
+> integrates negative over a mortal, never-thriving life. The fix (centering against a
+> learned expectation, i.e. a critic/TD error) is outside this family's charter by
+> definition. Full verdict: `docs/research_journal/anima/007-centered-valence.md`.
+> Note: the "structural immunity" argument below (that anima escapes beta's
+> telescoping-negative return) was tested and is WRONG in its strong form — the
+> telescoping reappears inside the modulator itself (anima_05/06/07).
 
 This is the first round of a **new track**, not the next beta round. Every round from 004
 to 011 asked the same question with the same architecture — can *this one Dreamer* learn
