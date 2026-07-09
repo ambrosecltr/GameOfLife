@@ -9,7 +9,8 @@ Feeling gates learning instead of being maximized. Each act step:
   2. consolidate the eligibility trace with `M` (crediting the previous step's
      activity, which produced this step's outcome);
   3. forward pass (encoder → GRU → readout), sample an action with heritable
-     restlessness so the discrete EAT mode keeps getting tried;
+     restlessness — scaled up by the current drive when appetite is on, so a
+     hungry body searches harder — keeping the discrete EAT mode tried;
   4. fold this step's pre⊗post into the trace (the readout's discrete credit
      lands on the *taken* gripper mode).
 
@@ -50,6 +51,7 @@ GENE_KEYS = (
     "tau",
     "decay",
     "restlessness",
+    "appetite_gain",
     "comfort_gain",
     "viability_gain",
     "standing_gain",
@@ -82,6 +84,10 @@ class PlasticBrain(Brain):
         self.plastic_on = bool(pl.get("enabled", True))  # False = frozen-net control (P3)
 
         self._restless0 = float(cfg.get("restlessness", 0.2))
+        # Appetite (anima_03): drive scales restlessness, so hunger raises search
+        # effort innately — the coupling STRENGTH is heritable, so selection can
+        # tune it (to zero if it's wrong). 0 disables (anima_01/02 behavior).
+        self._appetite0 = float(cfg.get("appetite_gain", 0.0))
 
         # --- valence (the neuromodulator M) — forked from beta_11's drive block ---
         val = dict(cfg.get("valence", {}))
@@ -107,6 +113,12 @@ class PlasticBrain(Brain):
         )
         via = dict(val.get("viability", {}))
         # reduction gate ON for anima (mirror of beta_11); standing tax ~0 (ablation).
+        # rectified (anima_03): consolidate only ESCAPES (positive reductions).
+        # anima_02 measured the unrectified gate net-negative over awake life
+        # (life_return_via −11..−33) because decline is felt but recovery happens
+        # inside dormancy behind a stream reset — the negative half anti-
+        # consolidates whatever a starving agent was doing, including foraging.
+        self.via_rectified = bool(via.get("rectified", False))
         self._viability_gain0 = float(via.get("viability_gain", 3.0))
         self._standing_gain0 = float(via.get("standing_gain", 0.0))
         self.via_cap = float(via.get("barrier_cap", 4.0))
@@ -150,6 +162,7 @@ class PlasticBrain(Brain):
         self._m_last = 0.0
         self._m_comfort_last = 0.0
         self._m_via_last = 0.0
+        self._arousal_last = 0.0
 
     # ------------------------------------------------------------- gene → params
     def _build_net(self) -> None:
@@ -174,6 +187,7 @@ class PlasticBrain(Brain):
         self.standing_gain = self._standing_gain0 * g["standing_gain"]
         self.mod_gain = self._mod_gain0 * g["mod_gain"]
         self.restlessness = float(np.clip(self._restless0 * g["restlessness"], 0.0, 0.6))
+        self.appetite_gain = self._appetite0 * g["appetite_gain"]
         self.drive_weights = self._drive_w0 * torch.tensor(
             [g["energy_weight"], g["integrity_weight"], g["rest_weight"]], device=self.device
         )
@@ -222,7 +236,10 @@ class PlasticBrain(Brain):
             v = self._viability(proprio)
             if self._prev_d is not None and self._prev_v is not None:
                 m_comfort = self.comfort_gain * (self._prev_d - d)
-                m_via = self.viability_gain * (self._prev_v - v) - self.standing_gain * v
+                red_v = self._prev_v - v
+                if self.via_rectified:
+                    red_v = max(red_v, 0.0)
+                m_via = self.viability_gain * red_v - self.standing_gain * v
             else:
                 m_comfort = 0.0
                 m_via = 0.0
@@ -236,13 +253,18 @@ class PlasticBrain(Brain):
             out, self.h, e, cand = self.net(x, self.h)
             out = out.flatten()
 
+            # Arousal: hunger scales search effort (motor noise + exploration
+            # floor). With appetite_gain 0 this is exactly restlessness.
+            arousal = float(
+                np.clip(self.restlessness * (1.0 + self.appetite_gain * d), 0.0, 0.6)
+            )
             noise = torch.from_numpy(
-                (self.rng.standard_normal(CONT_DIM) * self.restlessness).astype(np.float32)
+                (self.rng.standard_normal(CONT_DIM) * arousal).astype(np.float32)
             ).to(self.device)
             cont = torch.tanh(out[:CONT_DIM] + noise)
             logits = out[CONT_DIM:]
             probs = torch.softmax(logits, dim=-1).cpu().numpy()
-            eps = min(self.restlessness, 0.5)  # discrete exploration floor keeps EAT reachable
+            eps = min(arousal, 0.5)  # discrete exploration floor keeps EAT reachable
             probs = (1.0 - eps) * probs + eps / NUM_GRIP_MODES
             probs = probs / probs.sum()
             grip = int(self.rng.choice(NUM_GRIP_MODES, p=probs))
@@ -257,6 +279,7 @@ class PlasticBrain(Brain):
                 self._life_return_via += m_via
             self._prev_d, self._prev_v = d, v
             self._m_last, self._m_comfort_last, self._m_via_last = m, m_comfort, m_via
+            self._arousal_last = arousal
             self._act_steps += 1
 
             cont_np = cont.cpu().numpy()
@@ -290,6 +313,7 @@ class PlasticBrain(Brain):
             "life_return_comfort": self._life_return_comfort,
             "life_return_via": self._life_return_via,
             "restlessness": self.restlessness,
+            "arousal": self._arousal_last,
         }
         if self.genome_enabled:
             out.update({f"gene_{k}": v for k, v in self.genes.items()})
@@ -311,7 +335,9 @@ class PlasticBrain(Brain):
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
         if self.genome_enabled and "genes" in state:
-            self.genes = dict(state["genes"])
+            # Fill genes added after a checkpoint was written with the neutral
+            # multiplier, so older anima saves keep loading across gene-set growth.
+            self.genes = {k: float(state["genes"].get(k, 1.0)) for k in GENE_KEYS}
             self._build_net()
         self.net.load_state_dict(state["net"])
         self.h = state["h"].to(self.device)

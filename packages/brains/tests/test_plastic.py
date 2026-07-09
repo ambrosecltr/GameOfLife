@@ -90,6 +90,72 @@ def test_checkpoint_roundtrip() -> None:
         assert xa.gripper == xb.gripper
 
 
+def obs_with_body(rng: np.random.Generator, energy: float, integrity: float = 1.0) -> Observation:
+    """A controlled-interoception obs: proprio zeros except the body channels."""
+    obs = fake_obs(rng)
+    proprio = np.zeros(PROPRIO_DIM, dtype=np.float32)
+    proprio[5] = energy  # feeling.ENERGY_IDX
+    proprio[6] = integrity  # feeling.INTEGRITY_IDX
+    obs["proprio"] = proprio
+    return obs
+
+
+def test_appetite_raises_arousal_when_hungry() -> None:
+    rng = np.random.default_rng(6)
+    cfg = {**CFG, "appetite_gain": 2.0, "genome": {**CFG["genome"], "enabled": False}}
+    brain = PlasticBrain(cfg, seed=6)
+    brain.act(obs_with_body(rng, energy=0.9))
+    sated = brain.introspect()["arousal"]
+    brain.act(obs_with_body(rng, energy=0.3))
+    hungry = brain.introspect()["arousal"]
+    assert hungry > sated  # hunger raises search effort
+    assert abs(sated - brain.restlessness) < 0.05  # near-setpoint ≈ base restlessness
+    assert hungry <= 0.6  # arousal stays clipped
+
+    # appetite_gain 0 (anima_01/02 configs) leaves arousal == restlessness exactly.
+    off = PlasticBrain({**CFG, "genome": {**CFG["genome"], "enabled": False}}, seed=6)
+    off.act(obs_with_body(rng, energy=0.3))
+    assert off.introspect()["arousal"] == off.restlessness
+
+
+def test_rectified_gate_credits_escapes_only() -> None:
+    rng = np.random.default_rng(8)
+    cfg = {
+        **CFG,
+        "valence": {"viability": {"rectified": True}},
+        "genome": {**CFG["genome"], "enabled": False},
+    }
+    brain = PlasticBrain(cfg, seed=8)
+    # decline into danger (viability barrier rises): rectified gate stays silent
+    brain.act(obs_with_body(rng, energy=0.5))
+    brain.act(obs_with_body(rng, energy=0.05))
+    assert brain.introspect()["m_viability"] == 0.0
+    # escape from danger (barrier falls): consolidates positive
+    brain.act(obs_with_body(rng, energy=0.5))
+    assert brain.introspect()["m_viability"] > 0.0
+
+    # unrectified control feels the decline as negative
+    ctl = PlasticBrain({**CFG, "genome": {**CFG["genome"], "enabled": False}}, seed=8)
+    ctl.act(obs_with_body(rng, energy=0.5))
+    ctl.act(obs_with_body(rng, energy=0.05))
+    assert ctl.introspect()["m_viability"] < 0.0
+
+
+def test_load_fills_genes_added_after_checkpoint() -> None:
+    rng = np.random.default_rng(9)
+    a = PlasticBrain(CFG, seed=9)
+    for _ in range(20):
+        a.act(fake_obs(rng))
+    state = a.state_dict()
+    del state["genes"]["appetite_gain"]  # simulate a pre-appetite checkpoint
+
+    b = PlasticBrain(CFG, seed=10)
+    b.load_state_dict(state)
+    assert b.genes["appetite_gain"] == 1.0  # neutral multiplier
+    for _ in range(5):
+        b.act(fake_obs(rng))
+
+
 def test_inherit_mutates_and_resets_fast() -> None:
     rng = np.random.default_rng(4)
     parent = PlasticBrain(CFG, seed=4)

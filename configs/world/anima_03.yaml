@@ -1,0 +1,82 @@
+# anima_03 world: anima_02 (2× food + 90k senescence, proposal 004) with ONE
+# change — a WIDER AWAKE CORRIDOR. anima_02 measured the dominant life as
+# wake@40 → fail to find food → re-hibernate FIRST (75-81% of wakes): at
+# ~0.0065 energy/tick awake drain, wake_energy 40 → brownout 25 gives only
+# ~2.3k ticks to find a bush (median wake→eat was ~800 for the lucky ~20%).
+# wake_energy 55 doubles the search window to ~4.6k ticks so the teaching
+# event (eating while hungry) becomes physically reachable. This is affordance
+# calibration in the 012 "2× food precondition" sense — no reward, no task.
+seed: 7
+size: [256, 256, 64]          # x, y, z (blocks)
+day_length_ticks: 24000       # 20 min of sim time at 20 ticks/s
+
+terrain:
+  height_base: 24             # mean terrain height
+  height_amp: 14              # fBm amplitude (blocks)
+  octaves: 4
+  water_level: 22             # basins below this fill with water
+  ore_pockets: 60             # random pockets inside rock
+  ore_pocket_size: 4          # ~blocks per pocket
+  bush_density: 0.024         # ROUND-012 AFFORDANCE: 2× default (0.012) — see header
+
+ecology:
+  regrow_ticks: 12000         # half a day, on average
+  regrow_jitter: 3000         # +/- uniform jitter
+  regrow_daytime_only: true   # night scarcity is the core survival pressure
+  toxic_fraction: 0.15        # chance a bush (generated or regrown) is toxic
+  toxic_mimic: false          # ablation: toxic looks identical to ripe (consequence-only learning)
+  # Bush senescence: standing bushes wither after ~a lifespan; replacements
+  # sprout elsewhere with toxicity re-rolled, so the toxic share can't ratchet
+  # up and the food map slowly drifts. Bush stock is conserved: hand-eaten,
+  # spoiled, and died-carrying bushes all schedule replacement sprouts.
+  bush_lifespan_ticks: 120000 # ~5 sim-days standing (0 disables withering)
+  bush_lifespan_jitter: 24000 # +/- a sim-day, so patches don't die in waves
+  sprout_clump_bias: 0.7      # chance a sprout roots near an existing bush (patchiness)
+  held_spoil_ticks: 24000     # a carried bush perishes after ~a sim-day (0 disables)
+
+economy:
+  energy_max: 100.0
+  integrity_max: 100.0
+  basal_drain: 0.0015         # per tick, just existing
+  move_cost: 0.005            # per tick at full drive
+  turn_cost: 0.002            # per tick at full turn rate
+  climb_cost: 0.15            # per 1-block step climbed
+  dig_cost: 0.5               # per dig action
+  place_cost: 0.1
+  signal_cost: 0.01           # per act-step at full signal amplitude
+  eat_energy: 40.0            # energy restored per BUSH_RIPE / fruit
+  water_speed_mult: 0.5
+  water_drain_mult: 3.0
+  fall_damage_per_block: 8.0  # per block beyond 3
+  hibernate_integrity_drain: 0.0003  # per dormant tick; a coma is survivable, not free
+  solar_trickle: 0.006        # energy/tick at full light, dormant robots only
+  wake_energy: 55.0           # ROUND-anima_03: was 40 — doubles the awake search corridor (see header)
+  toxic_energy: 10.0          # poison berries still hold some charge
+  toxic_integrity_damage: 12.0
+  fatigue_rise_base: 0.000015 # nonstop full drive -> exhausted in ~3/4 sim-day
+  fatigue_rise_active: 0.00004
+  fatigue_recover: 0.000125   # full recovery in ~1/3 sim-day of stillness
+  rest_drive_threshold: 0.1   # |drive| below this counts as resting
+  # Sleep: resting is circadian — recovery and rest-repair scale with darkness
+  # by (1 + night_rest_bonus * (1 - light)), and a resting body burns less.
+  # Sleep never mints energy; it only slows the meter.
+  rest_basal_mult: 0.6        # basal drain multiplier while resting (1 disables)
+  night_rest_bonus: 1.0       # extra recovery/repair at full darkness (0 disables)
+  exhaustion_threshold: 0.9   # past this: costs multiply, integrity bleeds
+  exhaustion_drain_mult: 1.5
+  exhaustion_integrity_drain: 0.002
+  brownout_threshold: 25.0    # below this energy, speed/turn fade linearly (0 disables)
+  brownout_floor: 0.35        # actuation fraction left at zero energy
+  # Wear and repair: integrity is condition, not a countdown. Energy surplus
+  # funds repair, faster at rest, at an efficiency that halves per senescence
+  # half-life of age — lifespan is the integral of how well the robot lived.
+  awake_wear: 0.0002          # integrity/tick while awake (~4.8/sim-day of chronic wear)
+  repair_threshold: 60.0      # energy above this funds repair (never drains below it)
+  repair_rate: 0.002          # integrity/tick at full youth (0 disables repair)
+  rest_repair_mult: 3.0       # sleep heals: repair speed multiplier while resting
+  repair_energy_per_point: 1.0  # energy cost per integrity point repaired
+  senescence_halflife: 90000  # SHARPENED (was 150000): finite lifespan — old age becomes lethal
+
+sounds:                       # involuntary cries; transient world sounds (0 disables)
+  death_cry_ticks: 40         # 2 s burst at the point of death
+  hurt_cry_ticks: 10          # on fall damage

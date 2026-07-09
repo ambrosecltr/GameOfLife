@@ -1,0 +1,70 @@
+# anima_03 — the audibility round: can the hunger feeling teach eating at all
+# once every measured blocker is removed? anima_02's inversion probe proved the
+# comfort channel behaviorally INERT (flipping the felt hunger sign changed
+# nothing); the diagnosis was four stacked blockers, all removed here as a
+# package (attribution comes later by ablation IF this works; if it fails with
+# every blocker gone, that is a strong negative for the three-factor Hebbian
+# family as configured):
+#
+#   world  — wake_energy 55 (was 40): the awake search corridor doubles, so
+#            eating-while-hungry becomes physically reachable (anima_02: 75-81%
+#            of wakes re-hibernated before a single eat).
+#   brain  — appetite_gain 2.0 (hunger raises search effort innately; strength
+#            is a gene), plasticity decay 1e-4 + tau 60 (meal engrams outlive
+#            the drain cycle, credit spans the approach), viability.rectified
+#            (consolidate escapes, don't bleed on the slide toward brownout).
+#   repro  — thrive_energy 65: reachable (one post-wake meal) but strictly
+#            above wake_energy 55, so waking is never free eligibility — see
+#            the reproduction block.
+#
+# Frozen control (run in parallel): configs/run/anima_03_frozen.yaml — same
+# world, appetite ON, plasticity OFF. The pair isolates what within-life
+# plasticity adds; anima_01's frozen control matched the plastic arm, so the
+# bar is "plastic finally BEATS frozen on eating-while-hungry".
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/anima_03 \
+#       --config configs/run/anima_03.yaml --headless
+# (omit --headless to watch live in rerun.)
+
+world_config: configs/world/anima_03.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7314            # anima_01 7311 / frozen 7312 / anima_02 7313
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 48                  # 42 plastic + 6 forager (the cap budding fills toward)
+  respawn_delay_ticks: 1200   # only used for the forager anchor + the extinction floor
+  inherit_weights: random_living
+  mix:
+    - brain: configs/brain/anima_03_plastic.yaml
+      count: 42
+    - brain: { kind: scripted_forager }
+      count: 6                # fixed anchor — foragers don't bud, respawn to count
+
+reproduction:
+  mode: budding               # earned, endogenous reproduction (proposal 004)
+  # ROUND-anima_03: 65, NOT 50 — the thrive bar must clear wake_energy (55) or
+  # waking IS thriving and hibernators bud for free (the check is instantaneous;
+  # a wake-at-55 body would be instantly eligible — reproduction would subsidize
+  # the hibernation attractor, beta_10's replay-subsidy pattern in the budding
+  # channel). 65 requires ≥1 post-wake meal, matches repair_threshold 60 (a
+  # thriving body is one that can self-repair), and 65−40 bud cost = 25 lands
+  # exactly at brownout, so budding never throws a parent into brownout.
+  thrive_energy: 65.0
+  thrive_integrity: 70.0      # an intact, well-lived body
+  min_bud_age: 20000          # ~a sim-day: no budding as a juvenile
+  bud_cooldown: 15000         # ticks between a parent's buds
+  bud_cost_energy: 40.0       # reproduction spends the parent's surplus (= one meal)
+  bud_cost_integrity: 5.0     # and a little of its body
+  floor: 4                    # emergency respawn if plastic falls below this (extinction guard)
+
+observability:
+  rerun: false                # headless background run; flip on (+ drop --headless) to watch
+  rerun_memory_limit: "2GB"
+  metrics_every_ticks: 100

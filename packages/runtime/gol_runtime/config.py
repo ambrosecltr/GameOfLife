@@ -55,7 +55,10 @@ class ReproductionConfig:
     """
 
     mode: str = "respawn"  # respawn | budding
-    thrive_energy: float = 75.0  # sustained energy above this makes a body eligible to bud
+    # NOTE: the thrive check is INSTANTANEOUS (at the bud tick, not sustained) —
+    # keep thrive_energy strictly above the world's wake_energy, or waking from
+    # hibernation is itself eligibility and budding subsidizes the attractor.
+    thrive_energy: float = 75.0  # energy at/above this makes a body eligible to bud
     thrive_integrity: float = 70.0  # an intact body — reproduction needs a well-lived one
     min_bud_age: int = 20000  # no budding before this age (a juvenile can't reproduce)
     bud_cooldown: int = 15000  # ticks a parent must wait between buds
