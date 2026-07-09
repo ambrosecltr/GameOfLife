@@ -1,0 +1,66 @@
+# anima_04 — the measured-economy round (calibration before mechanism).
+# anima_03's package failed because its corridor was sized by config arithmetic
+# (assumed 0.0065/tick awake drain; measured 0.012-0.023). This round changes
+# NOTHING in the brain — same anima_03 plastic brain (appetite, slow decay,
+# long tau, rectified gate) — and re-derives the WORLD from the new per-cause
+# energy ledger (saves/anima_04_diag):
+#
+#   world  — signal_cost 0.01 → 0.001: the ledger's headline — signaling was
+#            36.6% of plastic energy spend (0.0047/tick, ~the price of
+#            walking); charter RQ3 wants the signal channel ~free. Cutting it
+#            drops plastic awake drain ~0.0129 → ~0.009.
+#          — wake_energy 55 → 65: with the measured post-cut drain, the wake →
+#            brownout corridor is ~3.5-4.5k ticks (anima_03's actual was 2.1k).
+#   repro  — thrive_energy 65 → 75 (proposal-004 original): stays 10 above
+#            wake_energy so waking is never bud-eligibility (anima_03 rule:
+#            the thrive check is instantaneous); one meal from wake (65 → eat
+#            → up to 100) clears it; 75 − 40 bud cost = 35 > brownout 25.
+#
+# The question this round CAN answer (anima_03 couldn't): with hungry meals
+# physically reachable under honest, measured physics, does the plastic brain
+# consolidate them — does eat-while-hungry finally beat the frozen control?
+# LAUNCH BOTH ARMS: the frozen control (anima_04_frozen) never ran in
+# anima_03, which cost that round its plasticity verdict.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/anima_04 \
+#       --config configs/run/anima_04.yaml --headless
+# (omit --headless to watch live in rerun.)
+
+world_config: configs/world/anima_04.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7316            # anima_02 7313 / anima_03 7314 / 03_frozen 7315
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 48                  # 42 plastic + 6 forager (the cap budding fills toward)
+  respawn_delay_ticks: 1200   # only used for the forager anchor + the extinction floor
+  inherit_weights: random_living
+  mix:
+    - brain: configs/brain/anima_04_plastic.yaml
+      count: 42
+    - brain: { kind: scripted_forager }
+      count: 6                # fixed anchor — foragers don't bud, respawn to count
+
+reproduction:
+  mode: budding               # earned, endogenous reproduction (proposal 004)
+  # ROUND-anima_04: 75 (proposal-004 original) — must stay ABOVE wake_energy 65
+  # (instantaneous thrive check; waking must never be free bud-eligibility) and
+  # is one meal from wake. 75−40 bud cost = 35, safely above brownout 25.
+  thrive_energy: 75.0
+  thrive_integrity: 70.0      # an intact, well-lived body
+  min_bud_age: 20000          # ~a sim-day: no budding as a juvenile
+  bud_cooldown: 15000         # ticks between a parent's buds
+  bud_cost_energy: 40.0       # reproduction spends the parent's surplus (= one meal)
+  bud_cost_integrity: 5.0     # and a little of its body
+  floor: 4                    # emergency respawn if plastic falls below this (extinction guard)
+
+observability:
+  rerun: false                # headless background run; flip on (+ drop --headless) to watch
+  rerun_memory_limit: "2GB"
+  metrics_every_ticks: 100

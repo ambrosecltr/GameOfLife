@@ -128,11 +128,14 @@ def report(save: Path) -> None:
     # ---- mortality ----
     lastage: dict[str, float] = {}
     lastled: dict[str, dict[str, float]] = {}
+    lasteled: dict[str, dict[str, float]] = {}
     for r in rows:
         for k, v in r.get("robots", {}).items():
             if v.get("brain") == "plastic":
                 lastage[k] = v.get("age", 0)
                 lastled[k] = v.get("ledger", {})
+                if "energy_ledger" in v:
+                    lasteled[k] = v["energy_ledger"]
     alive = set(robots)
     dead_ages = [a for k, a in lastage.items() if k not in alive]
     cause: Counter[str] = Counter()
@@ -152,6 +155,24 @@ def report(save: Path) -> None:
         vals = [v[metric] for r in rows if r["tick"] >= T - win
                 for k, v in r["brains"].items() if "plastic" in k and metric in v]
         return float(np.mean(vals)) if vals else float("nan")
+
+    # ---- energy budget (saves with the energy ledger, anima_04+) ----
+    if lasteled:
+        totals: dict[str, float] = defaultdict(float)
+        for led in lasteled.values():
+            for k, v in led.items():
+                totals[k] += v
+        ticks_obs = sum(lastage.values()) or 1.0
+        spend = {k: v for k, v in totals.items() if k not in ("eaten", "solar") and v > 0}
+        tot_spend = sum(spend.values()) or 1.0
+        meals = sum(eat_w[w]["plastic"] for w in eat_w)
+        print("\nENERGY BUDGET (plastic, lifetime totals across observed robots)")
+        print("  spend: " + "  ".join(
+            f"{k}={v/tot_spend*100:.0f}%" for k, v in sorted(spend.items(), key=lambda x: -x[1])
+        ))
+        print(f"  spend rate: {tot_spend/ticks_obs:.4f}/robot-tick (dormant time included)")
+        print(f"  income: eaten={totals.get('eaten', 0):,.0f}  solar={totals.get('solar', 0):,.0f}"
+              + (f"  banked/meal={totals.get('eaten', 0)/meals:.1f}" if meals else ""))
 
     print("\nPLASTICITY & VALENCE (recent mean)")
     print(f"  w_fast_norm={_fmt(bmean('w_fast_norm'),4)}"

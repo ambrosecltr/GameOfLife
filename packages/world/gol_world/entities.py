@@ -61,6 +61,35 @@ def new_ledger() -> dict[str, float]:
     return dict.fromkeys(LEDGER_KEYS, 0.0)
 
 
+# Lifetime energy ledger: cumulative spend by cause, plus income. Answers
+# "where does the energy actually go" — anima_03 sized the wake corridor
+# against an assumed drain (basal+move ≈ 0.0065/tick) and the measured total
+# was 2-3× that; every affordance calibration after that round uses this
+# ledger's measured breakdown instead of arithmetic on config constants.
+# Spend keys are the charge sites; `exhaustion`/`water` hold only the
+# multiplier SURCHARGE over the base drain. `eaten`/`solar` record the energy
+# actually banked (a meal at 97/100 banks 3, not 40 — overflow is visible as
+# eat_events × eat_energy − eaten).
+ENERGY_LEDGER_KEYS = (
+    "basal",
+    "move",
+    "climb",
+    "signal",
+    "exhaustion",
+    "water",
+    "dig",
+    "place",
+    "repair",
+    "bud",
+    "eaten",
+    "solar",
+)
+
+
+def new_energy_ledger() -> dict[str, float]:
+    return dict.fromkeys(ENERGY_LEDGER_KEYS, 0.0)
+
+
 @dataclass
 class Robot:
     id: str
@@ -77,6 +106,7 @@ class Robot:
     fatigue: float = 0.0  # 0..1; builds with activity, clears with rest
     age_ticks: int = 0
     ledger: dict[str, float] = field(default_factory=new_ledger)
+    energy_ledger: dict[str, float] = field(default_factory=new_energy_ledger)
     # Commanded controls; persist between act-steps (grip is one-shot).
     drive: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(2))
     signal: npt.NDArray[np.float64] = field(default_factory=lambda: np.zeros(SIGNAL_DIM))
@@ -119,6 +149,7 @@ class Robot:
             "fatigue": self.fatigue,
             "age_ticks": self.age_ticks,
             "ledger": self.ledger,
+            "energy_ledger": self.energy_ledger,
             "drive": self.drive.tolist(),
             "signal": self.signal.tolist(),
             "gaze": self.gaze.tolist(),
@@ -143,6 +174,7 @@ class Robot:
             fatigue=float(data.get("fatigue", 0.0)),
             age_ticks=int(data["age_ticks"]),
             ledger={**new_ledger(), **data.get("ledger", {})},
+            energy_ledger={**new_energy_ledger(), **data.get("energy_ledger", {})},
             drive=np.array(data["drive"], dtype=np.float64),
             signal=np.array(data["signal"], dtype=np.float64),
             gaze=np.array(data.get("gaze", [0.0] * GAZE_DIM), dtype=np.float64),

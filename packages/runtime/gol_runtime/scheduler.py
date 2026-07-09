@@ -248,6 +248,7 @@ class Population:
         self.kinds[child_id] = kind
         self.locks[child_id] = threading.Lock()
         parent = world.robots[parent_id]
+        parent.energy_ledger["bud"] += min(parent.energy, r.bud_cost_energy)
         parent.energy = max(0.0, parent.energy - r.bud_cost_energy)
         parent.integrity = max(0.0, parent.integrity - r.bud_cost_integrity)
         self._last_bud[parent_id] = world.tick

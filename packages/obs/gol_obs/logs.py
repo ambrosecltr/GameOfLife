@@ -116,6 +116,7 @@ class RunLogs:
                     "age": r.age_ticks,
                     "brain": r.brain_name,
                     "ledger": {k: round(v, 2) for k, v in r.ledger.items()},
+                    "energy_ledger": {k: round(v, 2) for k, v in r.energy_ledger.items()},
                 }
                 for r in robots
             },

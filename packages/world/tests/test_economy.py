@@ -575,3 +575,54 @@ def test_death_leaves_a_cry_that_expires() -> None:
         world.step()
     assert world.active_sounds() == []
     assert world.transient_sounds == []  # pruned, not just filtered
+
+
+def test_energy_ledger_balances_against_energy_delta() -> None:
+    """The energy ledger's spend − income must equal the actual energy change
+    (away from the 0/max clamps), so calibration reads are trustworthy."""
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.energy = 60.0  # headroom on both sides: no clamp during the walk
+    start = robot.energy
+    for _ in range(200):
+        world.apply_action(rid, drive_action())
+        world.step()
+    spend = sum(v for k, v in robot.energy_ledger.items() if k not in ("eaten", "solar"))
+    income = robot.energy_ledger["eaten"] + robot.energy_ledger["solar"]
+    assert spend > 0.0
+    assert abs((start - robot.energy) - (spend - income)) < 1e-6
+    # movement shows up under its own cause
+    assert robot.energy_ledger["move"] > 0.0
+    assert robot.energy_ledger["basal"] > 0.0
+
+
+def test_energy_ledger_records_banked_meal_not_nominal() -> None:
+    world = make_world()
+    rid = place_robot_before_bush(world)
+    robot = world.robots[rid]
+    robot.energy = 90.0  # meal overflows the 100 cap: only 10 banked
+    world.apply_action(rid, Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_EAT))
+    world.step()
+    assert abs(robot.energy_ledger["eaten"] - 10.0) < 0.01
+
+
+def test_energy_ledger_charges_dig_and_solar() -> None:
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    x, y, z = (
+        int(robot.pos[0] + np.cos(robot.yaw) * 1.2),
+        int(robot.pos[1] + np.sin(robot.yaw) * 1.2),
+        int(robot.eye[2]),
+    )
+    world.grid.set_block(x, y, z, Block.SOIL)
+    world.apply_action(rid, Action(drive=np.zeros(2, dtype=np.float32), gripper=GRIP_DIG))
+    world.step()
+    assert abs(robot.energy_ledger["dig"] - CFG.economy.dig_cost) < 1e-9
+    # dormant solar income lands under "solar"
+    robot.energy = 0.0
+    robot.dormant = True
+    world.tick = CFG.day_length_ticks // 4  # noon: light_level == 1.0
+    world.step()
+    assert robot.energy_ledger["solar"] > 0.0

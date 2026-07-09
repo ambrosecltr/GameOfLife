@@ -395,6 +395,7 @@ class World:
                 block = self.grid.get_block(*target)
                 self.grid.set_block(*target, Block.AIR)
                 robot.held = block
+                robot.energy_ledger["dig"] += min(robot.energy, eco.dig_cost)
                 robot.energy = max(0.0, robot.energy - eco.dig_cost)
                 robot.events[EV_DIG_SUCCESS] = 1.0
                 self._emit("dig", robot, pos=list(target), block=block)
@@ -418,6 +419,7 @@ class World:
                 if block in BUSH_BLOCKS:
                     self.schedule_wither(*air_before)  # a transplant restarts its clock
                 robot.held = None
+                robot.energy_ledger["place"] += min(robot.energy, eco.place_cost)
                 robot.energy = max(0.0, robot.energy - eco.place_cost)
                 self._emit("place", robot, pos=list(air_before), block=block)
 
@@ -425,7 +427,9 @@ class World:
         """A meal lands in a robot: nourishing or poisonous, eaten or fed."""
         eco = self.cfg.economy
         if toxic:
-            robot.energy = min(eco.energy_max, robot.energy + eco.toxic_energy)
+            banked = min(eco.energy_max, robot.energy + eco.toxic_energy)
+            robot.energy_ledger["eaten"] += banked - robot.energy
+            robot.energy = banked
             robot.integrity = max(0.0, robot.integrity - eco.toxic_integrity_damage)
             robot.ledger["poison"] += eco.toxic_integrity_damage
             robot.events[EV_ATE] = 1.0
@@ -433,7 +437,9 @@ class World:
             self._cry(robot, HURT_CRY, self.cfg.sounds.hurt_cry_ticks)
             self._emit("poisoned", robot, **evdata)
         else:
-            robot.energy = min(eco.energy_max, robot.energy + eco.eat_energy)
+            banked = min(eco.energy_max, robot.energy + eco.eat_energy)
+            robot.energy_ledger["eaten"] += banked - robot.energy
+            robot.energy = banked
             robot.events[EV_ATE] = 1.0
             self._emit("eat", robot, **evdata)
 
@@ -483,7 +489,9 @@ class World:
             # peer) is the only way back out. It is at least restful.
             robot.integrity = max(0.0, robot.integrity - eco.hibernate_integrity_drain)
             robot.ledger["hibernation"] += eco.hibernate_integrity_drain
-            robot.energy = min(eco.energy_max, robot.energy + eco.solar_trickle * self.light_level)
+            gained = min(eco.energy_max, robot.energy + eco.solar_trickle * self.light_level)
+            robot.energy_ledger["solar"] += gained - robot.energy
+            robot.energy = gained
             robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover)
             if robot.energy >= eco.wake_energy:
                 robot.dormant = False
@@ -504,18 +512,23 @@ class World:
         exhausted = robot.fatigue >= eco.exhaustion_threshold
         if exhausted and not was_exhausted:
             self._emit("exhausted", robot)
-        drain = (
-            eco.basal_drain * (eco.rest_basal_mult if resting else 1.0)
-            + eco.move_cost * costs["moved"]
-            + eco.climb_cost * costs["climbed"]
-            + eco.signal_cost * float(np.abs(robot.signal).max())
-        )
+        parts = {
+            "basal": eco.basal_drain * (eco.rest_basal_mult if resting else 1.0),
+            "move": eco.move_cost * costs["moved"],
+            "climb": eco.climb_cost * costs["climbed"],
+            "signal": eco.signal_cost * float(np.abs(robot.signal).max()),
+        }
+        drain = sum(parts.values())
         if exhausted:
+            parts["exhaustion"] = drain * (eco.exhaustion_drain_mult - 1.0)
             drain *= eco.exhaustion_drain_mult
             robot.integrity = max(0.0, robot.integrity - eco.exhaustion_integrity_drain)
             robot.ledger["exhaustion"] += eco.exhaustion_integrity_drain
         if robot.in_water:
+            parts["water"] = drain * (eco.water_drain_mult - 1.0)
             drain *= eco.water_drain_mult
+        for cause, cost in parts.items():
+            robot.energy_ledger[cause] += cost
         robot.energy = max(0.0, robot.energy - drain)
         if costs["fall_damage"] > 0:
             fall = eco.fall_damage_per_block * costs["fall_damage"]
@@ -549,6 +562,7 @@ class World:
                 robot.integrity += amount
                 robot.energy -= amount * eco.repair_energy_per_point
                 robot.ledger["repaired"] += amount
+                robot.energy_ledger["repair"] += amount * eco.repair_energy_per_point
         if robot.energy <= 0.0 and not robot.dormant:
             robot.dormant = True
             self._emit("hibernate", robot)
@@ -600,6 +614,7 @@ class World:
                 robot,
                 age_ticks=robot.age_ticks,
                 ledger={k: round(v, 2) for k, v in robot.ledger.items()},
+                energy_ledger={k: round(v, 2) for k, v in robot.energy_ledger.items()},
             )
         if len(self.robots) > 1:
             physics.resolve_robot_overlaps(list(self.robots.values()))
