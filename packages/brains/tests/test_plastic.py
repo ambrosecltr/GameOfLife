@@ -118,27 +118,40 @@ def test_appetite_raises_arousal_when_hungry() -> None:
     assert off.introspect()["arousal"] == off.restlessness
 
 
-def test_rectified_gate_credits_escapes_only() -> None:
+def test_level_valence_signs() -> None:
+    """anima_06: M reads the felt LEVEL. Comfort is positive when fed (drive
+    below the neutral d_ref) and negative when hungry; viability is a standing
+    danger tax — zero when safe, negative near the floor, regardless of the
+    direction of travel (unlike the old rectified escape-gate)."""
     rng = np.random.default_rng(8)
     cfg = {
         **CFG,
-        "valence": {"viability": {"rectified": True}},
+        "valence": {"drive": {"d_ref": 0.40}, "viability": {"standing_gain": 0.5}},
         "genome": {**CFG["genome"], "enabled": False},
     }
     brain = PlasticBrain(cfg, seed=8)
-    # decline into danger (viability barrier rises): rectified gate stays silent
-    brain.act(obs_with_body(rng, energy=0.5))
-    brain.act(obs_with_body(rng, energy=0.05))
-    assert brain.introspect()["m_viability"] == 0.0
-    # escape from danger (barrier falls): consolidates positive
-    brain.act(obs_with_body(rng, energy=0.5))
-    assert brain.introspect()["m_viability"] > 0.0
 
-    # unrectified control feels the decline as negative
-    ctl = PlasticBrain({**CFG, "genome": {**CFG["genome"], "enabled": False}}, seed=8)
-    ctl.act(obs_with_body(rng, energy=0.5))
-    ctl.act(obs_with_body(rng, energy=0.05))
-    assert ctl.introspect()["m_viability"] < 0.0
+    # Fed body (energy 0.95, far above setpoint): drive ≈ 0 < d_ref → comfort > 0,
+    # and safely above the viability floor → standing tax silent.
+    brain.act(obs_with_body(rng, energy=0.95))
+    assert brain.introspect()["m_comfort"] > 0.0
+    assert brain.introspect()["m_viability"] == 0.0
+
+    # Hungry, in-danger body (energy 0.05): drive large > d_ref → comfort < 0,
+    # and below the lethal floor → standing tax fires negative.
+    brain.act(obs_with_body(rng, energy=0.05))
+    assert brain.introspect()["m_comfort"] < 0.0
+    assert brain.introspect()["m_viability"] < 0.0
+
+    # Standing tax is direction-independent: still negative while RECOVERING
+    # through the danger band (the old rectified gate would have gone positive).
+    brain.act(obs_with_body(rng, energy=0.10))
+    assert brain.introspect()["m_viability"] < 0.0
+
+    # standing_gain 0 (default) leaves viability out of M entirely.
+    off = PlasticBrain({**CFG, "genome": {**CFG["genome"], "enabled": False}}, seed=8)
+    off.act(obs_with_body(rng, energy=0.05))
+    assert off.introspect()["m_viability"] == 0.0
 
 
 def test_load_fills_genes_added_after_checkpoint() -> None:

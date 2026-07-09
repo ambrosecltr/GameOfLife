@@ -3,9 +3,16 @@
 Feeling gates learning instead of being maximized. Each act step:
 
   1. compute the neuromodulator `M` from the body's interoception — the shared
-     `gol_brains.feeling` signal: comfort drive-reduction PLUS the viability
-     barrier's reduction (mirrored for a gate — see the proposal: no value
-     function ⇒ no launchpad ⇒ the reduction form is the right survival teacher);
+     `gol_brains.feeling` LEVELS read directly (anima_06): comfort as satisfaction
+     relative to a neutral hunger level (`d_ref`), plus a standing viability tax.
+     A change-based M taught ~nothing (anima_05: comfort M negative on 99.9% of
+     steps, telescoped net-negative over a mortal life, and the rectified
+     viability gate was inert — m_viability ≡ 0 across 1.4M ticks) because a
+     plastic brain has no critic to integrate a stream of reductions back into a
+     value. So it reads the level: being fed is continuously positive, hunger and
+     danger continuously negative. Offline-screened (anima_valence_screen.py):
+     level return correlates +0.70 with mean energy and +0.4 with eating, where
+     the reduction form correlated −0.80 / −0.41 — it rewarded the opposite;
   2. consolidate the eligibility trace with `M` (crediting the previous step's
      activity, which produced this step's outcome);
   3. forward pass (encoder → GRU → readout), sample an action with heritable
@@ -93,6 +100,10 @@ class PlasticBrain(Brain):
         val = dict(cfg.get("valence", {}))
         drv = dict(val.get("drive", {}))
         self._comfort_gain0 = float(val.get("comfort_gain", 3.0))
+        # anima_06: the neutral hunger level where comfort valence crosses from
+        # reward (fed, d < d_ref) to punishment (hungry, d > d_ref). ~0.40 puts
+        # neutral just above the brownout floor (screened; see class docstring).
+        self.d_ref = float(drv.get("d_ref", 0.40))
         self.drive_pow_m = float(drv.get("pow_m", 3.0))
         self.drive_pow_n = float(drv.get("pow_n", 2.0))
         self._drive_setpoints = torch.tensor(
@@ -234,15 +245,16 @@ class PlasticBrain(Brain):
             ).unsqueeze(0)
             d = self._drive(proprio)
             v = self._viability(proprio)
-            if self._prev_d is not None and self._prev_v is not None:
-                m_comfort = self.comfort_gain * (self._prev_d - d)
-                red_v = self._prev_v - v
-                if self.via_rectified:
-                    red_v = max(red_v, 0.0)
-                m_via = self.viability_gain * red_v - self.standing_gain * v
-            else:
-                m_comfort = 0.0
-                m_via = 0.0
+            # Level valence (anima_06): the modulator reads the felt LEVEL, not
+            # its change. Comfort = satisfaction relative to the neutral hunger
+            # level d_ref (fed → positive, hungry → negative); viability enters
+            # as a standing danger tax (−standing_gain·v), which fires whenever
+            # energy/integrity are near the lethal floor — where the old
+            # rectified escape-gate was inert. Both are defined from the first
+            # step; the one-step-delayed consolidate() harmlessly no-ops on a
+            # fresh stream because the trace is zero after reset.
+            m_comfort = self.comfort_gain * (self.d_ref - d)
+            m_via = -self.standing_gain * v
             m = float(np.clip(self.mod_gain * (m_comfort + m_via), -self.m_clip, self.m_clip))
 
             # Consolidate the trace (activity that led to this outcome) BEFORE
