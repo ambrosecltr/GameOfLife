@@ -2,17 +2,18 @@
 
 Feeling gates learning instead of being maximized. Each act step:
 
-  1. compute the neuromodulator `M` from the body's interoception — the shared
-     `gol_brains.feeling` LEVELS read directly (anima_06): comfort as satisfaction
-     relative to a neutral hunger level (`d_ref`), plus a standing viability tax.
-     A change-based M taught ~nothing (anima_05: comfort M negative on 99.9% of
-     steps, telescoped net-negative over a mortal life, and the rectified
-     viability gate was inert — m_viability ≡ 0 across 1.4M ticks) because a
-     plastic brain has no critic to integrate a stream of reductions back into a
-     value. So it reads the level: being fed is continuously positive, hunger and
-     danger continuously negative. Offline-screened (anima_valence_screen.py):
-     level return correlates +0.70 with mean energy and +0.4 with eating, where
-     the reduction form correlated −0.80 / −0.41 — it rewarded the opposite;
+  1. compute the neuromodulator `M` as a PREDICTION ERROR (anima_07) from the
+     shared `gol_brains.feeling` levels: comfort `comfort_gain·(base_d − d)` and
+     viability `−standing_gain·(V − base_v)`, where `base_d`/`base_v` are running
+     EMA baselines of the felt levels. This is the interpolation between two
+     forms that each failed: reduction (Δfeeling; anima_05) telescoped net-
+     negative over a mortal life, and the uncentered level form (anima_06) became
+     a permanent −2.5 slab that pinned W_fast to the clip — a three-factor rule
+     reads a constant M as "always anti-consolidate" and just saturates. The
+     centered form is ~zero-mean (won't saturate) yet signed right: less hungry /
+     less endangered than my recent normal → +. Offline-screened
+     (anima_valence_screen.py): at a short baseline (~300 ticks) mean ≈ −0.08 and
+     corr(M, ΔenergyE) ≈ +0.42, where the level form sat at −2.5;
   2. consolidate the eligibility trace with `M` (crediting the previous step's
      activity, which produced this step's outcome);
   3. forward pass (encoder → GRU → readout), sample an action with heritable
@@ -100,10 +101,15 @@ class PlasticBrain(Brain):
         val = dict(cfg.get("valence", {}))
         drv = dict(val.get("drive", {}))
         self._comfort_gain0 = float(val.get("comfort_gain", 3.0))
-        # anima_06: the neutral hunger level where comfort valence crosses from
-        # reward (fed, d < d_ref) to punishment (hungry, d > d_ref). ~0.40 puts
-        # neutral just above the brownout floor (screened; see class docstring).
-        self.d_ref = float(drv.get("d_ref", 0.40))
+        self.d_ref = float(drv.get("d_ref", 0.40))  # UNUSED in the centered form (anima_07)
+        # anima_07: the modulator is a PREDICTION ERROR — the felt level minus a
+        # running baseline (EMA of recent feeling), half-life in ACT-STEPS. This
+        # keeps M ~zero-mean (the anima_06 level form was a permanent −2.5 slab
+        # that pinned W_fast to the clip; a three-factor rule reads a constant M
+        # as "always anti-consolidate" and just saturates). ~60 act-steps ≈ 300
+        # ticks at act_every 5 — screened as centered with corr(M, ΔE) ≈ +0.42.
+        self._base_halflife = float(val.get("baseline_halflife", 60.0))
+        self._base_alpha = 1.0 - 0.5 ** (1.0 / max(self._base_halflife, 1.0))
         self.drive_pow_m = float(drv.get("pow_m", 3.0))
         self.drive_pow_n = float(drv.get("pow_n", 2.0))
         self._drive_setpoints = torch.tensor(
@@ -167,6 +173,8 @@ class PlasticBrain(Brain):
         self.h = torch.zeros(1, self.hidden, device=self.device)
         self._prev_d: float | None = None
         self._prev_v: float | None = None
+        self._base_d: float | None = None  # running baseline (EMA) for centered M
+        self._base_v: float | None = None
         self._act_steps = 0
         self._life_return_comfort = 0.0
         self._life_return_via = 0.0
@@ -245,17 +253,19 @@ class PlasticBrain(Brain):
             ).unsqueeze(0)
             d = self._drive(proprio)
             v = self._viability(proprio)
-            # Level valence (anima_06): the modulator reads the felt LEVEL, not
-            # its change. Comfort = satisfaction relative to the neutral hunger
-            # level d_ref (fed → positive, hungry → negative); viability enters
-            # as a standing danger tax (−standing_gain·v), which fires whenever
-            # energy/integrity are near the lethal floor — where the old
-            # rectified escape-gate was inert. Both are defined from the first
-            # step; the one-step-delayed consolidate() harmlessly no-ops on a
-            # fresh stream because the trace is zero after reset.
-            m_comfort = self.comfort_gain * (self.d_ref - d)
-            m_via = -self.standing_gain * v
+            # Centered valence (anima_07): M is a PREDICTION ERROR — the felt
+            # level minus its own running baseline — so it is ~zero-mean and
+            # cannot saturate W_fast the way anima_06's uncentered level slab did.
+            # Comfort: less hungry than my recent normal → +; viability: more
+            # endangered than normal → −. Baselines seed on the first step of a
+            # stream (so that step's M is 0) and leak toward the current feeling.
+            if self._base_d is None or self._base_v is None:
+                self._base_d, self._base_v = d, v
+            m_comfort = self.comfort_gain * (self._base_d - d)
+            m_via = -self.standing_gain * (v - self._base_v)
             m = float(np.clip(self.mod_gain * (m_comfort + m_via), -self.m_clip, self.m_clip))
+            self._base_d += self._base_alpha * (d - self._base_d)
+            self._base_v += self._base_alpha * (v - self._base_v)
 
             # Consolidate the trace (activity that led to this outcome) BEFORE
             # this step's forward — one-step-delayed neuromodulated credit.
@@ -308,6 +318,8 @@ class PlasticBrain(Brain):
         self.net.reset_trace()
         self._prev_d = None
         self._prev_v = None
+        self._base_d = None  # baseline re-seeds on the first step of the new stream
+        self._base_v = None
         self._life_return_comfort = 0.0
         self._life_return_via = 0.0
 
@@ -339,6 +351,8 @@ class PlasticBrain(Brain):
             "h": self.h.detach().cpu(),
             "prev_d": self._prev_d,
             "prev_v": self._prev_v,
+            "base_d": self._base_d,
+            "base_v": self._base_v,
             "act_steps": self._act_steps,
             "life_return_comfort": self._life_return_comfort,
             "life_return_via": self._life_return_via,
@@ -355,6 +369,8 @@ class PlasticBrain(Brain):
         self.h = state["h"].to(self.device)
         self._prev_d = state["prev_d"]
         self._prev_v = state["prev_v"]
+        self._base_d = state.get("base_d")
+        self._base_v = state.get("base_v")
         self._act_steps = int(state.get("act_steps", 0))
         self._life_return_comfort = float(state.get("life_return_comfort", 0.0))
         self._life_return_via = float(state.get("life_return_via", 0.0))

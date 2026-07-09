@@ -1,0 +1,74 @@
+# anima_07 — the centered-valence round. BRAIN-ONLY change vs anima_06: the
+# plastic modulator M is now a PREDICTION ERROR (felt level minus a running
+# baseline), not the raw level.
+#
+# anima_06 (level valence) broke in a diagnostic way: the level form is
+# uncentered, so a never-foraging population sitting chronically below neutral
+# turned M into a permanent −2.46 slab that PINNED the fast weights to the clip
+# (w_fast_norm 0.02 → ~1.2). A three-factor Hebbian rule can only teach from a
+# ~zero-mean signal. reduction was implicitly centered but misdirected
+# (telescopes negative, anima_05); level is directed but uncentered. The right
+# form is a prediction error — level minus a running baseline — which is centered
+# by construction yet still signed right.
+#
+# Offline screen (scripts/anima_valence_screen.py ROAD-1, on the anima_06 saves):
+# at a short baseline (~300 ticks) M is ~zero-mean (−0.08 vs level's −2.46),
+# swings both ways (34% positive), and corr(M, Δenergy) ≈ +0.42.
+#
+# The world, population, and reproduction are held FIXED (identical to anima_05/
+# 06, copied so the round freezes independently). Only the brain yaml changed:
+# valence.baseline_halflife 60 (act-steps ≈ 300 ticks). tau stays 120.
+#
+# RUN BOTH ARMS: anima_07 (this) + anima_07_frozen. The plastic-vs-frozen verdict
+# now has a signal that is both centered (won't saturate) and correctly signed.
+#
+# MECHANICAL HEALTH METRICS to watch (the failure modes of the last two rounds):
+#   - w_fast_norm — must stay ≪ clip 2.0 (anima_06 pinned it at ~1.2). If it
+#     climbs toward the clip, the signal is still too hot: shorten baseline_
+#     halflife or lower alpha.
+#   - frac(m_comfort > 0) — must be well off 0 (anima_06 was ~1%). A centered
+#     signal should sit near ~35-45% positive.
+# HONEST CAVEAT (journal anima/006 close): centering yields the best-conditioned
+# signal available but cannot GUARANTEE foraging bootstraps on a never-recovering
+# population. If it still can't start, the next lever is the world or the critic
+# fork, not more valence tuning.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/anima_07 \
+#       --config configs/run/anima_07.yaml --headless
+# (omit --headless to watch live in rerun. Fresh founder population — OBS v5.)
+
+world_config: configs/world/anima_07.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7322            # anima_06 7320 / 06_frozen 7321
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 48                  # 42 plastic + 6 forager (the cap budding fills toward)
+  respawn_delay_ticks: 1200   # only used for the forager anchor + the extinction floor
+  inherit_weights: random_living
+  mix:
+    - brain: configs/brain/anima_07_plastic.yaml
+      count: 42
+    - brain: { kind: scripted_forager }
+      count: 6                # fixed anchor — foragers don't bud, respawn to count
+
+reproduction:
+  mode: budding               # earned, endogenous reproduction (proposal 004)
+  thrive_energy: 75.0         # > wake 38; one meal from a 38 wake = 78 > 75 (an earned bud)
+  thrive_integrity: 70.0      # an intact, well-lived body
+  min_bud_age: 20000          # ~a sim-day: no budding as a juvenile
+  bud_cooldown: 15000         # ticks between a parent's buds
+  bud_cost_energy: 40.0       # reproduction spends the parent's surplus (= one meal)
+  bud_cost_integrity: 5.0     # and a little of its body
+  floor: 4                    # emergency respawn if plastic falls below this (extinction guard)
+
+observability:
+  rerun: false                # headless background run; flip on (+ drop --headless) to watch
+  rerun_memory_limit: "2GB"
+  metrics_every_ticks: 100

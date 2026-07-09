@@ -1,0 +1,100 @@
+# anima_07_plastic — the CENTERED-VALENCE fix. The single change vs anima_06 is
+# how M is centered: it is now a PREDICTION ERROR (felt level minus a running
+# baseline), not the raw level.
+#
+# anima_06 (level valence) failed in a new, diagnostic way. The direction was
+# right (fed → +M) but the level form is UNCENTERED: because the population still
+# never forages, it lives chronically below the neutral d_ref, so M became a
+# permanent negative SLAB (comfort −99% of steps, viability tax −100%, combined
+# mean −2.46) and — mis-scaled ~1000× for the rule's alpha — PINNED the fast
+# weights to the clip (w_fast_norm 0.02 → ~1.2 of 2.0). A three-factor Hebbian
+# rule reads a constant M as "always anti-consolidate" and just saturates; it can
+# only teach from a ~zero-mean signal. Evolution confirmed the harm (viability_
+# gain −31%, alpha −16%: selection switching the apparatus off).
+#
+# The lesson: reduction (Δfeeling) is implicitly centered but misdirected
+# (telescopes net-negative over a mortal life, anima_05); level is directed but
+# uncentered (saturates, anima_06). The right neuromodulator for a three-factor
+# rule is a PREDICTION ERROR — level minus an expectation — which is what
+# dopamine is. anima_07 makes the baseline that expectation:
+#
+#   M_comfort = comfort_gain · (base_d − d)        # less hungry than my normal → +
+#   M_via     = −standing_gain · (V − base_v)      # more endangered than normal → −
+#   base_x   ← EMA of the felt level, half-life `baseline_halflife` act-steps
+#
+# reduction ≈ baseline_halflife→0 ; level ≈ →∞. Offline-screened
+# (scripts/anima_valence_screen.py ROAD-1, on the anima_06 saves): at a SHORT
+# baseline (~300 ticks = 60 act-steps at act_every 5) M is ~zero-mean (−0.08 vs
+# level's −2.46), swings both ways (34% positive), and points the right way —
+# corr(M, Δenergy) ≈ +0.42. Longer baselines collapse back toward the slab.
+#
+# The single change vs anima_06:
+#   valence.baseline_halflife 60  — EMA half-life (act-steps) of the feeling
+#                                   baseline. d_ref is now UNUSED (the baseline is
+#                                   the moving neutral). standing_gain 0.5 stays
+#                                   (now a centered danger error, gene-scaled).
+#
+# HONEST CAVEAT (see journal anima/006 close): on a never-recovering population
+# no baseline length is both centered AND sensitive to sustained hunger — a short
+# baseline works only by forgetting the chronic decline. So this is the best-
+# conditioned signal available, not a guarantee of foraging. WATCH w_fast_norm
+# (must stay ≪ clip 2, unlike anima_06's 1.2) and frac(M>0) (must be well off 0).
+# If it still can't start, the critic/world fork is the honest next step.
+#
+# Frozen control: anima_07_frozen.yaml (plasticity OFF, centered valence ON).
+
+kind: plastic
+
+core:
+  hidden: 256                  # small GRU; no world model to size
+
+plasticity:
+  enabled: true                # false = the frozen-net control, see anima_07_frozen.yaml
+  alpha: 0.1                   # base plasticity coefficient (per-layer alpha is a gene)
+  tau: 120.0                   # credit window 600 ticks (the eligibility trace; distinct from
+                               # the valence baseline below — trace = "what did I do", baseline
+                               # = "what's my normal feeling")
+  decay: 1.0e-4                # meal engrams outlive the drain cycle (engram half-life ~35k ticks)
+  w_clip: 2.0                  # |W_fast| clip — keeps a fully-plastic net finite
+
+restlessness: 0.2              # motor-noise scale + discrete-exploration floor (a gene)
+appetite_gain: 2.0             # hunger scales restlessness ~1×(sated)→~2×(starving); a gene
+
+# --- the feeling signal M — CENTERED valence (anima_07): a prediction error ---
+valence:
+  comfort_gain: 3.0            # weight on comfort prediction error (base_d − d) in M
+  baseline_halflife: 60.0      # ROUND-anima_07: EMA half-life of the feeling baseline, in
+                               # act-steps (~300 ticks at act_every 5); screened as centered
+  drive:                       # Keramati–Gutkin comfort drive (shared feeling.drive_level)
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    integrity_setpoint: 1.0
+    rested_setpoint: 1.0
+    energy_weight: 1.0
+    integrity_weight: 1.0
+    rest_weight: 0.5
+    d_ref: 0.40                # UNUSED in the centered form (the baseline is the moving neutral)
+  viability:                   # log-barrier to the LETHAL floor (shared feeling.viability)
+    rectified: true            # UNUSED in the centered form (kept for config parity)
+    viability_gain: 3.0        # UNUSED in the centered form
+    standing_gain: 0.5         # weight on the viability prediction error −(V − base_v); gene-scaled
+    barrier_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  modulator:
+    gain: 1.0                  # global M gain (a gene)
+    clip: 5.0                  # |M| clamp — stability guard
+
+genome:
+  enabled: true
+  sigma: 0.25                  # founder diversity (log-stddev over gene multipliers)
+  mutation_sigma: 0.1          # gene drift on inherit
+  weight_mutation_sigma: 0.05  # innate W_slow jitter on inherit (evolvable wiring)
+
+# genome = Darwinian (reinit W_fast on inherit); lineage = Lamarckian (carry W_fast).
+inherit_mode: genome

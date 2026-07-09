@@ -100,6 +100,32 @@ def m_level(d: np.ndarray, V: np.ndarray, d_ref: float, via_gain: float) -> np.n
     return COMFORT_GAIN * (d_ref - d) - via_gain * V
 
 
+def ema_prev(x: np.ndarray, half_life_ticks: float, snap_ticks: int = 100) -> np.ndarray:
+    """Running baseline: EMA of x up to the PREVIOUS step (so M compares the
+    current feeling to what came before, not to itself). half_life in ticks;
+    the metrics cadence is snap_ticks per sample."""
+    a = 1.0 - 0.5 ** (snap_ticks / max(half_life_ticks, 1.0))
+    base = np.empty_like(x)
+    ema = x[0]
+    for t in range(len(x)):
+        base[t] = ema  # baseline = EMA of everything strictly before t (seeded at x[0])
+        ema = ema + a * (x[t] - ema)
+    return base
+
+
+def m_centered(
+    d: np.ndarray, V: np.ndarray, half_life_ticks: float, via_gain: float
+) -> np.ndarray:
+    """Centered (prediction-error) M — the 'better-or-worse-than-usual' form.
+    Comfort and viability are each measured against their own running baseline,
+    so the modulator is ~zero-mean by construction (won't saturate W_fast) yet
+    still signed the right way: less hungry / less endangered than my recent
+    normal → positive. reduction is this with half_life→0; level is half_life→∞."""
+    base_d = ema_prev(d, half_life_ticks)
+    base_V = ema_prev(V, half_life_ticks)
+    return COMFORT_GAIN * (base_d - d) - via_gain * (V - base_V)
+
+
 def pearson(a: list[float], b: list[float]) -> float:
     if len(a) < 3 or np.std(a) < 1e-9 or np.std(b) < 1e-9:
         return float("nan")
@@ -181,6 +207,53 @@ def screen(save: Path, d_refs: list[float], via_gain: float) -> None:
         "\nreading: pick the smallest d_ref where fed>0 and starving<0 with the "
         "strongest corr(ret,E)/corr(ret,eat) — that is the neutral point that rewards\n"
         "staying fed (foraging) without paying agents merely to exist.\n"
+    )
+
+    screen_centered(energy, d_by, V_by, eats, via_gain)
+
+
+def screen_centered(
+    energy: dict[str, np.ndarray],
+    d_by: dict[str, np.ndarray],
+    V_by: dict[str, np.ndarray],
+    eats: Counter[str],
+    via_gain: float,
+    half_lives: tuple[float, ...] = (300, 1000, 3000, 10000, 30000, 100000),
+) -> None:
+    """Road 1 — the centered ('better/worse than usual') modulator. The health
+    bar a Hebbian gate needs: ~zero-mean (won't saturate W_fast), a gentle scale
+    (|M| in the ~0.01-0.1 range the rule's alpha expects, NOT the level form's
+    ~2.5 that pinned w_fast to the clip), BOTH signs visited, and — the teaching
+    check — M rises when energy rises: corr(M, ΔE) > 0."""
+    print("── ROAD 1  centered modulator: M vs a running baseline (half-life sweep) ──")
+    print("  reduction ≈ half-life→0 ; level (anima_06) ≈ half-life→∞\n")
+    print(
+        f"{'HL(ticks)':>10}{'mean':>9}{'std':>8}{'max|M|':>9}"
+        f"{'frac>0':>8}{'corr(M,ΔE)':>12}{'corr(ret,eat)':>14}"
+    )
+    for hl in half_lives:
+        allM, alldE = [], []
+        ret, ea = [], []
+        for rid in energy:
+            m = m_centered(d_by[rid], V_by[rid], hl, via_gain)
+            dE = np.zeros_like(energy[rid])
+            dE[1:] = np.diff(energy[rid])
+            allM.append(m)
+            alldE.append(dE)
+            ret.append(float(m.sum()))
+            ea.append(eats.get(rid, 0))
+        M = np.concatenate(allM)
+        dEc = np.concatenate(alldE)
+        print(
+            f"{hl:>10.0f}{M.mean():>+9.3f}{M.std():>8.3f}{np.abs(M).max():>9.2f}"
+            f"{np.mean(M > 0):>8.0%}{pearson(list(M), list(dEc)):>12.2f}"
+            f"{pearson(ret, ea):>14.2f}"
+        )
+    print(
+        "\nreading: want mean≈0, a modest std/max (headroom under w_clip 2), frac>0 near\n"
+        "half, and corr(M,ΔE) clearly positive — a signal that swings both ways and points\n"
+        "at 'energy went up'. Pick the shortest half-life that already has corr(M,ΔE) high;\n"
+        "too long collapses toward the level form's saturation.\n"
     )
 
 

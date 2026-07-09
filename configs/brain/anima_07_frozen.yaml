@@ -1,0 +1,68 @@
+# anima_07_frozen — the frozen-net CONTROL for anima_07 (centered-valence round).
+# Identical to anima_07_plastic.yaml — centered/prediction-error valence
+# (baseline_halflife 60, standing danger error 0.5), long tau, appetite ON —
+# except plasticity is OFF (W_fast never moves). Appetite is innate body design
+# so it stays in both arms; the pair isolates what within-life plasticity adds
+# now that the modulator is finally centered (see anima_07_plastic.yaml header).
+#
+# The bar anima_03/04/05/06 all deferred: plastic > frozen on eating-while-hungry,
+# now with a signal that is centered (won't saturate) AND signed right
+# (corr(M, Δenergy) ≈ +0.42 in the screen). If plastic ≈ frozen AGAIN even with a
+# well-conditioned signal, that is a strong statement about the Hebbian rule's
+# ceiling → the critic fork.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/anima_07_frozen \
+#       --config configs/run/anima_07_frozen.yaml --headless
+
+kind: plastic
+
+core:
+  hidden: 256                  # small GRU; no world model to size
+
+plasticity:
+  enabled: false               # FROZEN CONTROL: pure evolved reflex (genome + W_slow), W_fast never moves
+  alpha: 0.1                   # base plasticity coefficient (per-layer alpha is a gene)
+  tau: 120.0                   # matches the plastic arm (credit window 600)
+  decay: 1.0e-4                # meal engrams outlive the drain cycle (unused when frozen)
+  w_clip: 2.0                  # |W_fast| clip — keeps a fully-plastic net finite
+
+restlessness: 0.2              # motor-noise scale + discrete-exploration floor (a gene)
+appetite_gain: 2.0             # hunger scales restlessness ~1×(sated)→~2×(starving); a gene
+
+# --- the feeling signal M — CENTERED valence (anima_07): a prediction error ---
+valence:
+  comfort_gain: 3.0            # weight on comfort prediction error (base_d − d) in M
+  baseline_halflife: 60.0      # EMA half-life of the feeling baseline, in act-steps (~300 ticks)
+  drive:                       # Keramati–Gutkin comfort drive (shared feeling.drive_level)
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    integrity_setpoint: 1.0
+    rested_setpoint: 1.0
+    energy_weight: 1.0
+    integrity_weight: 1.0
+    rest_weight: 0.5
+    d_ref: 0.40                # UNUSED in the centered form (the baseline is the moving neutral)
+  viability:                   # log-barrier to the LETHAL floor (shared feeling.viability)
+    rectified: true            # UNUSED in the centered form (kept for config parity)
+    viability_gain: 3.0        # UNUSED in the centered form
+    standing_gain: 0.5         # weight on the viability prediction error −(V − base_v); gene-scaled
+    barrier_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  modulator:
+    gain: 1.0                  # global M gain (a gene)
+    clip: 5.0                  # |M| clamp — stability guard
+
+genome:
+  enabled: true
+  sigma: 0.25                  # founder diversity (log-stddev over gene multipliers)
+  mutation_sigma: 0.1          # gene drift on inherit
+  weight_mutation_sigma: 0.05  # innate W_slow jitter on inherit (evolvable wiring)
+
+# genome = Darwinian (reinit W_fast on inherit); lineage = Lamarckian (carry W_fast).
+inherit_mode: genome

@@ -118,39 +118,47 @@ def test_appetite_raises_arousal_when_hungry() -> None:
     assert off.introspect()["arousal"] == off.restlessness
 
 
-def test_level_valence_signs() -> None:
-    """anima_06: M reads the felt LEVEL. Comfort is positive when fed (drive
-    below the neutral d_ref) and negative when hungry; viability is a standing
-    danger tax — zero when safe, negative near the floor, regardless of the
-    direction of travel (unlike the old rectified escape-gate)."""
-    rng = np.random.default_rng(8)
-    cfg = {
-        **CFG,
-        "valence": {"drive": {"d_ref": 0.40}, "viability": {"standing_gain": 0.5}},
-        "genome": {**CFG["genome"], "enabled": False},
-    }
-    brain = PlasticBrain(cfg, seed=8)
+def test_centered_valence_prediction_error() -> None:
+    """anima_07: M is a PREDICTION ERROR — the felt level minus a running
+    baseline. The first step of a stream seeds the baseline (so M ≈ 0), and
+    afterwards M is signed by whether the body is better or worse than its recent
+    normal, not by an absolute setpoint: getting hungrier than baseline → −,
+    recovering above baseline → +."""
 
-    # Fed body (energy 0.95, far above setpoint): drive ≈ 0 < d_ref → comfort > 0,
-    # and safely above the viability floor → standing tax silent.
-    brain.act(obs_with_body(rng, energy=0.95))
-    assert brain.introspect()["m_comfort"] > 0.0
-    assert brain.introspect()["m_viability"] == 0.0
+    def cfg(**valence: Any) -> dict[str, Any]:
+        return {
+            **CFG,
+            "valence": {"viability": {"standing_gain": 0.5}, **valence},
+            "genome": {**CFG["genome"], "enabled": False},
+        }
 
-    # Hungry, in-danger body (energy 0.05): drive large > d_ref → comfort < 0,
-    # and below the lethal floor → standing tax fires negative.
-    brain.act(obs_with_body(rng, energy=0.05))
-    assert brain.introspect()["m_comfort"] < 0.0
-    assert brain.introspect()["m_viability"] < 0.0
+    # First step of a stream seeds the baseline to itself → M ≈ 0 (nothing to
+    # compare against yet), regardless of how hungry the body is.
+    b0 = PlasticBrain(cfg(), seed=8)
+    b0.act(obs_with_body(rng := np.random.default_rng(8), energy=0.05))
+    assert abs(b0.introspect()["m_comfort"]) < 1e-6
+    assert abs(b0.introspect()["m_viability"]) < 1e-6
 
-    # Standing tax is direction-independent: still negative while RECOVERING
-    # through the danger band (the old rectified gate would have gone positive).
-    brain.act(obs_with_body(rng, energy=0.10))
-    assert brain.introspect()["m_viability"] < 0.0
+    # Fed baseline, then a drop into hunger/danger → worse than normal → M < 0.
+    fell = PlasticBrain(cfg(), seed=8)
+    fell.act(obs_with_body(rng, energy=0.95))  # seed baseline high/safe
+    fell.act(obs_with_body(rng, energy=0.05))
+    assert fell.introspect()["m_comfort"] < 0.0
+    assert fell.introspect()["m_viability"] < 0.0  # more danger than baseline
+
+    # Hungry/endangered baseline, then RECOVERY → better than normal → M > 0.
+    # (The anima_06 standing tax would have stayed negative here; centering lets
+    # escaping danger read positive.)
+    rose = PlasticBrain(cfg(), seed=8)
+    rose.act(obs_with_body(rng, energy=0.05))  # seed baseline low/in-danger
+    rose.act(obs_with_body(rng, energy=0.95))
+    assert rose.introspect()["m_comfort"] > 0.0
+    assert rose.introspect()["m_viability"] > 0.0  # less danger than baseline
 
     # standing_gain 0 (default) leaves viability out of M entirely.
     off = PlasticBrain({**CFG, "genome": {**CFG["genome"], "enabled": False}}, seed=8)
     off.act(obs_with_body(rng, energy=0.05))
+    off.act(obs_with_body(rng, energy=0.95))
     assert off.introspect()["m_viability"] == 0.0
 
 
