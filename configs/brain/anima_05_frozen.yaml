@@ -1,0 +1,89 @@
+# anima_05_frozen — VERBATIM copy of anima_03_frozen.yaml (brain unchanged since
+# anima_03). anima_05 is the economy-and-senses pass (world-only changes: water
+# tax, in-water sense, recharge). Frozen control arm — plasticity OFF, appetite
+# ON — for the plastic-vs-frozen verdict anima_03/04 both deferred.
+# Copied so the round's configs freeze independently (configs/README).
+#
+# anima_03_frozen — the frozen-net CONTROL for anima_03 (P3 pattern from
+# anima_01): identical to anima_03_plastic.yaml — appetite, rectified gate,
+# slow decay, long tau all present — except plasticity is OFF. Appetite is
+# innate body design so it stays in both arms; the pair isolates what within-
+# life plasticity (W_fast) adds on top of the evolved reflex now that the
+# anima_02 blockers are removed. (Original rationale below.)
+#
+# anima_02's inversion probe proved the comfort channel behaviorally INERT:
+# flipping the felt hunger sign changed nothing, because (1) the teaching event
+# (eating while hungry) ~never occurred (27-43 per run), (2) the meal engram
+# decayed (decay 1e-3 ⇒ ~3.5k-tick half-life) before hunger recurred (~10k+
+# ticks), (3) the eligibility trace (tau 20 acts = 100 ticks) credited only the
+# final grip, never the approach, and (4) the unrectified viability gate ran
+# net-negative over awake life (life_return_via −11..−33) — decline felt,
+# recovery hidden behind the dormancy stream reset — anti-consolidating
+# whatever a starving agent was doing. This config removes blockers 1-4 (the
+# world config widens the wake corridor for 1's other half):
+#
+#   appetite_gain 2.0      — hunger scales restlessness (search effort) innately;
+#                            the STRENGTH is a gene, so selection can tune or
+#                            zero it. Generates the hungry-meal events the
+#                            Hebbian rule needs (a rule can only reinforce
+#                            behavior that occurs).
+#   plasticity.decay 1e-4  — engram half-life ~35k ticks: a meal memory now
+#                            outlives the sated→hungry drain cycle.
+#   plasticity.tau 60      — credit window 300 ticks: spans an approach to a
+#                            bush, not just the final EAT grip.
+#   viability.rectified    — consolidate escapes only; don't bleed (anti-
+#                            consolidate) on the slow slide toward brownout.
+#
+# Everything else is anima_01_plastic verbatim. Flagship arm:
+# anima_03_plastic.yaml (identical except plasticity.enabled true).
+
+kind: plastic
+
+core:
+  hidden: 256                  # small GRU; no world model to size
+
+plasticity:
+  enabled: false               # FROZEN CONTROL: pure evolved reflex (genome + W_slow), W_fast never moves
+  alpha: 0.1                   # base plasticity coefficient (per-layer alpha is a gene)
+  tau: 60.0                    # ROUND-anima_03: was 20 — credit spans the approach (~300 ticks)
+  decay: 1.0e-4                # ROUND-anima_03: was 1e-3 — meal engrams outlive the drain cycle
+  w_clip: 2.0                  # |W_fast| clip — keeps a fully-plastic net finite
+
+restlessness: 0.2              # motor-noise scale + discrete-exploration floor (a gene)
+appetite_gain: 2.0             # ROUND-anima_03: drive scales restlessness ~1×(sated)→~2×(starving); a gene
+
+# --- the feeling signal M, forked from beta_11 (comfort drive + viability barrier) ---
+valence:
+  comfort_gain: 3.0            # weight on comfort drive-reduction (signed) in M
+  drive:                       # Keramati–Gutkin comfort drive (verbatim from beta_11)
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    integrity_setpoint: 1.0
+    rested_setpoint: 1.0
+    energy_weight: 1.0
+    integrity_weight: 1.0
+    rest_weight: 0.5
+  viability:                   # log-barrier to the LETHAL floor (from beta_11)
+    rectified: true            # ROUND-anima_03: credit escapes only (see header)
+    viability_gain: 3.0        # reduction gate ON — the survival teacher
+    standing_gain: 0.0         # standing danger tax ~0 (beta's operating point; an ablation here)
+    barrier_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  modulator:
+    gain: 1.0                  # global M gain (a gene)
+    clip: 5.0                  # |M| clamp — stability guard
+
+genome:
+  enabled: true
+  sigma: 0.25                  # founder diversity (log-stddev over gene multipliers)
+  mutation_sigma: 0.1          # gene drift on inherit
+  weight_mutation_sigma: 0.05  # innate W_slow jitter on inherit (evolvable wiring)
+
+# genome = Darwinian (reinit W_fast on inherit); lineage = Lamarckian (carry W_fast).
+inherit_mode: genome

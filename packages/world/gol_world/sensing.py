@@ -237,6 +237,8 @@ def _proprio(
         out[17] = 1.0 - 0.5 ** (robot.age_ticks / senescence_halflife)
     else:
         out[17] = 0.0
+    # v5: submersion — the felt half of the water hazard (drain is the other half).
+    out[18] = 1.0 if robot.in_water else 0.0
     return out
 
 

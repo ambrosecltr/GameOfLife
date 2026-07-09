@@ -12,8 +12,9 @@ device assumptions beyond the input tensor's. Each works on any leading batch/ti
 shape; the drive/viability reduce over the last (feature) dimension.
 
 Proprio layout: index 5 = energy, 6 = integrity, 14 = fatigue (stable across
-OBS_VERSION 3→4; v4 only appends senescence at index 17). All are "higher is
-better" except fatigue (restedness = 1 - fatigue).
+OBS_VERSION 3→5; v4 appended senescence at 17, v5 appended in-water at 18 —
+both leave the earlier indices untouched). All are "higher is better" except
+fatigue (restedness = 1 - fatigue).
 """
 
 from __future__ import annotations

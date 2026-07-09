@@ -21,7 +21,12 @@ import numpy.typing as npt
 # how worn/old it is (0 young → 1 aged, = 1 − repair efficiency). The literal
 # substrate for "time awareness": the agent can feel its finite life running
 # down the way it feels hunger. We never say what it means; behaviour discovers it.
-OBS_VERSION = 4
+# v5 (anima_05): one proprio channel for SUBMERSION — 1.0 while the body is in
+# water, else 0.0 (index 18). Water is the biggest single energy drain in the
+# world (anima_04 ledger: ~26% of plastic spend) but was only indirectly visible
+# as a blue ray tint; this makes the felt hazard interoceptive so avoiding it is
+# learnable. As always the drain teaches; the channel only informs.
+OBS_VERSION = 5
 
 # Ray hit kinds: an animacy channel, not a semantic oracle. Blocks are told
 # apart only by color; other robots stay perceptually salient as "alive".
@@ -34,7 +39,8 @@ NUM_RAY_KINDS = 4
 # Per-ray features: depth, r, g, b, kind one-hot.
 RAY_DIM = 1 + 3 + NUM_RAY_KINDS
 
-PROPRIO_DIM = 18  # v4: +1 for the senescence channel (index 17)
+PROPRIO_DIM = 19  # v5: +1 for the in-water channel (index 18); v4 senescence at 17
+IN_WATER_IDX = 18  # proprio index of the submersion channel (v5)
 SOUND_DIM = 4
 EVENTS_DIM = 4
 SIGNAL_DIM = 2

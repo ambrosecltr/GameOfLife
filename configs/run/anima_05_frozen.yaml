@@ -1,0 +1,46 @@
+# anima_05_frozen — the frozen-net CONTROL arm for anima_05. Identical world
+# (economy-and-senses pass), population, and reproduction; only the brain yaml
+# differs (plasticity OFF, appetite ON — innate design stays in both arms).
+# The bar: plastic > frozen on eating-while-hungry in a world where hungry
+# meals are reachable AND water is sensable. anima_03 and anima_04 both deferred
+# this verdict; anima_05 issues it. See configs/run/anima_05.yaml for rationale.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/anima_05_frozen \
+#       --config configs/run/anima_05_frozen.yaml --headless
+
+world_config: configs/world/anima_05.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7319            # anima_05 flagship is 7318
+
+devices:
+  inference: cpu
+  learning: cpu
+
+population:
+  target: 48                  # 42 plastic + 6 forager (the cap budding fills toward)
+  respawn_delay_ticks: 1200   # only used for the forager anchor + the extinction floor
+  inherit_weights: random_living
+  mix:
+    - brain: configs/brain/anima_05_frozen.yaml
+      count: 42
+    - brain: { kind: scripted_forager }
+      count: 6                # fixed anchor — foragers don't bud, respawn to count
+
+reproduction:
+  mode: budding               # earned, endogenous reproduction (proposal 004)
+  # thrive_energy 75 stays above wake_energy 38; one meal from a 38 wake clears it.
+  thrive_energy: 75.0
+  thrive_integrity: 70.0      # an intact, well-lived body
+  min_bud_age: 20000          # ~a sim-day: no budding as a juvenile
+  bud_cooldown: 15000         # ticks between a parent's buds
+  bud_cost_energy: 40.0       # reproduction spends the parent's surplus (= one meal)
+  bud_cost_integrity: 5.0     # and a little of its body
+  floor: 4                    # emergency respawn if plastic falls below this (extinction guard)
+
+observability:
+  rerun: false                # headless background run; flip on (+ drop --headless) to watch
+  rerun_memory_limit: "2GB"
+  metrics_every_ticks: 100

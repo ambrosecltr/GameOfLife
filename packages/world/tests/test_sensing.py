@@ -175,6 +175,16 @@ def test_proprio_carries_gaze() -> None:
     np.testing.assert_allclose(proprio[16], -0.25, atol=1e-6)
 
 
+def test_proprio_carries_in_water() -> None:
+    grid = scene()
+    robot = Robot(id="a", pos=np.array([8.5, 8.5, 1.0]), yaw=0.0, brain_name="t")
+    dry = observe(grid.blocks, [robot], light_level=1.0)["a"]["proprio"]
+    assert dry[18] == 0.0  # IN_WATER_IDX
+    robot.in_water = True
+    wet = observe(grid.blocks, [robot], light_level=1.0)["a"]["proprio"]
+    assert wet[18] == 1.0
+
+
 def test_dormant_robot_seen_not_seeing() -> None:
     grid = scene()
     viewer = Robot(id="a", pos=np.array([4.5, 8.5, 1.0]), yaw=0.0, brain_name="t")
