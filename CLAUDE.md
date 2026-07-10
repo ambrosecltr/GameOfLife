@@ -13,8 +13,12 @@ into "episodic RL training pipeline." These rules exist so that never happens ag
 1. **One persistent world.** No episodes, no `reset()`, no episode counters, no Gym API,
    no task registry, no train/deploy split. If a change introduces any of these
    concepts, it is wrong.
-2. **No designer-assigned tasks or fitness functions.** Behavior comes only from
-   intrinsic drives (curiosity + homeostasis). Reward shaping toward a task is drift.
+2. **Open-ended evolvability without a fixed objective.** No externally assigned task
+   reward, goal label, behavioral script, demonstration, pretrained skill, or designer
+   fitness score. Prediction, self-generated reachability/controllability, bodily
+   interoception, physical mortality, and differential reproduction are legitimate
+   mechanisms of the simulated reality. Shaping any of them toward a named behavior is
+   drift.
 3. **Every milestone ends with the world running and observable.** No
    infrastructure-only phases.
 4. **World and brains checkpoint together** at the same tick, atomically. Resume must

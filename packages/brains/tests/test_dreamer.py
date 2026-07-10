@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
 from gol_brains.dreamer.brain import ACTION_DIM, CONT_DIM, DreamerBrain
 from gol_brains.dreamer.networks import TwoHot, symexp, symlog
 from gol_brains.dreamer.rssm import RSSM, RSSMConfig
@@ -176,6 +177,22 @@ def test_viability_barrier_zero_when_safe_rises_toward_floor() -> None:
     mild = brain._viability(brain._obs_to_tensors(body_obs(rng, 0.10, 0.9))["proprio"])
     dire = brain._viability(brain._obs_to_tensors(body_obs(rng, 0.02, 0.9))["proprio"])
     assert 0.0 < float(mild[0]) < float(dire[0]) <= brain.via_barrier_cap + 1e-5
+
+
+def test_viability_total_cap_applies_after_component_sum() -> None:
+    cfg = {
+        **TINY,
+        "reward": {
+            **DRIVE,
+            "viability": {**VIA, "total_cap": 4.0},
+        },
+    }
+    brain = DreamerBrain(cfg, seed=39)
+    rng = np.random.default_rng(39)
+    both_dire = brain._viability(
+        brain._obs_to_tensors(body_obs(rng, energy=0.0, integrity=0.0))["proprio"]
+    )
+    assert float(both_dire[0]) == pytest.approx(4.0)
 
 
 def test_viability_reward_rewards_escaping_the_boundary() -> None:
@@ -612,6 +629,10 @@ def test_lp_brain_learns_with_boredom() -> None:
         "boredom_dull_gate",
     ):
         assert key in metrics and np.isfinite(metrics[key]), key
+    resumed = DreamerBrain(cfg, seed=44)
+    resumed.load_state_dict(brain.state_dict())
+    assert resumed._active_skill == brain._active_skill
+    assert resumed.critic[-1].weight.shape == brain.critic[-1].weight.shape
     assert metrics["lp_regions"] >= 1
     assert 0.0 <= metrics["lp_occ_entropy"] <= 1.0
     assert 0.0 <= metrics["lp_stale_frac"] <= 1.0
@@ -725,14 +746,14 @@ def test_lp_mix_anneals_with_age() -> None:
     assert legacy._lp_mix() == legacy.lp_mix_disagreement
 
 
-def test_boredom_pressure_accumulates_and_resets() -> None:
+def test_boredom_pressure_follows_lived_chronology_and_resets() -> None:
     cfg = dict(
         TINY,
         reward={
             "homeostasis": "drive",
             "boredom": {
-                # Wide-open gates: all experience is calm and dull, so the
-                # integrator charges at pressure_rise per learn().
+                # Wide-open gates: once learning publishes a low-stimulation
+                # estimate, subsequent lived steps are calm and dull.
                 "weight": 1.0,
                 "stim_threshold": 100.0,
                 "drive_threshold": 100.0,
@@ -753,11 +774,15 @@ def test_boredom_pressure_accumulates_and_resets() -> None:
     for _ in range(80):
         brain.act(fake_obs(rng))
     m1 = brain.learn()
-    assert m1 is not None and m1["boredom_pressure"] > 0.0
-    m2 = brain.learn()
-    assert m2 is not None and m2["boredom_pressure"] > m1["boredom_pressure"], (
-        "sustained dull safety must build pressure"
+    assert m1 is not None and m1["boredom_pressure"] == 0.0, (
+        "replaying past experience must not advance a chronological mood"
     )
+    for _ in range(10):
+        brain.act(fake_obs(rng))
+    lived_pressure = brain._boredom_pressure
+    assert lived_pressure > 0.0
+    m2 = brain.learn()
+    assert m2 is not None and m2["boredom_pressure"] == lived_pressure
     with torch.no_grad():
         _, _, bored = brain._imagination_reward(feat, action)
     assert (bored > 0).all(), "charged pressure makes dull imagined states cost"
@@ -769,3 +794,101 @@ def test_boredom_pressure_accumulates_and_resets() -> None:
     child = DreamerBrain(cfg, seed=34)
     child.inherit(brain.state_dict())
     assert child._boredom_pressure == 0.0
+
+
+class _ProprioFromFeature(nn.Module):
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        return feat[..., :PROPRIO_DIM]
+
+
+def test_imagination_reads_predicted_body_state_directly() -> None:
+    cfg = dict(
+        TINY,
+        reward={
+            "homeostasis": "drive",
+            "imagined_homeostasis": "proprio",
+            "w_curiosity": 0.0,
+        },
+    )
+    brain = DreamerBrain(cfg, seed=40)
+    brain.wm.head_proprio = nn.Sequential(_ProprioFromFeature())
+    before = torch.zeros(1, brain.wm.rssm_cfg.feat_dim)
+    after = torch.zeros_like(before)
+    before[..., 5], after[..., 5] = 0.2, 0.6
+    before[..., 6] = after[..., 6] = 1.0
+    action = torch.zeros(1, ACTION_DIM)
+    with torch.no_grad():
+        affect, _, _ = brain._imagination_affect(before, after, action)
+    comfort = affect[..., brain.affect_names.index("comfort")]
+    assert float(comfort) > 0.0, "a predicted reduction in hunger must feel beneficial"
+
+
+def test_terminal_examples_receive_configured_weight() -> None:
+    cfg = dict(TINY, reward={"terminal_loss_weight": 8.0})
+    brain = DreamerBrain(cfg, seed=41)
+    raw, weighted = brain._continuation_loss(torch.zeros(2), torch.tensor([1.0, 0.0]))
+    assert weighted[0] == raw[0]
+    assert weighted[1] == 8.0 * raw[1]
+
+
+def test_temporal_skills_and_vector_affect_learn_end_to_end() -> None:
+    cfg = {
+        **TINY,
+        "replay": {"capacity": 3000, "batch_size": 4, "seq_len": 16, "warmup_steps": 16},
+        "reward": {
+            "homeostasis": "drive",
+            "imagined_homeostasis": "proprio",
+            "fear_weight": 0.05,
+        },
+        "actor_critic": {
+            "imagination_horizon": 8,
+            "vector_critic": True,
+        },
+        "temporal_skills": {
+            "enabled": True,
+            "num_skills": 4,
+            "duration": 4,
+            "intrinsic_weight": 0.1,
+        },
+    }
+    brain = DreamerBrain(cfg, seed=42)
+    rng = np.random.default_rng(42)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    assert (brain.buffer.skill[:16] == -1).all(), "motor babbling has no learned intent"
+    assert (brain.buffer.skill[16:80] >= 0).all()
+    for start in range(16, 80, 4):
+        assert len(set(brain.buffer.skill[start : start + 4])) == 1
+    metrics = brain.learn()
+    assert metrics is not None
+    assert brain.critic(torch.randn(2, brain.wm.rssm_cfg.feat_dim)).shape == (2, 41 * 6)
+    for key in (
+        "value_comfort",
+        "value_viability",
+        "value_curiosity",
+        "value_boredom",
+        "value_fear",
+        "value_skill",
+        "skill_discriminator_loss",
+        "skill_manager_entropy",
+    ):
+        assert key in metrics and np.isfinite(metrics[key]), key
+
+
+def test_async_inference_publishes_immutable_controller_snapshots() -> None:
+    cfg = {
+        **TINY,
+        "training": {"imag_starts": 16, "async_inference": True, "publish_every": 1},
+    }
+    brain = DreamerBrain(cfg, seed=43)
+    assert brain.allows_concurrent_learning()
+    initial = brain._inference
+    assert initial is not None
+    inference_parameter = next(initial.encoder.parameters())
+    training_parameter = next(brain.wm.encoder.parameters())
+    assert inference_parameter.data_ptr() != training_parameter.data_ptr()
+    rng = np.random.default_rng(43)
+    for _ in range(80):
+        brain.act(fake_obs(rng))
+    assert brain.learn() is not None
+    assert brain._inference is not initial

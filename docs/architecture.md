@@ -15,7 +15,11 @@ Restart of `~/simulator`, realigned to the original vision: a persistent simulat
 - **World**: rich Minecraft-like 3D voxel world — diggable/placeable blocks, resources, terrain, water, day/night. Minecraft-style AABB-vs-voxel physics (Minecraft itself uses no rigid-body engine) keeps a *rich, modifiable* world computationally cheap.
 - **Bodies**: wheeled robots (drive + gripper + raycast vision + touch/proprioception + signal channel). Controllable from step one — no locomotion learning trap.
 - **Learning**: in-world, lifelong, online. ONE persistent world. No episodes, no resets, no Gym API, no task registry. World + brains checkpoint together; stop/resume across days.
-- **Brains**: **full DreamerV3-style agent per robot** (see below). RSSM included — the DreamerV3 recipe is specifically engineered for out-of-the-box robustness, which is exactly what unsupervised lifelong learning needs. Intrinsic drives only: **Plan2Explore ensemble-disagreement curiosity + homeostasis**.
+- **Brains**: a Dreamer-style learned world model and critic per organism, with
+  endogenous affect and an optional learned temporal manager/worker controller. No
+  task reward, named skill, demonstration, pretrained behavior, or designer fitness
+  score. The architecture is a research variable; the closed anima track established
+  that a learned expectation/critic is constitutive for valence over a mortal life.
 - **Compute tiers**: develop and run 1–2 learning agents locally on the M1 Pro; rent a single cloud GPU (RTX 4090-class, ~$0.35–0.70/hr on RunPod/Vast) for populations of 8–16. A 24–72h soak costs roughly $10–50. Whole stack runs on one machine per run (sim is CPU-cheap; brains use the GPU) — no distributed systems complexity.
 - **Observability**: **Rerun** (rerun.io) as the primary viewer — a purpose-built research visualization tool (3D scene + time-series + timeline scrubbing + remote streaming + recording files), not a hand-rolled HTML viewer. A tiny control API (`gol-ctl`) handles interactivity Rerun doesn't (pause/speed/checkpoint-now).
 
@@ -62,24 +66,27 @@ Files: `blocks.py`, `grid.py`, `terrain.py`, `physics.py`, `entities.py`, `sensi
 ## Entities & physics
 
 - **Robot**: `id, pos, yaw, vel, energy, integrity, held, dormant, age_ticks, brain_name, rng_seed`. Body = 0.8×0.8×0.9-block AABB; `BodySpec` dataclass carries tunables (rays, FOV, speed, energy caps) so variants are config, not code.
-- **Physics**: gravity + axis-by-axis AABB-vs-voxel sweep (`move_and_collide`). Auto-climb 1-block steps (energy surcharge); 2+ blocked; falls >3 blocks damage integrity; water halves speed, triples drain. Touch flags feed proprioception.
-- **Energy**: basal drain + movement/dig/climb costs; eating restores. Below `brownout_threshold`, actuation (speed, turn) fades linearly to `brownout_floor` at zero — a starving body sags, so depletion is felt in the body's own dynamics before stasis; costs still charge the commanded effort, so a browned-out robot pays full price for less motion. Energy ≤ 0 → **hibernate** (dormant, slow integrity decay). Two ways back: a solar trickle recharges dormant bodies in daylight (wake at `wake_energy`), or a peer feeds them — `place` while holding food and facing a dormant body transfers the meal (`feed` event; the world's first prosocial affordance — and it works with toxic food too, so rescue and murder share a verb). Integrity 0 → **death**, drops SCRAP (death feeds the world).
+- **Physics**: gravity + axis-by-axis AABB-vs-voxel sweep (`move_and_collide`). Auto-climb 1-block steps (energy surcharge); 2+ blocked; falls >3 blocks damage integrity. Water speed and drain are independently configurable; the measured substrate uses 0.5× speed and 1.75× drain. Touch and submersion feed proprioception.
+- **Energy**: basal drain + separately measured forward, turn, signal, dig, climb, water, repair, and reproduction costs; eating restores. Below `brownout_threshold`, actuation (speed, turn) fades linearly to `brownout_floor` at zero — a starving body sags, so depletion is felt in the body's own dynamics before stasis; costs still charge commanded effort. Energy ≤ 0 → **hibernate** (dormant, slow integrity decay). Solar recharges a dormant body only to a functional wake floor below the repair threshold, while a peer can feed it directly. Integrity 0 → **death**, drops SCRAP (death feeds the world).
 - **Poison**: `toxic_fraction` of bushes are BUSH_TOXIC (purple; a distinct ray class). Eating one gives reduced energy but costs integrity, fires `took_damage`, and emits a hurt cry — avoidance must be learned from consequence. `ecology.toxic_mimic` ablation makes toxic bushes visually identical to ripe ones (consequence + place memory only).
 - **Fatigue**: 0..1 homeostat in proprio. Builds while driving, clears while still (or dormant); past `exhaustion_threshold` energy costs multiply and integrity bleeds. No hardcoded sleep — night scarcity plus fatigue should make resting at night *emerge*, or not (that's the experiment).
 - **Involuntary sounds**: death leaves a loud transient cry at the spot (~2 s, pattern (-1,-1) on the signal channel); fall damage a quieter distinct one. World physics, not vocabulary — agents can mimic them, and witnesses get cause-and-effect material (sound → body stops → scrap). Transient sounds checkpoint with the world.
-- **Population**: respawn budget, not evolution. `target_population`; on death, delayed respawn at a spawn pad with a fresh brain; `inherit_weights: random_living` flag enables cultural-transmission experiments (research question 4). No fitness scoring anywhere.
+- **Population**: either developmental lineage continuity or earned budding. In
+  budding mode a physiologically thriving body pays energy/integrity to create a child
+  carrying mutated heritable state; no fitness score ranks organisms. A small extinction
+  floor is an experimental safeguard, not selection.
 
 ## Sensing/action contract — `interface.py` (the stable wall between world and brains)
 
 ```python
-Observation (TypedDict):                # OBS_VERSION 3: color vision + gaze
+Observation (TypedDict):                # OBS_VERSION 5: color, gaze, senescence, water
   rays:    float32 (R, 8)    # depth + shaded RGB + 4-way hit-kind one-hot (block/robot/dormant/none).
                              # Block identity is carried only by color (palette × face shade ×
                              # per-voxel grain × daylight); misses see the sky. Default R=144
                              # (6 pitch rows +30..-50° × 24 over 160°, range 32). Stage 2 option:
                              # full RGB-D camera image + CNN encoder, behind a flag, at cloud scale.
-  proprio: float32 (17)      # body-frame vel, yaw sin/cos, energy, integrity, held, touch(4),
-                             # light, fatigue, gaze pitch/yaw
+  proprio: float32 (19)      # body-frame vel, yaw sin/cos, energy, integrity, held, touch(4),
+                             # light, fatigue, gaze pitch/yaw, senescence, in-water
   sound:   float32 (4)       # distance-weighted neighbor signals + world cries (r=12), bearing of loudest
   events:  float32 (4)       # ate, took_damage, dig_success, bumped_robot
 
@@ -107,11 +114,27 @@ Raycasting: Amanatides–Woo voxel DDA, vectorized across all rays of all agents
 
 - **Encoder**: rays flattened + proprio/sound/events → MLP → embedding. (No CNN needed for ray obs; the ray-grid camera option reuses a small CNN encoder behind a flag.)
 - **RSSM** (yes, the real thing): deterministic GRU path + **categorical stochastic latents** (default 24×24 one-hots, scalable), KL balancing with free bits, unimix. Model sizes as named presets `nano/small/base` (~4M / ~12M / ~30M params) — `local_m1.yaml` uses nano, cloud uses small/base.
-- **Heads**: decoder (ray depths via symlog MSE, ray classes CE, proprio symlog MSE — raw-ray reconstruction keeps errors visualizable), reward head (twohot symlog), continue head (predicts hibernation risk, not episode end — there are no episodes), value + actor heads.
-- **Actor-critic trained in imagination** (DreamerV3 standard: horizon 15, λ-returns, twohot critic with EMA regularizer, entropy bonus, return normalization by percentile). With the full RSSM + stabilizer stack, imagination is the proven path. A `replay_ac` ablation flag keeps the model-free-on-latents alternative available for research comparison.
+- **Heads**: decoder (ray depth/RGB/class and proprioception), a diagnostic twohot
+  affect head, and a continuation head trained on real terminal states delivered by the
+  runtime. There are no episode ends; continuation represents physical mortality.
+- **Actor-critic trained in imagination**: horizon rollouts, λ-returns, twohot value
+  distributions with EMA targets, entropy, and percentile return scaling. The organism
+  path uses six value channels (comfort, viability, curiosity, boredom, predicted
+  mortality, controllability) so unlike signals remain learnable until the actor combines
+  them. Historical configs contain an inert `replay_ac` key; replay actor-critic was never
+  implemented and is not a supported ablation.
+- **Temporal skills** (`temporal_skills:`): a manager selects an unnamed latent intent
+  every N actions; a worker turns intent plus world-model state into motor commands. A
+  displacement discriminator supplies a self-generated controllability signal. No skill
+  has a label, demonstration, or pretrained behavior.
 - **Curiosity — learning progress over self-organized regions** (`reward.curiosity: lp`, Oudeyer-style; `dreamer/interest.py`): the Plan2Explore ensemble still measures per-sample model error, but the reward is the *rate that error falls* per region — fast/slow error EMAs per region, their gap (relative to the slow level) as LP. Regions are online k-means centroids in RSSM feature space (`lp.partition: latent`; what counts as "an activity" is carved by the agent's own representation) or animate-presence buckets (`kind`, ablation), and LP is a pure function of region index so imagination can query it. Mastered regions (error low, flat) and unlearnable ones (noise, other minds — the noisy-TV trap) both yield zero progress, so attention lives at the learnable frontier and moves on; path-dependence turns tiny early differences into individual interests. A `mix_disagreement` trickle keeps newborns moving before regions have history. Legacy disagreement-level curiosity remains as `curiosity: disagreement` (ablation), and curiosity-target masking of other-agent rays stays available for research question 2. Total reward = `w_c · curiosity + w_h · homeostasis − boredom`, terms normalized (RunningMeanStd) with configurable weights.
-- **Homeostasis — HRRL drive-reduction (Keramati & Gutkin), not event bonuses**: an internal drive is the convex distance of (energy, integrity, restedness) below per-drive setpoints (read from proprio; exponents m > n let the neediest drive dominate), and reward is the *reduction* of that drive plus a small level penalty on standing deficits. Valence is therefore need-relative — the meal that saves a starving agent outweighs a snack at satiety, satiation needs no stop rule, and damage/fatigue price themselves through the state they move. The world side makes rest a real affordance: resting discounts basal drain, and recovery/repair scale with darkness (`night_rest_bonus`), so sleeping through the night is discovered, not scripted. The legacy flat ate/damage reward (`reward.homeostasis: events`) remains as an ablation. A social drive is deliberately deferred until the world has social affordances to ground it.
-- **Boredom** (`reward.boredom`): a standing negative when drives are met AND curiosity is flat — both gates read imagined state (decoded proprio for drives, region LP for stimulation), so the actor can plan away from it. This is the pressure that produces play in a food-rich world (the beta_04 finding: "a world you simply exist in becomes boring") and the counterweight that stops coasting on a mastered niche. An agent in need is never bored; an agent making progress is never bored. Weight 0 disables.
+- **Homeostasis and viability**: the world model predicts proprioception, then the
+  organism path directly evaluates drive reduction, standing deficit, a log barrier to
+  bodily boundaries, and predicted cessation. A learned reward head remains a diagnostic
+  ablation. These equations describe bodily consequence, never a desired action.
+- **Boredom** (`reward.boredom`): a slow mood charged by chronologically lived calm and
+  low stimulation. Replay updates its stimulation estimate but cannot advance mood out of
+  order. Imagined dull/safe futures are then priced by the current pressure.
 - **Temperament** (`temperament:` in the brain config): innate, heritable individuality — log-normal multipliers over the abstract drive knobs only (curiosity/homeostasis weights, per-drive weights, boredom weight, entropy scale), sampled at birth, persisted in checkpoints, and mutated when a newborn warm-starts from a living donor (`Brain.inherit`). Never object-specific: an agent may be born motion-hungry or damage-averse, but *what* it comes to like must emerge from its own history. Observability: `gol-stats --interests` computes per-agent activity profiles (rest/social/forage/dormant + eat/dig/place rates from `near_robots`/`near_bushes`/`resting` metrics fields), between-agent divergence (individuality) and within-agent stability (interests) — the measurement side of research questions 2 and 4.
 - **Replay buffer**: per-agent ring, ~500k steps quantized (~50–100 MB at ray-fan size); samples sequences (batch 16 × length 64). Long buffer = ballast against nonstationarity.
 - **Lifelong specifics**: train on one unbroken sequence stream (no episode boundaries — DreamerV3 is already off-policy sequence-chunk training, which suits this perfectly); LayerNorm everywhere per the recipe; monitor for plasticity loss (pred-error trend per agent is a first-class logged metric).
@@ -121,8 +144,8 @@ Raycasting: Amanatides–Woo voxel DDA, vectorized across all rays of all agents
 
 Files: `run.py`, `loop.py` (SimLoop), `scheduler.py` (LearnerThread), `checkpoint.py`, `config.py`, `control.py` (HTTP control API), `inspect.py`. Single process, three threads:
 
-1. **Sim thread**: fixed timestep, 20 ticks/s sim time, wall-paced × speed multiplier (`--headless --ticks N` unpaced). Brains act every 5 ticks (4 Hz): one vectorized raycast for all agents, then per-agent `act()` (RSSM posterior step) under that brain's lock. Inference device per config (CPU for nano local; CUDA batched in cloud).
-2. **Learner thread**: round-robins `learn()` across brains on the training device (MPS locally — benchmark fallback CPU; CUDA in cloud). **Backpressure rule: the learner skips, the sim never waits.**
+1. **Sim thread**: fixed timestep, 20 ticks/s sim time, wall-paced × speed multiplier (`--headless --ticks N` unpaced). Brains act every 5 ticks (4 Hz) after one vectorized raycast. Snapshot-capable brains read an immutable encoder/dynamics/controller publication, so an optimizer update cannot latch the body's last action.
+2. **Learner workers**: one serial worker per learning brain, concurrent across brains. Each pays bounded update debt on the learning device and periodically publishes inference. **Backpressure rule: the learner skips, the sim never waits.**
 3. **Observability thread**: Rerun logging + control HTTP endpoint (asyncio).
 
 Checkpoint every 30k ticks and on SIGINT, at a tick boundary — world + all brains saved together atomically so resume is coherent. `--sync` mode (learning inline) for determinism tests.

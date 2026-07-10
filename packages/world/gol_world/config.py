@@ -57,14 +57,14 @@ class EconomyConfig:
     climb_cost: float = 0.15
     dig_cost: float = 0.5
     place_cost: float = 0.1
-    signal_cost: float = 0.01
+    signal_cost: float = 0.001  # per tick at full amplitude; communication is near-free
     eat_energy: float = 40.0
     water_speed_mult: float = 0.5
-    water_drain_mult: float = 3.0
+    water_drain_mult: float = 1.75
     fall_damage_per_block: float = 8.0
     hibernate_integrity_drain: float = 0.0003  # per dormant tick; a coma is survivable, not free
     solar_trickle: float = 0.006  # energy/tick at full light, dormant robots only
-    wake_energy: float = 40.0  # dormant robots wake above this (clears the brownout threshold)
+    wake_energy: float = 38.0  # one light cycle restores a functional, not repaired, body
     toxic_energy: float = 10.0  # poison berries still hold some charge
     toxic_integrity_damage: float = 12.0
     # Fatigue: a 0..1 homeostat. Builds while active, clears while still;

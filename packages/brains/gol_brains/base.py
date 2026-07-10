@@ -40,6 +40,10 @@ class Brain(ABC):
         """
         return 0.0
 
+    def allows_concurrent_learning(self) -> bool:
+        """Whether learn() uses an immutable controller snapshot for act()."""
+        return False
+
     def introspect(self) -> dict[str, float]:
         """Live internals for the observability layer (curiosity, losses...)."""
         return {}

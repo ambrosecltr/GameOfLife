@@ -1,23 +1,25 @@
 # GameOfLife
 
-A persistent simulated 3D voxel world inhabited by little robots that live continuously,
-interact with the world and each other, and learn — lifelong, from their own experience,
-driven only by curiosity and survival. A more "real" Game of Life.
+A persistent simulated 3D voxel world inhabited by artificial organisms that live
+continuously, interact with the world and each other, and learn lifelong from their own
+experience. A more "real" Game of Life.
 
 There are no episodes, no resets, no tasks, and no fitness functions. One world runs for
 days; robots forage, dig, build, signal, hibernate, and die in it; each learning robot
-carries its own DreamerV3-style world model trained online from its own life. The point
-is watching what emerges.
+carries its own predictive world model trained online from its own life. The brains can
+develop reusable temporal skills while feeling only endogenous consequences of their
+bodies and predictions. The point is watching what emerges.
 
 ## The research
 
 Despite the name this is a research platform, not a game — though like Conway's
 original it's a zero-player one: nothing to win, everything to watch. The overarching
-question: **what behaviors, traits, and systems emerge in a world with no goals?** No
-designer assigns objectives and no fitness function ranks outcomes — there are only
-bodies that need energy and can die, minds that are curious and get bored, and a shared
-world that other minds keep changing. Whatever shows up — foraging styles, individuality,
-signaling conventions, culture — has to come from that alone.
+question: **what behaviors, traits, and systems emerge in a world with no fixed
+objective?** No designer assigns task rewards, skill labels, demonstrations, pretrained
+behaviors, or a fitness score. There are bodies that need energy and can die, minds that
+predict, feel, explore, and develop reusable skills, and a shared world that other minds
+keep changing. Whatever shows up — survival, sociality, signaling conventions, mating,
+culture, or something unanticipated — has to grow from those mechanisms.
 
 Concrete questions structure the long runs
 (in full: [research questions](docs/research-questions.md)). Four are about what an agent
@@ -88,10 +90,11 @@ scripts/provision_runpod.sh root@gpu-box saves/alpha   # ship a world to a cloud
   night stops regrowth; running out means hibernation, then death — which drops scrap
   back into the world.
 - **Brains**: pluggable. Scripted baselines (random walker, forager) share the world
-  with learning agents: per-robot DreamerV3-style agents (RSSM world model,
-  imagination-trained actor-critic) driven only by intrinsic rewards — Plan2Explore
-  curiosity plus bodily drives (homeostasis, hunger, boredom). No task reward exists
-  anywhere in the codebase.
+  with learning agents: per-robot Dreamer-style world models with imagination-trained
+  critics, endogenous affect (interoception, curiosity, boredom, predicted mortality),
+  and an optional learned temporal-skill manager/worker layer. No task reward, named
+  skill, demonstration, pretrained behavior, or fitness score exists in the learning
+  path.
 - **Observability**: [Rerun](https://rerun.io) — live 3D scene, per-agent charts
   (energy, curiosity, prediction error), scrubbable timelines, recordings.
 - **Compute tiers**: 1–2 learning robots locally (Apple Silicon); populations of 8–16

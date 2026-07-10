@@ -60,6 +60,7 @@ def viability(
     proprio: torch.Tensor,
     *,
     barrier_cap: float = 4.0,
+    total_cap: float = 0.0,
     energy_lethal: float = 0.0,
     energy_safe: float = 0.25,
     integrity_lethal: float = 0.0,
@@ -70,8 +71,9 @@ def viability(
     """Log-barrier distance to the lethal floor, for the survival-critical
     state only (energy → dormancy, integrity → death; fatigue is not lethal,
     so restedness is a comfort drive, not a viability one). 0 at or above
-    `safe`, rising toward the floor and capped at `barrier_cap` so it stays
-    finite exactly at the boundary. Unlike the convex comfort drive, the
+    `safe`, rising toward the floor and capped per component at `barrier_cap`
+    so it stays finite exactly at the boundary. A positive `total_cap` also
+    caps their weighted sum. Unlike the convex comfort drive, the
     marginal cost of a lost unit grows without bound as the floor nears — the
     "a calorie when starving is worth everything" asymmetry.
     """
@@ -80,9 +82,10 @@ def viability(
         frac = ((x.clamp(0.0, 1.0) - lethal) / (safe - lethal)).clamp(min=1e-6, max=1.0)
         return (-torch.log(frac)).clamp(max=barrier_cap)
 
-    return energy_weight * barrier(
+    total = energy_weight * barrier(
         proprio[..., ENERGY_IDX], energy_lethal, energy_safe
     ) + integrity_weight * barrier(proprio[..., INTEGRITY_IDX], integrity_lethal, integrity_safe)
+    return total.clamp(max=total_cap) if total_cap > 0.0 else total
 
 
 def reduction(level: torch.Tensor, first: torch.Tensor | None = None) -> torch.Tensor:

@@ -120,6 +120,21 @@ def test_water_slows() -> None:
     assert dist_slow < dist_fast * 0.7
 
 
+def test_water_speed_multiplier_is_configurable() -> None:
+    wet = flat_grid()
+    wet.blocks[:, :, 4:6] = Block.WATER
+    slow = make_robot(8.5, 12.5, 4.0)
+    fast = make_robot(8.5, 20.5, 4.0)
+    settle(wet, slow)
+    settle(wet, fast)
+    slow.drive[:] = [1.0, 0.0]
+    fast.drive[:] = [1.0, 0.0]
+    for _ in range(20):
+        step_robot(wet, slow, DT, water_speed_mult=0.25)
+        step_robot(wet, fast, DT, water_speed_mult=0.75)
+    assert fast.pos[0] - 8.5 > 2 * (slow.pos[0] - 8.5)
+
+
 def test_world_border_is_wall() -> None:
     grid = flat_grid()
     robot = make_robot(1.5, 16.5, 4.0)

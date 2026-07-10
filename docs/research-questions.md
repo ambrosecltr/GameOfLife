@@ -1,6 +1,11 @@
 # Research Questions
 
-This platform exists to probe questions the episodic RL literature mostly doesn't touch.
+This platform exists to build and observe artificial organisms: provide a simulated
+reality with the mechanisms of embodied life, but no fixed objective, and ask what
+survival, social, communicative, reproductive, cultural, and unanticipated structures
+emerge. “No fixed objective” excludes task rewards, labels, demonstrations, pretrained
+behaviors, and designer fitness scores; it does not remove bodily interoception,
+prediction, self-generated controllability, mortality, or physical reproduction.
 Every long run should be attributable to at least one of these. When a run produces
 evidence (or interesting absence of evidence), write it up in the
 [research journal](research_journal/).
@@ -118,6 +123,23 @@ selection on temperament and a cross-generational ratchet in competence?
   well — the opposite of a designer-assigned fitness function (which stays a non-goal).
 - It is also the answer to a pattern in Q5–Q7: five rounds each hinged on *one* brain's
   learning speed; selection over an inheriting population is the one lever that doesn't.
+
+## 9. Can reusable skills and higher organization emerge without being named?
+
+Flat action policies decide every motor detail at the same time scale. Biological
+organisms develop reusable subconscious control and compose it into slower intentions.
+If a manager/worker hierarchy is given only unnamed latent options and a self-generated
+controllability signal, what temporal skills form, and do they become building blocks for
+foraging, avoidance, care, communication, cooperation, mating, construction, or behavior
+we did not anticipate?
+
+- Skill indices have no semantics during learning. Name a skill only after repeated
+  action/consequence measurement shows what it has become.
+- Watch for compositionality and reuse: the same primitive serving several situations,
+  stable sequences of primitives solving longer interactions, and cultural or genetic
+  retention of a repertoire.
+- A diverse latent vocabulary alone is not emergence. It must cause repeatable temporal
+  consequences and participate in behavior that matters inside the persistent world.
 
 ## Non-goals
 

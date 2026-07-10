@@ -26,6 +26,10 @@ class ReplayBuffer:
         self.sound = np.zeros((capacity, SOUND_DIM), dtype=np.float16)
         self.events = np.zeros((capacity, EVENTS_DIM), dtype=np.uint8)
         self.action = np.zeros((capacity, action_dim), dtype=np.float16)  # action taken AT obs
+        # Optional temporal-skill identity selected at this observation.
+        # -1 is the legacy flat policy. Skills are internal controller state,
+        # not part of the world observation contract.
+        self.skill = np.full(capacity, -1, dtype=np.int16)
         # Per-step reward salience (|realized homeostasis reward|), supplied
         # by the brain at add(): the priority signal for reward-aware replay.
         # Event flags are the wrong signal under HRRL drive reward — a meal
@@ -51,6 +55,7 @@ class ReplayBuffer:
         action: npt.NDArray[np.float32],
         salience: float = 0.0,
         first: bool = False,
+        skill: int = -1,
     ) -> None:
         i = self.pos
         self.salience[i] = salience
@@ -62,6 +67,7 @@ class ReplayBuffer:
         self.sound[i] = obs["sound"]
         self.events[i] = np.clip(obs["events"], 0, 1).astype(np.uint8)
         self.action[i] = action
+        self.skill[i] = skill
         self.pos = (self.pos + 1) % self.capacity
         if self.pos == 0:
             self.full = True
@@ -139,6 +145,7 @@ class ReplayBuffer:
             "sound": self.sound[idx].astype(np.float32),
             "events": self.events[idx].astype(np.float32),
             "action": self.action[idx].astype(np.float32),
+            "skill": self.skill[idx].astype(np.int64).astype(np.float32),
             "first": self.first[idx].astype(np.float32),
         }
 
@@ -157,6 +164,7 @@ class ReplayBuffer:
             "sound": self.sound[order][-n:],
             "events": self.events[order][-n:],
             "action": self.action[order][-n:],
+            "skill": self.skill[order][-n:],
             "salience": self.salience[order][-n:],
             "first": self.first[order][-n:],
             "rng_state": self.rng.bit_generator.state,
@@ -166,6 +174,8 @@ class ReplayBuffer:
         n = min(len(state["depth"]), self.capacity)
         for name in ("depth", "rgb", "kind", "proprio", "sound", "events", "action"):
             getattr(self, name)[:n] = state[name][-n:]
+        if "skill" in state:
+            self.skill[:n] = state["skill"][-n:]
         # Pre-salience checkpoints: leave zeros; DreamerBrain recomputes from
         # stored proprio/events on load when prioritization is on.
         if "salience" in state:

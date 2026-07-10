@@ -104,6 +104,30 @@ class BlockingBrain(CountingBrain):
         return super().learn()
 
 
+class SnapshotBrain(BlockingBrain):
+    def allows_concurrent_learning(self) -> bool:
+        return True
+
+
+def test_snapshot_brain_learns_without_taking_action_lock() -> None:
+    brain = SnapshotBrain(ratio=1.0)
+    pop = FakePopulation({"dreamer_008": brain})
+    lt = LearnerThread(cast(Population, pop), idle_seconds=0.01)
+    lt._accrue("dreamer_008", brain)
+    brain.acts = 1
+    pop.locks["dreamer_008"].acquire()
+    worker = threading.Thread(target=lt._work, args=("dreamer_008",))
+    worker.start()
+    try:
+        assert brain.entered.wait(2.0), "immutable inference must not wait for the action lock"
+        lt._stop.set()
+        brain.release.set()
+    finally:
+        pop.locks["dreamer_008"].release()
+        worker.join(timeout=2.0)
+    assert not worker.is_alive()
+
+
 def test_worker_survives_prune_during_learn() -> None:
     """Body dies while learn() holds the GPU: the worker exits cleanly instead
     of dying on the pruned pacing key (KeyError seen live on beta_08)."""

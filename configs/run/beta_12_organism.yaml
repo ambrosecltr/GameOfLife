@@ -1,0 +1,36 @@
+# Beta 013: artificial organism, save prefix beta_12.
+#
+# Launch only after the journal's mechanical canaries and a three-brain CUDA
+# contention benchmark pass. Run paced; immutable inference removes action
+# latching, but it does not make missed train-ratio debt scientifically free.
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/beta_12 \
+#       --config configs/run/beta_12_organism.yaml
+
+world_config: configs/world/beta_12_organism.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7304
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  # Phase A is developmental: preserve each mind across bodies so the new
+  # hierarchy has enough life to become competent. Earned budding returns in
+  # Phase B after this round proves the individual organism machinery works.
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/beta_12_organism.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: false
+  metrics_every_ticks: 100

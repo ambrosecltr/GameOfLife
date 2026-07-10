@@ -26,12 +26,15 @@ prefixed with the save name it produces:
 - `brain/beta_NN_dreamer[_slug].yaml` — referenced from that round's run config
 - `world/beta_NN_world.yaml` — only if the round changes world parameters
 
-Track prefixes (a prefix names a brain-family + bet, not the whole project;
-journal round numbers stay global across tracks):
+Track prefixes name a brain-family and its founding bet, not the whole project. Journal
+numbers are chronological within each track; save prefixes keep their established run
+sequence even where an earlier cross-track round made the numbers differ:
 
 - `beta_` — the world-model/Dreamer track at the base-preset capacity bundle (cloud)
 - `swift_` — same Dreamer family, the efficiency bet: nano + the swift speed core at
   real train_ratio 1.0 on local hardware (adopted round 010)
+- `anima_` — the completed plastic-valence family: world-model-free, critic-free,
+  neuromodulated plasticity (closed after anima 007)
 
 Rules:
 

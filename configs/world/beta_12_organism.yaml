@@ -1,0 +1,85 @@
+# Beta 013 world (save prefix beta_12): the measured, livable substrate inherited
+# from the completed anima track, with beta's longer senescence envelope.
+#
+# This is not an easier task configuration; there is no task. It corrects
+# physical mismatches found by energy-ledger measurement:
+#   - signaling is near-free (0.001): communication should be selected by its
+#     consequences, not suppressed by a hidden metabolic tax;
+#   - water is drag plus a 1.75x metabolic surcharge, not drag plus a lethal 3x
+#     double charge; in-water is already present in OBS v5 proprioception;
+#   - a dormant body wakes functional at 38, just above brownout 25, after about
+#     one natural light cycle. Solar cannot fund repair (repair starts at 60),
+#     so sleep buys another attempt while food surplus buys long-term survival;
+#   - turn_cost and water_speed_mult are now actually wired into physics.
+#
+# Food remains at the measured 2x reachability precondition. The scripted
+# forager proved this density makes competence affordable while leaving poison,
+# night scarcity, wear, repair, and mortality intact. Senescence stays at beta's
+# 150k half-life rather than anima's deliberately sharpened 90k selection clock:
+# this round must first test whether one artificial organism can learn durable
+# control before shortening its developmental window for evolution.
+
+seed: 7
+size: [256, 256, 64]
+day_length_ticks: 24000
+
+terrain:
+  height_base: 24
+  height_amp: 14
+  octaves: 4
+  water_level: 22
+  ore_pockets: 60
+  ore_pocket_size: 4
+  bush_density: 0.024
+
+ecology:
+  regrow_ticks: 12000
+  regrow_jitter: 3000
+  regrow_daytime_only: true
+  toxic_fraction: 0.15
+  toxic_mimic: false
+  bush_lifespan_ticks: 120000
+  bush_lifespan_jitter: 24000
+  sprout_clump_bias: 0.7
+  held_spoil_ticks: 24000
+
+economy:
+  energy_max: 100.0
+  integrity_max: 100.0
+  basal_drain: 0.0015
+  move_cost: 0.005
+  turn_cost: 0.002
+  climb_cost: 0.15
+  dig_cost: 0.5
+  place_cost: 0.1
+  signal_cost: 0.001
+  eat_energy: 40.0
+  water_speed_mult: 0.5
+  water_drain_mult: 1.75
+  fall_damage_per_block: 8.0
+  hibernate_integrity_drain: 0.0003
+  solar_trickle: 0.006
+  wake_energy: 38.0
+  toxic_energy: 10.0
+  toxic_integrity_damage: 12.0
+  fatigue_rise_base: 0.000015
+  fatigue_rise_active: 0.00004
+  fatigue_recover: 0.000125
+  rest_drive_threshold: 0.1
+  rest_basal_mult: 0.6
+  night_rest_bonus: 1.0
+  exhaustion_threshold: 0.9
+  exhaustion_drain_mult: 1.5
+  exhaustion_integrity_drain: 0.002
+  brownout_threshold: 25.0
+  brownout_floor: 0.35
+  awake_wear: 0.0002
+  repair_threshold: 60.0
+  repair_rate: 0.002
+  rest_repair_mult: 3.0
+  repair_energy_per_point: 1.0
+  senescence_halflife: 150000
+
+sounds:
+  death_cry_ticks: 40
+  hurt_cry_ticks: 10

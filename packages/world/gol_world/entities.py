@@ -73,6 +73,7 @@ def new_ledger() -> dict[str, float]:
 ENERGY_LEDGER_KEYS = (
     "basal",
     "move",
+    "turn",
     "climb",
     "signal",
     "exhaustion",

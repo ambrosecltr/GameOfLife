@@ -133,7 +133,9 @@ class Population:
     def brain_states(self) -> dict[str, bytes]:
         blobs = {}
         for rid, brain in self.brains.items():
-            # Lock out the learner so the snapshot is a coherent post-update state.
+            # Block act() while the brain takes a coherent snapshot. Legacy
+            # learners share this lock; snapshot-capable learners serialize
+            # training internally inside state_dict().
             with self.locks[rid]:
                 blobs[rid] = pickle.dumps(brain.state_dict())
         for kind, stash in self._lineage_stash.items():
@@ -332,8 +334,9 @@ class Population:
     def act_step(self, world: World) -> None:
         """One perception-action cycle for every awake robot.
 
-        The sim never waits: if a brain's lock is held by the learner right
-        now, the robot simply keeps its previously latched command this cycle.
+        The sim never waits: legacy brains latch their previous command if the
+        learner holds their lock. Snapshot-capable brains learn concurrently,
+        so their lock remains available for every perception-action cycle.
         """
         self._process_lifecycle(world)
         obs = observe(
@@ -487,8 +490,15 @@ class LearnerThread:
             if self._accrue(rid, brain) < 1.0:
                 self._stop.wait(self.idle_seconds)
                 continue
-            with lock:
+            if brain.allows_concurrent_learning():
+                # The learner mutates training weights while act() reads an
+                # immutable published snapshot. The brain's own lock makes
+                # checkpoints coherent; the population lock stays free, so
+                # embodied control never latches behind a long update.
                 result = brain.learn()
+            else:
+                with lock:
+                    result = brain.learn()
             # learn() runs long (0.25-0.7s on GPU); the body may have died and
             # the supervisor pruned our pacing state in the meantime. End the
             # watch instead of raising on (or resurrecting) the missing key.

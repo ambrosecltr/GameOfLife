@@ -81,6 +81,12 @@ the journal entry's "What changed."
   that replicates on a long life, the follow-up knob is spike-weighted loss.
 
 `reward:`
+- `imagined_homeostasis: head | proprio` — `head` preserves the historical
+  learned twohot affect head. `proprio` applies the configured comfort and
+  viability equations directly to predicted before/after proprioception during
+  imagination; the head is still trained and logged as a diagnostic. Use
+  `proprio` when the body function is already known and the research question is
+  behavior, not whether another network can rediscover that function.
 - `blackout: cut | priced` — how the dormancy gap enters the learned stream
   (round 011's reachability fix). `cut` (legacy) severs it: wake resets the
   live state and the salience chain, and near-zero energy trains the
@@ -103,8 +109,8 @@ the journal entry's "What changed."
   SETPOINT. `scale` is its HRRL weight (0 = off, recovers beta_10 exactly);
   `floor` a standing danger-zone tax on `V`; `{energy,integrity}_safe` the
   margins above the floor where `V` is 0; `{energy,integrity}_lethal` the
-  floors (default 0); `barrier_cap` clamps −log so `V` is finite at the
-  boundary. Priced through the same reward head as the comfort drive (their
+  floors (default 0); `barrier_cap` clamps each −log component and optional
+  `total_cap` clamps their weighted sum. Priced through the same reward head as the comfort drive (their
   sum is what the actor maximizes) but logged separately: `reward_viability`,
   `viability_level`, `viability_max`, and per-life `life_return_via` /
   `life_return_homeo` (exact realized return, accumulated in `act()`).
@@ -127,6 +133,13 @@ the journal entry's "What changed."
   to its brain (`Brain.record_death`, non-blocking — the sim never waits) and
   the brain records it with vitals at the floor. Lineage runs only: the record
   needs a replay buffer that outlives the body.
+- `terminal_loss_weight: w` — multiplies continuation BCE on physical terminal
+  rows. Round 012 had only 1–15 terminal rows among thousands and learned
+  `cont=1` at death; use `cont_terminal`, `cont_alive`, and `terminal_frac` to
+  verify separation. Values below 1 are rejected.
+- `fear_weight: w` — adds `w · log P(continue_next)` to imagined affect. It is
+  zero when continuation is certain and increasingly negative when the learned
+  world predicts cessation; it names no action or task.
 - `boredom.gate: drive | viability` — what "calm enough to be bored" reads.
   `drive` (beta_10) reads the comfort drive, so any deficit below setpoint
   shuts the boredom gate (couples boredom to hunger — the round-011 concern).
@@ -143,11 +156,34 @@ the journal entry's "What changed."
   neutral on cpu; untested on cuda. Adds one-time compile stalls at brain
   construction (act path is pre-warmed; learn shapes compile on the learner
   thread where a stall is just a skipped update).
+- `async_inference: true` — publish immutable encoder/RSSM/controller snapshots
+  so `act()` never shares parameters with the optimizer and the learner need not
+  hold the population action lock. `publish_every` controls update cadence.
+  Checkpoints still serialize against the brain's internal learning lock. This
+  mode is intentionally incompatible with `compile` until compiled-module
+  snapshots have their own verified path.
+
+`actor_critic:`
+- `vector_critic: true` — learn separate twohot values for comfort, viability,
+  curiosity, boredom, mortality risk, and skill controllability, then sum only
+  for the actor's normalized advantage. Metrics expose `value_*`, `return_*`,
+  and `affect_*` for every channel.
+
+`temporal_skills:`
+- `enabled: true` replaces the flat actor with an unnamed manager/worker
+  hierarchy. `num_skills` is the latent vocabulary, `duration` the number of
+  real and imagined actions each selection persists, `intrinsic_weight` the
+  variational controllability signal, and `manager_entropy` its exploration
+  pressure. The discriminator reads latent displacement, not absolute place.
+  Monitor usage entropy, discriminator accuracy/loss, manager entropy, switches,
+  and per-skill action/consequence profiles. No index has built-in semantics.
 
 New metrics these produce: `loss_reward` (always), `reward_head_spike_err`
 (|predicted − realized| on spike samples — the reachability gauge),
 `spike_row_frac` (what prioritization feeds the head), `l2_init_dist`,
-`lp_mix_eff` (0 = trickle annealed, imagination skip active).
+`lp_mix_eff` (0 = trickle annealed, imagination skip active), continuation
+separation, per-affect value/return/instantaneous channels, temporal-skill
+health, and `stimulation_online`.
 
 ## Checkpoint compatibility
 
@@ -157,6 +193,11 @@ optimizer's Adam moments reset** (param layout changed; actor/critic moments
 survive). For offline analysis that's harmless. For *resuming a live world*
 across the boundary, expect a brief model-loss wobble while Adam re-estimates
 its moments — note it in the journal if the round's data spans the resume.
+
+Architecture flags must match the checkpoint: enabling temporal skills changes
+the actor parameter layout, and enabling the vector critic changes the critic
+output shape. Start a fresh brain or use a deliberate migration; do not resume a
+flat/scalar brain under those flags.
 
 ## The offline gym: screen learn-side knobs before pod hours
 

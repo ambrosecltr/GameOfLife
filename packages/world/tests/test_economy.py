@@ -1,6 +1,7 @@
 """Energy economy and lifecycle: eat, drain, hibernate, die, drop scrap."""
 
 import numpy as np
+import pytest
 from gol_world.blocks import Block
 from gol_world.config import EcologyConfig, EconomyConfig, WorldConfig
 from gol_world.entities import EV_ATE, EV_TOOK_DAMAGE
@@ -595,6 +596,19 @@ def test_energy_ledger_balances_against_energy_delta() -> None:
     # movement shows up under its own cause
     assert robot.energy_ledger["move"] > 0.0
     assert robot.energy_ledger["basal"] > 0.0
+
+
+def test_turn_cost_is_charged_separately_from_movement() -> None:
+    world = make_world()
+    rid = world.spawn_robot("bot_000", "test").id
+    robot = world.robots[rid]
+    robot.energy = 60.0
+    turn = Action(drive=np.array([0.0, 1.0], dtype=np.float32))
+    for _ in range(20):
+        world.apply_action(rid, turn)
+        world.step()
+    assert robot.energy_ledger["turn"] == pytest.approx(20 * CFG.economy.turn_cost)
+    assert robot.energy_ledger["move"] == 0.0
 
 
 def test_energy_ledger_records_banked_meal_not_nominal() -> None:

@@ -515,6 +515,7 @@ class World:
         parts = {
             "basal": eco.basal_drain * (eco.rest_basal_mult if resting else 1.0),
             "move": eco.move_cost * costs["moved"],
+            "turn": eco.turn_cost * costs["turned"],
             "climb": eco.climb_cost * costs["climbed"],
             "signal": eco.signal_cost * float(np.abs(robot.signal).max()),
         }
@@ -598,7 +599,13 @@ class World:
                     self._emit("spoil", robot)
             else:
                 robot.held_age_ticks = 0
-            costs = physics.step_robot(self.grid, robot, self.dt, self._actuation(robot))
+            costs = physics.step_robot(
+                self.grid,
+                robot,
+                self.dt,
+                self._actuation(robot),
+                water_speed_mult=self.cfg.economy.water_speed_mult,
+            )
             self._account_energy(robot, costs)
             robot.age_ticks += 1
             if robot.integrity <= 0.0:

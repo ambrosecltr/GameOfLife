@@ -13,13 +13,17 @@ drives purely intrinsic — no tasks, no resets:
   ate/damage event bonus remains as an ablation.
 - Boredom: a standing cost of being safe and learning nothing — the pressure
   that produces play.
-- Temperament: heritable log-normal multipliers over the abstract drive
-  knobs, sampled at birth and mutated on inheritance. Individuality is seeded
-  abstractly; concrete interests must be discovered.
+- Temporal skills: an optional unnamed manager/worker hierarchy learns reusable
+  multi-action control from self-generated controllability.
+- Temperament: heritable log-normal multipliers over abstract drive knobs.
+
+No task reward, skill label, demonstration, pretrained behavior, or designer
+fitness score enters the learner.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from typing import Any
 
@@ -49,6 +53,7 @@ from gol_world.interface import (
 from gol_brains import feeling
 from gol_brains.base import Brain
 from gol_brains.dreamer.buffer import ReplayBuffer
+from gol_brains.dreamer.inference import InferenceSnapshot
 from gol_brains.dreamer.interest import LearningProgress, OnlineRegions
 from gol_brains.dreamer.networks import (
     DiscreteDist,
@@ -61,6 +66,7 @@ from gol_brains.dreamer.networks import (
 )
 from gol_brains.dreamer.optim import Muon
 from gol_brains.dreamer.rssm import RSSM, RSSMConfig
+from gol_brains.dreamer.skills import TemporalSkillController, TemporalSkillPolicy
 
 PRESETS: dict[str, dict[str, int]] = {
     "nano": {"deter": 256, "groups": 16, "classes": 16, "hidden": 256, "units": 256},
@@ -88,6 +94,10 @@ TEMPERAMENT_KEYS = (
 # Ray-kind LP partition (ablation): presence-combos of animate hit kinds —
 # nothing-alive / robot / dormant / both.
 KIND_REGIONS = 4
+
+# Separate value functions prevent unlike endogenous signals from erasing one
+# another before the actor chooses how to trade them off.
+AFFECT_NAMES = ("comfort", "viability", "curiosity", "boredom", "fear", "skill")
 
 
 class WorldModel(nn.Module):
@@ -179,6 +189,8 @@ class DreamerBrain(Brain):
         self.cfg = cfg
         self.device = torch.device(device)
         self.body = body or BodySpec()
+        self._learn_lock = threading.Lock()
+        self._experience_lock = threading.Lock()
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
 
@@ -193,9 +205,34 @@ class DreamerBrain(Brain):
         self.gamma = float(ac_cfg.get("gamma", 0.997))
         self.lam = float(ac_cfg.get("lam", 0.95))
         self.entropy_scale = float(ac_cfg.get("entropy", 3e-4))
-        self.actor = mlp(feat, units, CONT_DIM * 2 + NUM_GRIP_MODES, layers=2).to(self.device)
-        self.critic = mlp(feat, units, 41, layers=2).to(self.device)
-        self.critic_ema = mlp(feat, units, 41, layers=2).to(self.device)
+        self.vector_critic = bool(ac_cfg.get("vector_critic", False))
+        self.affect_names = AFFECT_NAMES
+        self.value_channels = len(self.affect_names) if self.vector_critic else 1
+
+        skill_cfg = dict(cfg.get("temporal_skills", {}))
+        self.skills_enabled = bool(skill_cfg.get("enabled", False))
+        self.skill_duration = int(skill_cfg.get("duration", 5))
+        if self.skills_enabled and self.skill_duration < 2:
+            raise ValueError("temporal_skills.duration must be at least 2")
+        self.skill_weight = float(skill_cfg.get("intrinsic_weight", 0.0))
+        self.skill_manager_entropy = float(skill_cfg.get("manager_entropy", 3e-4))
+        self.num_skills = int(skill_cfg.get("num_skills", 8))
+        if self.skills_enabled:
+            self.actor: nn.Module = TemporalSkillPolicy(
+                feat,
+                units,
+                CONT_DIM,
+                NUM_GRIP_MODES,
+                self.num_skills,
+                unimix=float(skill_cfg.get("unimix", 0.01)),
+            ).to(self.device)
+        else:
+            self.actor = mlp(feat, units, CONT_DIM * 2 + NUM_GRIP_MODES, layers=2).to(
+                self.device
+            )
+        critic_out = 41 * self.value_channels
+        self.critic = mlp(feat, units, critic_out, layers=2).to(self.device)
+        self.critic_ema = mlp(feat, units, critic_out, layers=2).to(self.device)
         self.critic_ema.load_state_dict(self.critic.state_dict())
         for p in self.critic_ema.parameters():
             p.requires_grad_(False)
@@ -204,6 +241,19 @@ class DreamerBrain(Brain):
         rw = dict(cfg.get("reward", {}))
         self.w_curiosity = float(rw.get("w_curiosity", 1.0))
         self.w_homeostasis = float(rw.get("w_homeostasis", 1.0))
+        # Legacy brains ask a reward head to rediscover the body's known
+        # interoceptive equations. The organism path instead applies those
+        # equations directly to predicted proprioception in imagination; the
+        # learned reward head remains as an auditable diagnostic target.
+        self.imagined_homeostasis = str(rw.get("imagined_homeostasis", "head"))
+        if self.imagined_homeostasis not in ("head", "proprio"):
+            raise ValueError(
+                f"unknown reward.imagined_homeostasis: {self.imagined_homeostasis!r}"
+            )
+        self.terminal_loss_weight = float(rw.get("terminal_loss_weight", 1.0))
+        if self.terminal_loss_weight < 1.0:
+            raise ValueError("reward.terminal_loss_weight must be at least 1")
+        self.fear_weight = float(rw.get("fear_weight", 0.0))
         # "drive": HRRL drive-reduction over internal state (energy, integrity,
         # rest). "events": the legacy ate/damage bonus, kept as an ablation and
         # as the default so configs stored in older saves keep the reward their
@@ -245,6 +295,7 @@ class DreamerBrain(Brain):
         self.via_scale = float(via.get("scale", 0.0))
         self.via_floor = float(via.get("floor", 0.0))  # standing cost on V (the danger-zone tax)
         self.via_barrier_cap = float(via.get("barrier_cap", 4.0))  # keep −log finite at the floor
+        self.via_total_cap = float(via.get("total_cap", 0.0))
         self.via_e_lethal = float(via.get("energy_lethal", 0.0))
         self.via_e_safe = float(via.get("energy_safe", 0.25))  # normalized brownout threshold
         self.via_i_lethal = float(via.get("integrity_lethal", 0.0))
@@ -456,9 +507,21 @@ class DreamerBrain(Brain):
             self.opt_model = torch.optim.Adam(self.wm.parameters(), lr=model_lr, foreach=True)
         # foreach batches the per-param step into fused multi-tensor kernels
         # (~3x fewer optimizer-step ops; measured ~12ms -> ~4ms per update).
-        self.opt_actor = torch.optim.Adam(
-            self.actor.parameters(), lr=float(tr.get("actor_lr", 3e-5)), foreach=True
+        self._actor_parameters = (
+            list(self.actor.controller_parameters())
+            if isinstance(self.actor, TemporalSkillPolicy)
+            else list(self.actor.parameters())
         )
+        self.opt_actor = torch.optim.Adam(
+            self._actor_parameters, lr=float(tr.get("actor_lr", 3e-5)), foreach=True
+        )
+        self.opt_skill: torch.optim.Adam | None = None
+        if isinstance(self.actor, TemporalSkillPolicy):
+            self.opt_skill = torch.optim.Adam(
+                self.actor.discriminator.parameters(),
+                lr=float(tr.get("skill_lr", 1e-4)),
+                foreach=True,
+            )
         self.opt_critic = torch.optim.Adam(
             self.critic.parameters(), lr=float(tr.get("critic_lr", 3e-5)), foreach=True
         )
@@ -476,6 +539,10 @@ class DreamerBrain(Brain):
         # it paces with (_act_steps, _updates) ride state_dict, so the debt
         # math stays coherent across checkpoints and inheritance.
         self.train_ratio = float(tr.get("train_ratio", 0.25))
+        self.async_inference = bool(tr.get("async_inference", False))
+        self.publish_every = int(tr.get("publish_every", 16))
+        if self.publish_every < 1:
+            raise ValueError("training.publish_every must be at least 1")
 
         # Live recurrent state (the robot's stream of consciousness).
         self.h, self.z = self.wm.rssm.initial(1, self.device)
@@ -488,6 +555,11 @@ class DreamerBrain(Brain):
         self._gate_calm = 0.0  # boredom gate telemetry (imagination means)
         self._gate_dull = 0.0
         self._boredom_pressure = 0.0  # leaky-integrated mood (pressure mode)
+        self._online_stimulation = self.boredom_stim_threshold
+        self._active_skill = -1
+        self._skill_remaining = 0
+        self._skill_switches = 0
+        self._inference: InferenceSnapshot | None = None
 
         # torch.compile on the sequential hot loops (RSSM steps + encoder):
         # nano-scale unrolls are dispatch-bound, and compilation collapses the
@@ -495,7 +567,10 @@ class DreamerBrain(Brain):
         # precompiled here so the sim thread never eats a compile stall
         # mid-life; the learn-path shapes compile lazily on the learner
         # thread, where a one-time pause is just a skipped update.
-        if bool(tr.get("compile", False)):
+        compile_enabled = bool(tr.get("compile", False))
+        if compile_enabled and self.async_inference:
+            raise ValueError("training.compile is not compatible with async_inference snapshots")
+        if compile_enabled:
             backend = "aot_eager" if self.device.type == "mps" else "inductor"
             for owner, name in ((self.wm.rssm, "obs_step"), (self.wm.rssm, "img_step"),
                                 (self.wm, "embed")):
@@ -503,6 +578,8 @@ class DreamerBrain(Brain):
             with torch.no_grad():
                 embed = torch.zeros(1, preset["units"], device=self.device)
                 self.wm.rssm.obs_step(self.h, self.z, self.last_action, embed)
+        if self.async_inference:
+            self._publish_inference()
 
     def _apply_temperament(self) -> None:
         t, base = self.temperament, self._pre_temperament
@@ -517,6 +594,13 @@ class DreamerBrain(Brain):
 
     # ------------------------------------------------------------------- act
 
+    def _publish_inference(self) -> None:
+        """Atomically publish a frozen controller snapshot to the sim thread."""
+        self._inference = InferenceSnapshot(self.wm.encoder, self.wm.rssm, self.actor)
+
+    def allows_concurrent_learning(self) -> bool:
+        return self.async_inference
+
     def _obs_to_tensors(self, obs: Observation) -> dict[str, torch.Tensor]:
         rays = torch.as_tensor(obs["rays"], device=self.device)
         return {
@@ -528,8 +612,18 @@ class DreamerBrain(Brain):
             "events": torch.as_tensor(obs["events"], device=self.device).unsqueeze(0),
         }
 
-    def _policy_dists(self, feat: torch.Tensor) -> tuple[TanhNormal, DiscreteDist]:
-        out = self.actor(feat)
+    def _policy_dists(
+        self,
+        feat: torch.Tensor,
+        actor: nn.Module | None = None,
+        skill: torch.Tensor | None = None,
+    ) -> tuple[TanhNormal, DiscreteDist]:
+        policy = actor or self.actor
+        if isinstance(policy, TemporalSkillController):
+            if skill is None:
+                raise ValueError("temporal worker requires a skill")
+            return policy.action_dists(feat, skill)
+        out = policy(feat)
         mean = out[..., :CONT_DIM]
         raw_std = out[..., CONT_DIM : 2 * CONT_DIM]
         grip_logits = out[..., 2 * CONT_DIM :]
@@ -537,6 +631,36 @@ class DreamerBrain(Brain):
         probs = torch.softmax(grip_logits, dim=-1)
         probs = 0.99 * probs + 0.01 / NUM_GRIP_MODES  # unimix keeps exploration alive
         return TanhNormal(torch.tanh(mean), std), DiscreteDist(probs)
+
+    def _critic_logits(self, critic: nn.Module, feat: torch.Tensor) -> torch.Tensor:
+        logits = critic(feat)
+        if self.vector_critic:
+            return logits.view(*feat.shape[:-1], self.value_channels, self.twohot.bins)
+        return logits
+
+    def _critic_value(self, critic: nn.Module, feat: torch.Tensor) -> torch.Tensor:
+        return self.twohot.decode(self._critic_logits(critic, feat))
+
+    def _update_boredom_pressure(self, proprio: torch.Tensor) -> None:
+        """Advance boredom on the chronological lived stream.
+
+        Learning publishes its latest stimulation estimate; the actual body
+        supplies safety. Replay order can therefore improve the estimate but
+        cannot rewrite the organism's mood history.
+        """
+        if not (self.boredom_weight > 0 and self.boredom_pressure_on):
+            return
+        safety = (
+            self._viability(proprio)
+            if self.boredom_gate == "viability"
+            else self._drive_level(proprio)
+        )
+        calm = float((1.0 - safety / self.boredom_drive_threshold).clamp(min=0.0)[0])
+        dull = max(0.0, 1.0 - self._online_stimulation / self.boredom_stim_threshold)
+        gate = calm * dull
+        pressure = self._boredom_pressure
+        pressure += self.boredom_pressure_rise * gate - self.boredom_pressure_decay * pressure
+        self._boredom_pressure = min(1.0, max(0.0, pressure))
 
     def _action_to_vec(self, cont: torch.Tensor, grip: int) -> npt.NDArray[np.float32]:
         vec = np.zeros(ACTION_DIM, dtype=np.float32)
@@ -547,6 +671,7 @@ class DreamerBrain(Brain):
     def act(self, obs: Observation) -> Action:
         with torch.no_grad():
             tensors = self._obs_to_tensors(obs)
+            self._update_boredom_pressure(tensors["proprio"])
             # Reward salience of this lived step (recorded even when
             # prioritization is off, so an old life can turn it on later).
             # The first step after a stream break reads 0: the gap's drive
@@ -577,21 +702,47 @@ class DreamerBrain(Brain):
                     self._prev_via = v
             else:
                 salience = float(obs["events"][0] + obs["events"][1])
-            embed = self.wm.embed(tensors)
-            self.h, self.z, _, _ = self.wm.rssm.obs_step(self.h, self.z, self.last_action, embed)
+            inference = self._inference
+            controller = inference if inference is not None else self.wm
+            policy_actor = inference.actor if inference is not None else self.actor
+            embed = controller.embed(tensors)
+            self.h, self.z, _, _ = controller.rssm.obs_step(
+                self.h, self.z, self.last_action, embed
+            )
+            skill = -1
             if len(self.buffer) < self.warmup_steps:
                 cont = torch.as_tensor(
                     self.rng.uniform(-1, 1, CONT_DIM).astype(np.float32), device=self.device
                 )
                 grip = int(self.rng.integers(0, NUM_GRIP_MODES))
             else:
-                feat = self.wm.rssm.feat(self.h, self.z)
-                dist_cont, dist_grip = self._policy_dists(feat)
+                feat = controller.rssm.feat(self.h, self.z)
+                skill_tensor: torch.Tensor | None = None
+                if isinstance(policy_actor, TemporalSkillController):
+                    if self._skill_remaining <= 0:
+                        previous = self._active_skill
+                        self._active_skill = int(policy_actor.manager_dist(feat).sample()[0])
+                        self._skill_remaining = self.skill_duration
+                        if previous >= 0 and previous != self._active_skill:
+                            self._skill_switches += 1
+                    skill = self._active_skill
+                    skill_tensor = torch.tensor([skill], device=self.device)
+                    self._skill_remaining -= 1
+                dist_cont, dist_grip = self._policy_dists(
+                    feat, actor=policy_actor, skill=skill_tensor
+                )
                 cont = dist_cont.sample()[0]
                 grip = int(dist_grip.sample()[0])
 
         action_vec = self._action_to_vec(cont, grip)
-        self.buffer.add(obs, action_vec, salience=salience, first=self._stream_first)
+        with self._experience_lock:
+            self.buffer.add(
+                obs,
+                action_vec,
+                salience=salience,
+                first=self._stream_first,
+                skill=skill,
+            )
         self._stream_first = False
         self._act_steps += 1
         self.last_action = torch.as_tensor(action_vec, device=self.device).unsqueeze(0)
@@ -636,6 +787,7 @@ class DreamerBrain(Brain):
         return feeling.viability(
             proprio,
             barrier_cap=self.via_barrier_cap,
+            total_cap=self.via_total_cap,
             energy_lethal=self.via_e_lethal,
             energy_safe=self.via_e_safe,
             integrity_lethal=self.via_i_lethal,
@@ -681,6 +833,17 @@ class DreamerBrain(Brain):
             low = (energy < self.low_energy_threshold).float()
         return ate - damage - self.low_energy_penalty * low
 
+    def _continuation_loss(
+        self, logits: torch.Tensor, target: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raw = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+        weight = torch.where(
+            target < 0.5,
+            torch.full_like(target, self.terminal_loss_weight),
+            torch.ones_like(target),
+        )
+        return raw, raw * weight
+
     def _kind_regions_obs(self, kind_onehot: torch.Tensor) -> torch.Tensor:
         """Presence-combo region from real rays: is anything alive in view?"""
         has_robot = kind_onehot[..., RAY_KIND_ROBOT].amax(-1) > 0.5
@@ -695,22 +858,43 @@ class DreamerBrain(Brain):
         has_dormant = probs[..., RAY_KIND_DORMANT].amax(-1) > 0.5
         return has_robot.long() + 2 * has_dormant.long()
 
-    def _imagination_reward(
-        self, img_feat: torch.Tensor, img_action: torch.Tensor
+    def _imagination_affect(
+        self,
+        policy_feat: torch.Tensor,
+        outcome_feat: torch.Tensor,
+        img_action: torch.Tensor,
+        skill_reward: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Assemble the intrinsic reward on imagined states.
+        """Endogenous affect components for one imagined transition.
 
-        Every term is a function of latent state — LP by region lookup,
-        drives via decoded proprio — so the actor can plan toward interest
-        and away from boredom inside the dream. Returns (reward, stimulation,
-        boredom) for the return computation and metrics.
+        ``policy_feat`` is the state that chose the action; ``outcome_feat``
+        is the resulting state. This alignment matters for direct
+        interoception: the action is valued by the bodily change it predicts.
         """
-        r_homeo = self.twohot.decode(self.wm.head_reward(img_feat))
+        outcome_proprio = self.wm.head_proprio(outcome_feat)
+        if self.imagined_homeostasis == "proprio":
+            policy_proprio = self.wm.head_proprio(policy_feat)
+            drive_before = self._drive_level(policy_proprio)
+            drive_after = self._drive_level(outcome_proprio)
+            r_comfort = self.drive_scale * (drive_before - drive_after)
+            r_comfort = r_comfort - self.drive_level_penalty * drive_after
+            if self.via_on:
+                via_before = self._viability(policy_proprio)
+                via_after = self._viability(outcome_proprio)
+                r_viability = self.via_scale * (via_before - via_after)
+                r_viability = r_viability - self.via_floor * via_after
+            else:
+                r_viability = torch.zeros_like(r_comfort)
+        else:
+            # Backward-compatible ablation: this head was trained on the sum
+            # of comfort and viability, so keep it in one channel.
+            r_comfort = self.twohot.decode(self.wm.head_reward(outcome_feat))
+            r_viability = torch.zeros_like(r_comfort)
         if self.curiosity_mode == "lp":
             if self.lp_partition == "latent":
-                idx = self.regions.assign(img_feat)
+                idx = self.regions.assign(policy_feat)
             else:
-                idx = self._kind_regions_img(img_feat)
+                idx = self._kind_regions_img(policy_feat)
             r_cur = self.lp_norm.normalize(self.lp.reward(idx)).clamp(0.0, 5.0)
             # A trickle of disagreement keeps a newborn moving before any
             # region has enough history to show progress. Once the trickle
@@ -719,15 +903,14 @@ class DreamerBrain(Brain):
             mix = self._lp_mix()
             if mix > 0.0:
                 r_dis = self.curiosity_norm.normalize(
-                    self.wm.disagreement(img_feat, img_action)
+                    self.wm.disagreement(policy_feat, img_action)
                 ).clamp(0, 5.0)
                 r_cur = r_cur + mix * r_dis
         else:
             r_cur = self.curiosity_norm.normalize(
-                self.wm.disagreement(img_feat, img_action)
+                self.wm.disagreement(policy_feat, img_action)
             ).clamp(0, 5.0)
-        reward = self.w_homeostasis * r_homeo + self.w_curiosity * r_cur
-        bored = torch.zeros_like(reward)
+        bored = torch.zeros_like(r_comfort)
         if self.boredom_weight > 0:
             # Safe AND learning nothing: both gates must open. An agent in
             # danger is never bored (survival is stimulation enough), and an
@@ -735,11 +918,10 @@ class DreamerBrain(Brain):
             # gate:viability "safe" means far from the lethal floor (a merely
             # peckish agent can still be bored); under gate:drive it means at
             # the comfort setpoint (beta_10 — couples boredom to any hunger).
-            img_proprio = self.wm.head_proprio(img_feat)
             safety = (
-                self._viability(img_proprio)
+                self._viability(outcome_proprio)
                 if self.boredom_gate == "viability"
-                else self._drive_level(img_proprio)
+                else self._drive_level(outcome_proprio)
             )
             calm = (1.0 - safety / self.boredom_drive_threshold).clamp(min=0.0)
             dull = (1.0 - r_cur / self.boredom_stim_threshold).clamp(min=0.0)
@@ -755,8 +937,35 @@ class DreamerBrain(Brain):
                 # imagining states that shut a gate — which, lived, drains
                 # the pressure.
                 bored = bored * self._boredom_pressure
-            reward = reward - bored
-        return reward, r_cur, bored
+        cont = torch.sigmoid(self.wm.head_cont(outcome_feat).squeeze(-1))
+        fear = self.fear_weight * torch.log(cont.clamp_min(1e-6))
+        skill = torch.zeros_like(r_comfort) if skill_reward is None else skill_reward
+        components = torch.stack(
+            [
+                self.w_homeostasis * r_comfort,
+                self.w_homeostasis * r_viability,
+                self.w_curiosity * r_cur,
+                -bored,
+                fear,
+                self.skill_weight * skill,
+            ],
+            dim=-1,
+        )
+        return components, r_cur, bored
+
+    def _imagination_reward(
+        self,
+        img_feat: torch.Tensor,
+        img_action: torch.Tensor,
+        outcome_feat: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Compatibility wrapper returning scalar total affect."""
+        components, r_cur, bored = self._imagination_affect(
+            img_feat,
+            img_feat if outcome_feat is None else outcome_feat,
+            img_action,
+        )
+        return components.sum(-1), r_cur, bored
 
     def _lp_mix(self) -> float:
         """Cold-start disagreement trickle, annealed out over early life."""
@@ -772,15 +981,21 @@ class DreamerBrain(Brain):
         return self.train_ratio
 
     def learn(self) -> dict[str, float] | None:
-        batch_np = self.buffer.sample_sequences(
-            self.batch_size,
-            self.burn_in + self.seq_len,
-            recent=self.recent_slots,
-            prioritized=self.prioritize_rows,
-            spike_offset=self.burn_in,
-            spike_threshold=self.prioritize_threshold,
-        )
-        if batch_np is None or len(self.buffer) < self.warmup_steps:
+        with self._learn_lock:
+            return self._learn()
+
+    def _learn(self) -> dict[str, float] | None:
+        with self._experience_lock:
+            batch_np = self.buffer.sample_sequences(
+                self.batch_size,
+                self.burn_in + self.seq_len,
+                recent=self.recent_slots,
+                prioritized=self.prioritize_rows,
+                spike_offset=self.burn_in,
+                spike_threshold=self.prioritize_threshold,
+            )
+            experience = len(self.buffer)
+        if batch_np is None or experience < self.warmup_steps:
             return None
         learn_began = time.monotonic()
         b = {k: torch.as_tensor(v, device=self.device) for k, v in batch_np.items()}
@@ -864,9 +1079,8 @@ class DreamerBrain(Brain):
             cont_target = torch.ones_like(homeo)
         else:
             cont_target = (b["proprio"][..., 5] > 0.01).float()
-        loss_cont = F.binary_cross_entropy_with_logits(
-            self.wm.head_cont(feat).squeeze(-1), cont_target, reduction="none"
-        )
+        cont_logits = self.wm.head_cont(feat).squeeze(-1)
+        loss_cont_raw, loss_cont = self._continuation_loss(cont_logits, cont_target)
         loss_kl = self.wm.rssm.kl_loss(post, prior)
 
         # --- Plan2Explore ensemble: predict the next observation embedding.
@@ -879,7 +1093,9 @@ class DreamerBrain(Brain):
             else:
                 ens_target = embed.detach()[:, 1:]
         ens_in_feat = feat[:, :-1].detach()
-        ens_action = b["action"][:, 1:]  # action taken at t leads to obs_{t+1}
+        # Replay stores the action taken AT each observation. The action at t,
+        # not the policy response chosen after seeing t+1, caused obs t+1.
+        ens_action = b["action"][:, :-1]
         x = torch.cat([ens_in_feat, ens_action], dim=-1)
         ens_preds = self.wm.ensemble(x)  # (K, B, L-1, units)
         loss_ens = (ens_preds - ens_target).pow(2).mean(-1).mean(0)
@@ -907,7 +1123,7 @@ class DreamerBrain(Brain):
         lp_reward_mean = 0.0
         lp_idx: torch.Tensor | None = None
         with torch.no_grad():
-            real_disagreement = self.wm.disagreement(feat[:, :-1].detach(), b["action"][:, 1:])
+            real_disagreement = self.wm.disagreement(feat[:, :-1].detach(), b["action"][:, :-1])
             self.curiosity_norm.update(real_disagreement)
             if self.curiosity_mode == "lp":
                 # Fold this batch's per-sample model errors into their regions'
@@ -925,30 +1141,49 @@ class DreamerBrain(Brain):
                 real_lp = self.lp.reward(idx)
                 self.lp_norm.update(real_lp)
                 lp_reward_mean = float(self.lp_norm.normalize(real_lp).clamp(0, 5.0).mean())
-            if self.boredom_weight > 0 and self.boredom_pressure_on:
-                # Integrate the mood on lived states, not imagined ones: how
-                # much of this batch of real experience was calm AND dull?
-                # Sustained gate-touching charges the pressure; lived relief
-                # (either gate shutting) lets it leak away.
+            if self.boredom_weight > 0:
+                # Publish a learned stimulation estimate. act() combines it
+                # with each chronological body's actual safety; replay may
+                # refine perception, but cannot advance mood out of order.
                 r_dis_real = self.curiosity_norm.normalize(real_disagreement).clamp(0, 5.0)
                 if self.curiosity_mode == "lp":
                     stim = self.lp_norm.normalize(real_lp).clamp(0.0, 5.0)
                     stim = stim + self._lp_mix() * r_dis_real.reshape(-1)
                 else:
                     stim = r_dis_real.reshape(-1)
-                safety_r = (
-                    self._viability(b["proprio"][:, :-1])
-                    if self.boredom_gate == "viability"
-                    else self._drive_level(b["proprio"][:, :-1])
-                ).reshape(-1)
-                calm_r = (1.0 - safety_r / self.boredom_drive_threshold).clamp(min=0.0)
-                dull_r = (1.0 - stim / self.boredom_stim_threshold).clamp(min=0.0)
-                gate = float((calm_r * dull_r).mean())
-                pressure = self._boredom_pressure
-                pressure += (
-                    self.boredom_pressure_rise * gate - self.boredom_pressure_decay * pressure
-                )
-                self._boredom_pressure = min(1.0, max(0.0, pressure))
+                self._online_stimulation = float(stim.mean())
+
+        # --- temporal-skill discriminator on real temporal displacement
+        loss_skill_disc = torch.zeros((), device=self.device)
+        skill_disc_accuracy = 0.0
+        skill_usage_entropy = 0.0
+        if isinstance(self.actor, TemporalSkillPolicy) and self.skill_duration < L:
+            span = L - self.skill_duration
+            labels = b["skill"][:, :span].long()
+            valid = labels >= 0
+            for offset in range(1, self.skill_duration):
+                valid &= b["skill"][:, offset : offset + span].long() == labels
+            for offset in range(1, self.skill_duration + 1):
+                valid &= b["first"][:, offset : offset + span] < 0.5
+            start_skill_feat = feat[:, :span].detach()
+            end_skill_feat = feat[:, self.skill_duration :].detach()
+            skill_logits = self.actor.discrimination_logits(start_skill_feat, end_skill_feat)
+            if bool(valid.any()):
+                loss_skill_disc = F.cross_entropy(skill_logits[valid], labels[valid])
+                if self.opt_skill is None:
+                    raise RuntimeError("temporal skill discriminator has no optimizer")
+                self.opt_skill.zero_grad()
+                loss_skill_disc.backward()
+                nn.utils.clip_grad_norm_(self.actor.discriminator.parameters(), self.grad_clip)
+                self.opt_skill.step()
+                with torch.no_grad():
+                    skill_disc_accuracy = float(
+                        (skill_logits[valid].argmax(-1) == labels[valid]).float().mean()
+                    )
+                    usage = torch.bincount(labels[valid].cpu(), minlength=self.num_skills).float()
+                    usage = usage / usage.sum().clamp(min=1.0)
+                    entropy = -(usage[usage > 0] * usage[usage > 0].log()).sum()
+                    skill_usage_entropy = float(entropy / np.log(self.num_skills))
 
         # --- actor-critic in imagination, from a subsample of posterior states
         flat = feat.detach().flatten(0, 1)  # (B*L, F) = concat(h, z)
@@ -956,31 +1191,64 @@ class DreamerBrain(Brain):
         h_i = flat[starts, : self.wm.rssm_cfg.deter]
         z_i = flat[starts, self.wm.rssm_cfg.deter :]
 
-        img_feats, img_logps, img_ents, img_actions = [], [], [], []
-        for _ in range(self.horizon):
+        img_feats, img_outcomes = [], []
+        img_logps, img_ents, img_manager_ents, img_actions, img_skills = [], [], [], [], []
+        imagined_skill: torch.Tensor | None = None
+        for t in range(self.horizon):
             f_i = self.wm.rssm.feat(h_i, z_i)
-            dist_cont, dist_grip = self._policy_dists(f_i)
+            manager_logp = torch.zeros(f_i.shape[0], device=self.device)
+            manager_ent = torch.zeros_like(manager_logp)
+            if isinstance(self.actor, TemporalSkillPolicy):
+                if t % self.skill_duration == 0:
+                    manager_dist = self.actor.manager_dist(f_i)
+                    imagined_skill = manager_dist.sample()
+                    manager_logp = manager_dist.log_prob(imagined_skill)
+                    manager_ent = manager_dist.entropy()
+                if imagined_skill is None:
+                    raise RuntimeError("temporal skill manager did not select an intent")
+            dist_cont, dist_grip = self._policy_dists(f_i, skill=imagined_skill)
             a_cont = dist_cont.sample()
             a_grip = dist_grip.sample()
-            logp = dist_cont.log_prob(a_cont) + dist_grip.log_prob(a_grip)
+            logp = dist_cont.log_prob(a_cont) + dist_grip.log_prob(a_grip) + manager_logp
             ent = dist_cont.entropy() + dist_grip.entropy()
             a_vec = torch.cat([a_cont, F.one_hot(a_grip, NUM_GRIP_MODES).float()], dim=-1)
             img_feats.append(f_i)
             img_logps.append(logp)
             img_ents.append(ent)
+            img_manager_ents.append(manager_ent)
             img_actions.append(a_vec)
+            if imagined_skill is not None:
+                img_skills.append(imagined_skill)
             with torch.no_grad():
                 h_i, z_i, _ = self.wm.rssm.img_step(h_i, z_i, a_vec)
+                img_outcomes.append(self.wm.rssm.feat(h_i, z_i))
         img_feat = torch.stack(img_feats)  # (H, N, F)
+        img_outcome = torch.stack(img_outcomes)
         img_logp = torch.stack(img_logps)
         img_ent = torch.stack(img_ents)
+        img_manager_ent = torch.stack(img_manager_ents)
         img_action = torch.stack(img_actions)
 
         with torch.no_grad():
-            reward, r_cur, bored = self._imagination_reward(img_feat, img_action)
-            cont = torch.sigmoid(self.wm.head_cont(img_feat).squeeze(-1))
+            imagined_skill_reward = torch.zeros_like(img_logp)
+            if isinstance(self.actor, TemporalSkillPolicy):
+                skill_tensor = torch.stack(img_skills)
+                for start in range(0, self.horizon, self.skill_duration):
+                    end = start + self.skill_duration
+                    if end <= self.horizon:
+                        imagined_skill_reward[end - 1] = self.actor.intrinsic_reward(
+                            img_feat[start], img_outcome[end - 1], skill_tensor[start]
+                        )
+            components, r_cur, bored = self._imagination_affect(
+                img_feat,
+                img_outcome,
+                img_action,
+                skill_reward=imagined_skill_reward,
+            )
+            reward = components if self.vector_critic else components.sum(-1)
+            cont = torch.sigmoid(self.wm.head_cont(img_outcome).squeeze(-1))
             discount = self.gamma * cont
-            value_ema = self.twohot.decode(self.critic_ema(img_feat))
+            value_ema = self._critic_value(self.critic_ema, img_feat)
             # lambda-returns, backward pass
             returns = torch.zeros_like(value_ema)
             last = value_ema[-1]
@@ -990,11 +1258,12 @@ class DreamerBrain(Brain):
                     if t + 1 < self.horizon
                     else last
                 )
-                returns[t] = reward[t] + discount[t] * bootstrap
+                step_discount = discount[t].unsqueeze(-1) if self.vector_critic else discount[t]
+                returns[t] = reward[t] + step_discount * bootstrap
                 last = returns[t]
 
         # Critic: twohot regression to lambda-returns.
-        critic_logits = self.critic(img_feat.detach())
+        critic_logits = self._critic_logits(self.critic, img_feat.detach())
         loss_critic = self.twohot.loss(critic_logits, returns.detach()).mean()
         self.opt_critic.zero_grad()
         loss_critic.backward()
@@ -1008,17 +1277,25 @@ class DreamerBrain(Brain):
 
         # Actor: REINFORCE on normalized advantages + entropy bonus.
         with torch.no_grad():
-            value = self.twohot.decode(self.critic(img_feat))
-            scaled_ret = percentile_scale(returns, self._return_scale)
+            value_components = self._critic_value(self.critic, img_feat)
+            value = value_components.sum(-1) if self.vector_critic else value_components
+            total_returns = returns.sum(-1) if self.vector_critic else returns
+            scaled_ret = percentile_scale(total_returns, self._return_scale)
             scaled_val = value / max(1.0, self._return_scale[0])
             adv = (scaled_ret - scaled_val).detach()
-        loss_actor = (-img_logp * adv - self.entropy_scale * img_ent).mean()
+        loss_actor = (
+            -img_logp * adv
+            - self.entropy_scale * img_ent
+            - self.skill_manager_entropy * img_manager_ent
+        ).mean()
         self.opt_actor.zero_grad()
         loss_actor.backward()
-        nn.utils.clip_grad_norm_(self.actor.parameters(), self.grad_clip)
+        nn.utils.clip_grad_norm_(self._actor_parameters, self.grad_clip)
         self.opt_actor.step()
 
         self._updates += 1
+        if self.async_inference and self._updates % self.publish_every == 0:
+            self._publish_inference()
         elapsed = time.monotonic() - learn_began
         self._learn_seconds = (
             elapsed if self._learn_seconds == 0.0 else 0.95 * self._learn_seconds + 0.05 * elapsed
@@ -1041,6 +1318,8 @@ class DreamerBrain(Brain):
             "homeo_max": float(homeo.max()),
             "homeo_spike_frac": float((homeo > 0.1).float().mean()),
             "loss_reward": float(loss_reward.detach().mean()),
+            "loss_cont": float(loss_cont_raw.detach().mean()),
+            "terminal_frac": float((cont_target < 0.5).float().mean()),
             "value": float(value.mean()),
             "loss_critic": float(loss_critic.detach()),
             "loss_actor": float(loss_actor.detach()),
@@ -1051,6 +1330,31 @@ class DreamerBrain(Brain):
             "learn_seconds": self._learn_seconds,
             "buffer": float(len(self.buffer)),
         }
+        with torch.no_grad():
+            cont_probability = torch.sigmoid(cont_logits)
+            terminal = cont_target < 0.5
+            alive = ~terminal
+            if bool(terminal.any()):
+                self._metrics["cont_terminal"] = float(cont_probability[terminal].mean())
+            if bool(alive.any()):
+                self._metrics["cont_alive"] = float(cont_probability[alive].mean())
+        if self.vector_critic:
+            for index, name in enumerate(self.affect_names):
+                self._metrics[f"value_{name}"] = float(value_components[..., index].mean())
+                self._metrics[f"return_{name}"] = float(returns[..., index].mean())
+                self._metrics[f"affect_{name}"] = float(components[..., index].mean())
+        if isinstance(self.actor, TemporalSkillPolicy):
+            self._metrics.update(
+                {
+                    "skill_discriminator_loss": float(loss_skill_disc.detach()),
+                    "skill_discriminator_accuracy": skill_disc_accuracy,
+                    "skill_usage_entropy": skill_usage_entropy,
+                    "skill_imagined_reward": float(imagined_skill_reward.mean()),
+                    "skill_manager_entropy": float(img_manager_ent.detach().mean()),
+                    "skill_switches": float(self._skill_switches),
+                    "active_skill": float(self._active_skill),
+                }
+            )
         # Can the reward head see the loud moments? |decoded - realized| on
         # spike samples is the reachability gauge (009: a head that never
         # trains on meals can't let the actor plan toward one), and the
@@ -1095,6 +1399,7 @@ class DreamerBrain(Brain):
         if self.boredom_weight > 0:
             self._metrics["boredom"] = float(bored.mean())
             self._metrics["stimulation"] = float(r_cur.mean())
+            self._metrics["stimulation_online"] = self._online_stimulation
             self._metrics["boredom_calm_gate"] = self._gate_calm
             self._metrics["boredom_dull_gate"] = self._gate_dull
             if self.boredom_pressure_on:
@@ -1125,6 +1430,8 @@ class DreamerBrain(Brain):
         self._life_return_homeo = 0.0
         self._life_return_via = 0.0
         self._stream_first = True
+        self._active_skill = -1
+        self._skill_remaining = 0
 
     def wake(self) -> None:
         """First act after a dormant spell (see the blackout flag's contract).
@@ -1141,6 +1448,8 @@ class DreamerBrain(Brain):
             return
         self.h, self.z = self.wm.rssm.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
+        self._active_skill = -1
+        self._skill_remaining = 0
 
     def record_death(self, obs: Observation, dormant: bool = False) -> None:
         """The body's true end, delivered by the runtime (see Brain.record_death).
@@ -1192,9 +1501,13 @@ class DreamerBrain(Brain):
                     if prev_v is not None:
                         salience += abs(self.via_scale * (prev_v - v)) + self.via_floor * v
                     self._life_return_via -= self.via_floor * v
-        self.buffer.add(
-            dead_obs, np.zeros(ACTION_DIM, dtype=np.float32), salience=salience, first=first
-        )
+        with self._experience_lock:
+            self.buffer.add(
+                dead_obs,
+                np.zeros(ACTION_DIM, dtype=np.float32),
+                salience=salience,
+                first=first,
+            )
         self._stream_first = False
 
     def _recompute_salience(self) -> None:
@@ -1236,6 +1549,10 @@ class DreamerBrain(Brain):
     # ----------------------------------------------------------- persistence
 
     def state_dict(self) -> dict[str, Any]:
+        with self._learn_lock, self._experience_lock:
+            return self._state_dict()
+
+    def _state_dict(self) -> dict[str, Any]:
         state_muon = self.opt_model_muon.state_dict() if self.opt_model_muon else None
         return {
             "obs_version": OBS_VERSION,
@@ -1246,6 +1563,7 @@ class DreamerBrain(Brain):
             "opt_model": self.opt_model.state_dict(),
             "opt_model_muon": state_muon,
             "opt_actor": self.opt_actor.state_dict(),
+            "opt_skill": self.opt_skill.state_dict() if self.opt_skill is not None else None,
             "opt_critic": self.opt_critic.state_dict(),
             "curiosity_norm": self.curiosity_norm.state_dict(),
             "temperament": dict(self.temperament),
@@ -1254,6 +1572,10 @@ class DreamerBrain(Brain):
             "lp_norm": self.lp_norm.state_dict(),
             "return_scale": self._return_scale[0],
             "boredom_pressure": self._boredom_pressure,
+            "online_stimulation": self._online_stimulation,
+            "active_skill": self._active_skill,
+            "skill_remaining": self._skill_remaining,
+            "skill_switches": self._skill_switches,
             # Ride the checkpoint so a resume during a dormant spell doesn't
             # silently cut a blackout the priced mode should have seen.
             "prev_drive": self._prev_drive,
@@ -1290,6 +1612,8 @@ class DreamerBrain(Brain):
             if self.opt_model_muon is not None and state.get("opt_model_muon") is not None:
                 self.opt_model_muon.load_state_dict(state["opt_model_muon"])
         self.opt_actor.load_state_dict(state["opt_actor"])
+        if self.opt_skill is not None and state.get("opt_skill") is not None:
+            self.opt_skill.load_state_dict(state["opt_skill"])
         self.opt_critic.load_state_dict(state["opt_critic"])
         self.curiosity_norm.load_state_dict(state["curiosity_norm"])
         # Keys guarded: checkpoints from before the interest/temperament work
@@ -1304,6 +1628,12 @@ class DreamerBrain(Brain):
         self._return_scale = [float(state["return_scale"])]
         # Guarded: pre-pressure checkpoints start with a fresh mood.
         self._boredom_pressure = float(state.get("boredom_pressure", 0.0))
+        self._online_stimulation = float(
+            state.get("online_stimulation", self.boredom_stim_threshold)
+        )
+        self._active_skill = int(state.get("active_skill", -1))
+        self._skill_remaining = int(state.get("skill_remaining", 0))
+        self._skill_switches = int(state.get("skill_switches", 0))
         prev_drive = state.get("prev_drive")
         self._prev_drive = float(prev_drive) if prev_drive is not None else None
         # Guarded: pre-viability checkpoints carry no barrier/return state.
@@ -1324,6 +1654,8 @@ class DreamerBrain(Brain):
         self.h = torch.as_tensor(state["h"], device=self.device)
         self.z = torch.as_tensor(state["z"], device=self.device)
         self.last_action = torch.as_tensor(state["last_action"], device=self.device)
+        if self.async_inference:
+            self._publish_inference()
 
     def inherit(self, state: dict[str, Any]) -> None:
         """Warm-start a newborn from a living donor: weights, memories, and
