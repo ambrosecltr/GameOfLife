@@ -75,6 +75,7 @@ uv run gol-ctl pause                      # control a running world (speed/check
 uv run gol-stats saves/alpha              # dig through metrics and events
 uv run gol-stats saves/alpha --compare    # are the dreamers pulling ahead of chance?
 uv run gol-stats saves/alpha --interests  # do agents differ, and stay themselves?
+uv run python scripts/aion_stats.py saves/aion_01_2gpu  # readable Aion check-in
 scripts/soak.sh saves/soak_001            # overnight run, restart-on-crash
 scripts/provision_runpod.sh root@gpu-box saves/alpha   # ship a world to a cloud GPU
 ```
