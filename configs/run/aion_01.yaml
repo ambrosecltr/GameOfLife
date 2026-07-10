@@ -1,0 +1,39 @@
+# Aion 01 — first continuous-time S5 lineage round.
+#
+# The world and population structure match beta 013 so the architecture and
+# lifecycle changes remain attributable. Profile a full update on the target
+# RTX 3090/3090 Ti before starting the long round; 1,280 replay steps × batch 8
+# is intentionally a substantial consolidation workload.
+#
+#   uv run python scripts/bench_learn.py \
+#       --brain configs/brain/aion_01_s5.yaml --devices cuda --updates 10
+#   uv run python scripts/bench_contention.py \
+#       --brain configs/brain/aion_01_s5.yaml --device cuda --brains 3 --updates 10
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/aion_01 \
+#       --config configs/run/aion_01.yaml
+
+world_config: configs/world/beta_12_organism.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7305
+
+devices:
+  inference: cuda
+  learning: cuda
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/aion_01_s5.yaml
+      count: 3
+    - brain: { kind: scripted_forager }
+      count: 3
+
+observability:
+  rerun: false
+  metrics_every_ticks: 100

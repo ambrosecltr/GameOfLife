@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Benchmark DreamerBrain learn()/act() across device x compile x config.
+"""Benchmark a registered learning brain across device x compile x config.
 
 The number that gates everything local is learn_seconds: achieved train_ratio
 = updates/s vs lived act-steps/s, and round 008 proved update density is the
@@ -10,6 +10,7 @@ Usage:
   uv run python scripts/bench_learn.py                        # default grid
   uv run python scripts/bench_learn.py --devices cpu mps --compile off on
   uv run python scripts/bench_learn.py --brain configs/brain/swift_01_dreamer.yaml
+  uv run python scripts/bench_learn.py --brain configs/brain/aion_01_s5.yaml --devices cuda
   uv run python scripts/bench_learn.py --preset small --updates 30
 """
 
@@ -23,18 +24,18 @@ from typing import Any
 import numpy as np
 import torch
 import yaml
+from gol_world.interface import (
+    EVENTS_DIM,
+    NUM_RAY_KINDS,
+    PROPRIO_DIM,
+    RAY_DIM,
+    SOUND_DIM,
+    BodySpec,
+    Observation,
+)
 
 
-def synthetic_obs(rng: np.random.Generator, body: Any) -> Any:
-    from gol_world.interface import (
-        EVENTS_DIM,
-        NUM_RAY_KINDS,
-        PROPRIO_DIM,
-        RAY_DIM,
-        SOUND_DIM,
-        Observation,
-    )
-
+def synthetic_obs(rng: np.random.Generator, body: BodySpec) -> Observation:
     rays = np.zeros((body.num_rays, RAY_DIM), dtype=np.float32)
     rays[:, 0] = rng.random(body.num_rays)
     rays[:, 1:4] = rng.random((body.num_rays, 3)).astype(np.float32)
@@ -67,22 +68,33 @@ def build_cfg(args: argparse.Namespace, compile_on: bool) -> dict[str, Any]:
         cfg["training"]["optimizer"] = args.optimizer
     cfg["replay"]["warmup_steps"] = 100
     cfg["training"]["compile"] = compile_on
+    if compile_on:
+        # Compiled mutable modules and deep-copied inference snapshots are
+        # intentionally incompatible in the runtime as well.
+        cfg["training"]["async_inference"] = False
     return cfg
 
 
 def bench_one(args: argparse.Namespace, device: str, compile_on: bool) -> dict[str, float]:
-    from gol_brains.dreamer.brain import DreamerBrain
+    from gol_brains.registry import body_from_config, build_brain
 
     cfg = build_cfg(args, compile_on)
-    brain = DreamerBrain(cfg, seed=0, device=device)
+    brain = build_brain(cfg, seed=0, device=device)
+    body = body_from_config(cfg)
     rng = np.random.default_rng(0)
+    replay = cfg["replay"]
+    fill = max(
+        args.fill,
+        int(replay.get("warmup_steps", 0)),
+        int(replay.get("seq_len", 64)) + int(replay.get("burn_in", 0)) + 2,
+    )
 
     act_times = []
-    for i in range(args.fill):
-        obs = synthetic_obs(rng, brain.body)
+    for i in range(fill):
+        obs = synthetic_obs(rng, body)
         began = time.perf_counter()
         brain.act(obs)
-        if i >= args.fill // 2:  # settle past warmup's random-action branch
+        if i >= fill // 2:  # settle past warmup's random-action branch
             act_times.append(time.perf_counter() - began)
 
     warm = max(2, args.updates // 5)  # discard compile/allocator warmup
@@ -94,11 +106,16 @@ def bench_one(args: argparse.Namespace, device: str, compile_on: bool) -> dict[s
         if i >= warm:
             learn_times.append(time.perf_counter() - began)
 
+    sequence_timepoints = int(replay.get("batch_size", 16)) * int(replay.get("seq_len", 64))
+    learn_p50 = statistics.median(learn_times)
     return {
         "learn_mean": statistics.mean(learn_times),
-        "learn_p50": statistics.median(learn_times),
+        "learn_p50": learn_p50,
         "learn_min": min(learn_times),
         "act_p50": statistics.median(act_times),
+        "timepoints_per_second": sequence_timepoints / learn_p50,
+        "fill": float(fill),
+        "train_ratio": float(args.ratio or cfg["training"].get("train_ratio", 0.25)),
     }
 
 
@@ -115,9 +132,11 @@ def main() -> None:
     ap.add_argument("--burn-in", type=int, help="replay.burn_in override")
     ap.add_argument("--recent", type=int, help="replay.recent override")
     ap.add_argument("--optimizer", choices=["adam", "muon"])
-    ap.add_argument("--brains", type=int, default=3, help="dreamers for the pacing math")
+    ap.add_argument("--brains", type=int, default=3, help="learning brains for pacing math")
     ap.add_argument("--act-every", type=int, default=5, help="ticks per act (pacing math)")
-    ap.add_argument("--ratio", type=float, default=1.0, help="target train ratio (pacing math)")
+    ap.add_argument(
+        "--ratio", type=float, help="target train ratio override (defaults to brain config)"
+    )
     args = ap.parse_args()
 
     torch.set_num_threads(torch.get_num_threads())  # respect env tuning if any
@@ -129,13 +148,15 @@ def main() -> None:
             continue
         for comp in args.compile:
             label = f"{device}/compile={comp}"
-            print(f"--- {label} (building + filling {args.fill} steps...)")
+            print(f"--- {label} (building + filling replay...)")
             r = bench_one(args, device, comp == "on")
             rows.append((label, r))
             print(
                 f"{label}: learn {r['learn_mean'] * 1e3:.0f}ms mean / "
                 f"{r['learn_p50'] * 1e3:.0f}ms p50 / {r['learn_min'] * 1e3:.0f}ms min, "
-                f"act {r['act_p50'] * 1e3:.1f}ms p50"
+                f"act {r['act_p50'] * 1e3:.1f}ms p50, "
+                f"{r['timepoints_per_second']:.0f} replay timepoints/s "
+                f"(fill={int(r['fill'])})"
             )
 
     if rows:
@@ -144,10 +165,11 @@ def main() -> None:
         # One brain's worker is serial; siblings share cores, so scale the
         # aggregate by an assumed 2x (measured on M1: ~1.7-2.2x for 3 workers).
         agg = ups * min(2.0, args.brains)
-        tick_rate = agg / args.brains / args.ratio * args.act_every
+        ratio = best["train_ratio"]
+        tick_rate = agg / args.brains / ratio * args.act_every
         print(f"\nbest: {best_label} at {ups:.1f} updates/s/brain")
         print(
-            f"pacing: {args.brains} brains at ratio {args.ratio:g}, act_every {args.act_every} "
+            f"pacing: {args.brains} brains at ratio {ratio:g}, act_every {args.act_every} "
             f"-> sustainable tick_rate ~= {tick_rate:.0f} t/s "
             f"(assumes ~2x aggregate scaling across workers; verify train_ratio_eff live)"
         )

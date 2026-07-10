@@ -24,6 +24,7 @@ from gol_obs.blueprint import build_blueprint
 from gol_obs.mesher import chunk_mesh
 
 APP_ID = "gameoflife"
+SCRIPTED_BRAIN_KINDS = frozenset({"random_walker", "scripted_forager"})
 
 
 # World events as feed entries: severity + a human sentence.
@@ -84,7 +85,7 @@ class RerunLogger:
         self._rotation_index = 0
         self._sun_radius = max(world.cfg.size[0], world.cfg.size[1]) * 0.6
         self._styled: set[str] = set()
-        self._dreamers: tuple[str, ...] = ()
+        self._learners: tuple[str, ...] = ()
         self._robot_paths: set[str] = set()
         rr.init(APP_ID)
         if save_path is not None:
@@ -134,9 +135,15 @@ class RerunLogger:
                 )
 
     def _send_blueprint(self, world: World) -> None:
-        dreamers = tuple(sorted(r.id for r in world.robots.values() if r.brain_name == "dreamer"))
-        self._dreamers = dreamers
-        rr.send_blueprint(build_blueprint(list(dreamers)))
+        learners = tuple(
+            sorted(
+                robot.id
+                for robot in world.robots.values()
+                if robot.brain_name not in SCRIPTED_BRAIN_KINDS
+            )
+        )
+        self._learners = learners
+        rr.send_blueprint(build_blueprint(list(learners)))
 
     def _maybe_rotate(self, world: World) -> None:
         if not self.rotate_ticks:
@@ -272,8 +279,14 @@ class RerunLogger:
         # New bodies (respawns) get chart styles; a changed set of learning
         # minds gets a fresh layout with the right dashboard tabs.
         self._style_robot_series(world)
-        dreamers = tuple(sorted(r.id for r in world.robots.values() if r.brain_name == "dreamer"))
-        if dreamers != self._dreamers:
+        learners = tuple(
+            sorted(
+                robot.id
+                for robot in world.robots.values()
+                if robot.brain_name not in SCRIPTED_BRAIN_KINDS
+            )
+        )
+        if learners != self._learners:
             self._send_blueprint(world)
         if heatmap is not None:
             rr.log("charts/visit_heatmap", rr.Image(heatmap))

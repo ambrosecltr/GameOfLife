@@ -73,18 +73,22 @@ class Brain(ABC):
         Weights and memory persist; only the live recurrent state resets.
         """
 
-    def wake(self) -> None:
+    def wake(self, dormant_steps: int = 0) -> None:
         """Called on the first act after a dormant spell, before that act.
 
         Default: the dormant gap is a stream break like any other (the
         legacy cut). Brains that price the blackout override this to keep
         the pre-collapse state as the predecessor of the wake observation —
         one visible transition carrying the gap's real energy/integrity
-        delta — instead of severing the stream.
+        delta — instead of severing the stream. `dormant_steps` is the number
+        of perception/action opportunities missed while the body was dormant.
         """
+        del dormant_steps
         self.reset_stream()
 
-    def record_death(self, obs: Observation, dormant: bool = False) -> None:  # noqa: B027
+    def record_death(  # noqa: B027
+        self, obs: Observation, dormant: bool = False, dormant_steps: int = 0
+    ) -> None:
         """Called once by the runtime after the body died (integrity crossed
         the lethal floor and the world removed it).
 
@@ -92,7 +96,9 @@ class Brain(ABC):
         act, and the death tick removes the robot before sensing — so the
         runtime delivers the last observation it had for the body, with
         `dormant` saying whether the body was hibernating when it died.
+        `dormant_steps` measures the unobserved interval when it was.
         Brains that learn a continuation/terminal signal override this to
         record the stream's real end; the default is a no-op (scripted
         brains, and learners that don't model death).
         """
+        del obs, dormant, dormant_steps

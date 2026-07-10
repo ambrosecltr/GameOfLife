@@ -90,6 +90,7 @@ def main() -> None:
     args = ap.parse_args()
 
     from gol_brains.dreamer.brain import DreamerBrain
+    from gol_brains.registry import build_brain
 
     blob_path = resolve_blob(args.target, args.robot)
     with open(args.brain) as fh:
@@ -104,13 +105,16 @@ def main() -> None:
     import torch
 
     orig_load = torch.load
-    torch.load = functools.partial(orig_load, map_location=args.device)  # type: ignore[assignment]
+    torch.load = functools.partial(orig_load, map_location=args.device)
     try:
         state = pickle.loads(blob_path.read_bytes())
     finally:
         torch.load = orig_load
 
-    brain = DreamerBrain(cfg, seed=args.seed, device=args.device)
+    candidate = build_brain(cfg, seed=args.seed, device=args.device)
+    if not isinstance(candidate, DreamerBrain):
+        raise SystemExit("conditioning gym requires a replay-based world-model brain")
+    brain = candidate
     if args.fresh_model:
         brain.buffer.load_state_dict(state["buffer"])
         if "salience" not in state["buffer"]:

@@ -89,10 +89,11 @@ scripts/provision_runpod.sh root@gpu-box saves/alpha   # ship a world to a cloud
   touch, an energy store, and a free 2-channel signal broadcast. Food restores energy;
   night stops regrowth; running out means hibernation, then death — which drops scrap
   back into the world.
-- **Brains**: pluggable. Scripted baselines (random walker, forager) share the world
-  with learning agents: per-robot Dreamer-style world models with imagination-trained
-  critics, endogenous affect (interoception, curiosity, boredom, predicted mortality),
-  and an optional learned temporal-skill manager/worker layer. No task reward, named
+- **Brains**: pluggable. Scripted baselines share the world with three research
+  lineages: beta's Dreamer/GRU world model, Aion's long-context S5 world model, and
+  anima's world-model-free plastic network. World-model organisms use
+  imagination-trained critics, endogenous affect (interoception, curiosity, boredom,
+  predicted mortality), and optional learned temporal skills. No task reward, named
   skill, demonstration, pretrained behavior, or fitness score exists in the learning
   path.
 - **Observability**: [Rerun](https://rerun.io) — live 3D scene, per-agent charts

@@ -43,6 +43,15 @@ class ReplayBuffer:
         # measured what happens without it: 8 death->rebirth stitches read as
         # +3.9 reward (vs +0.5 for a real meal) and landed in ~61% of batches.
         self.first = np.zeros(capacity, dtype=np.uint8)
+        # A wake is not a new life: Aion clears fast sensorimotor modes while
+        # its slow context survives. It therefore needs a marker distinct
+        # from `first`, which always clears the entire recurrent state.
+        self.wake = np.zeros(capacity, dtype=np.uint8)
+        # Number of missed perception/action opportunities represented by
+        # this transition. Normally 1; a wake carries the blackout duration
+        # so continuous-time dynamics decay by the same simulated time live
+        # and during replay consolidation.
+        self.step_scale = np.ones(capacity, dtype=np.float32)
         self.pos = 0
         self.full = False
 
@@ -55,11 +64,17 @@ class ReplayBuffer:
         action: npt.NDArray[np.float32],
         salience: float = 0.0,
         first: bool = False,
+        wake: bool = False,
+        step_scale: float = 1.0,
         skill: int = -1,
     ) -> None:
+        if not np.isfinite(step_scale) or step_scale < 1.0:
+            raise ValueError("step_scale must be finite and at least 1")
         i = self.pos
         self.salience[i] = salience
         self.first[i] = first
+        self.wake[i] = wake
+        self.step_scale[i] = step_scale
         self.depth[i] = np.clip(obs["rays"][:, 0] * 255, 0, 255).astype(np.uint8)
         self.rgb[i] = np.clip(obs["rays"][:, 1:4] * 255, 0, 255).astype(np.uint8)
         self.kind[i] = obs["rays"][:, 4:].argmax(axis=1).astype(np.uint8)
@@ -147,6 +162,8 @@ class ReplayBuffer:
             "action": self.action[idx].astype(np.float32),
             "skill": self.skill[idx].astype(np.int64).astype(np.float32),
             "first": self.first[idx].astype(np.float32),
+            "wake": self.wake[idx].astype(np.float32),
+            "step_scale": self.step_scale[idx].astype(np.float32),
         }
 
     def state_dict(self) -> dict[str, Any]:
@@ -167,6 +184,8 @@ class ReplayBuffer:
             "skill": self.skill[order][-n:],
             "salience": self.salience[order][-n:],
             "first": self.first[order][-n:],
+            "wake": self.wake[order][-n:],
+            "step_scale": self.step_scale[order][-n:],
             "rng_state": self.rng.bit_generator.state,
         }
 
@@ -184,6 +203,12 @@ class ReplayBuffer:
         # stored life's breaks are unrecoverable — same rule as salience).
         if "first" in state:
             self.first[:n] = state["first"][-n:]
+        self.wake[:n] = 0
+        if "wake" in state:
+            self.wake[:n] = state["wake"][-n:]
+        self.step_scale[:n] = 1.0
+        if "step_scale" in state:
+            self.step_scale[:n] = state["step_scale"][-n:]
         self.pos = n % self.capacity
         self.full = n == self.capacity
         self.rng.bit_generator.state = state["rng_state"]

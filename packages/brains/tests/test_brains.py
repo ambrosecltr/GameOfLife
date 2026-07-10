@@ -17,7 +17,7 @@ from gol_world.interface import (
     Observation,
 )
 
-AVAILABLE_KINDS = ["random_walker", "scripted_forager", "dreamer"]
+AVAILABLE_KINDS = ["random_walker", "scripted_forager", "dreamer", "aion"]
 
 
 def fake_obs(rng: np.random.Generator) -> Observation:

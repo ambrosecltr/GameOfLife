@@ -9,6 +9,10 @@ reporting per-brain and aggregate updates/s for the pacing identity.
 
   uv run python scripts/bench_contention.py --brain configs/brain/<round>.yaml \
       --device cuda --brains 3 --updates 20
+
+For Aion 01:
+  uv run python scripts/bench_contention.py \
+      --brain configs/brain/aion_01_s5.yaml --device cuda --brains 3 --updates 10
 """
 
 from __future__ import annotations
@@ -31,20 +35,28 @@ def main() -> None:
     ap.add_argument("--fill", type=int, default=600)
     args = ap.parse_args()
 
-    from gol_brains.dreamer.brain import DreamerBrain
+    from gol_brains.base import Brain
+    from gol_brains.registry import body_from_config, build_brain
 
     with open(args.brain) as fh:
         cfg = yaml.safe_load(fh)
     cfg.setdefault("replay", {})["warmup_steps"] = 100
+    replay = cfg["replay"]
+    fill = max(
+        args.fill,
+        int(replay.get("warmup_steps", 0)),
+        int(replay.get("seq_len", 64)) + int(replay.get("burn_in", 0)) + 2,
+    )
+    body = body_from_config(cfg)
 
-    brains = []
+    brains: list[Brain] = []
     for k in range(args.brains):
-        brain = DreamerBrain(cfg, seed=k, device=args.device)
+        brain = build_brain(cfg, seed=k, device=args.device)
         rng = np.random.default_rng(k)
-        for _ in range(args.fill):
-            brain.act(synthetic_obs(rng, brain.body))
+        for _ in range(fill):
+            brain.act(synthetic_obs(rng, body))
         brains.append(brain)
-        print(f"brain {k} filled ({args.fill} steps)", flush=True)
+        print(f"brain {k} filled ({fill} steps)", flush=True)
 
     warm = max(2, args.updates // 5)
     per_brain: list[float] = [0.0] * args.brains
@@ -65,10 +77,12 @@ def main() -> None:
         t.join()
     wall = time.perf_counter() - began
     agg = args.brains * args.updates / wall
+    timepoints = int(replay.get("batch_size", 16)) * int(replay.get("seq_len", 64))
     for k, rate in enumerate(per_brain):
         print(f"brain {k}: {rate:.2f} upd/s under contention ({1 / rate:.3f}s/update)")
     print(
         f"aggregate: {agg:.2f} upd/s across {args.brains} workers "
+        f"= {agg * timepoints:.0f} replay timepoints/s "
         f"(includes warm={warm} skew; per-brain numbers are the honest ones)"
     )
 

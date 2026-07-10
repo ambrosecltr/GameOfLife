@@ -2,7 +2,7 @@
 
 gol-stats saves/alpha              # summary: population, lifespans, eats
 gol-stats saves/alpha --events     # event counts by kind and robot
-gol-stats saves/alpha --compare    # learning sanity probe: dreamers vs
+gol-stats saves/alpha --compare    # learning sanity probe: learners vs
                                    # scripted baselines (eat rates, prediction
                                    # error trend). Observational, not a benchmark.
 gol-stats saves/alpha --interests  # per-agent activity profiles over time
@@ -70,7 +70,7 @@ def summarize(save_dir: Path) -> dict[str, Any]:
 
 
 def compare(save_dir: Path) -> dict[str, Any]:
-    """Learning sanity probe: is the dreamer lineage pulling ahead of chance?
+    """Learning sanity probe: is a learning lineage pulling ahead of chance?
 
     Observational, from the world's own logs — not a benchmark and not a task.
     """
@@ -99,7 +99,7 @@ def compare(save_dir: Path) -> dict[str, Any]:
         if ticks > 0
     }
 
-    # Dreamer prediction-error trend: mean over first vs last quartile of samples.
+    # Learning-brain prediction-error trend: first vs last quartile of samples.
     per_metric: dict[str, list[float]] = defaultdict(list)
     for m in metrics:
         for _rid, bm in m.get("brains", {}).items():
@@ -115,7 +115,7 @@ def compare(save_dir: Path) -> dict[str, Any]:
                 "last_quartile_mean": round(sum(series[-q:]) / q, 4),
             }
 
-    return {"last_tick": last_tick, "eat_rate_per_10k_ticks": eat_rate, "dreamer_trends": trends}
+    return {"last_tick": last_tick, "eat_rate_per_10k_ticks": eat_rate, "learning_trends": trends}
 
 
 # The interest profile: how an agent's time is allocated within a window.

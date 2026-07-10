@@ -17,6 +17,8 @@ from gol_world.interface import BodySpec
 from gol_brains.base import Brain
 from gol_brains.scripted import RandomWalkerBrain, ScriptedForagerBrain
 
+LEARNER_KINDS = frozenset({"dreamer", "aion"})
+
 
 def resolve_brain_config(spec: str | dict[str, Any]) -> dict[str, Any]:
     """A brain spec is either an inline dict or a path to a YAML file."""
@@ -47,6 +49,10 @@ def build_brain(spec: str | dict[str, Any], seed: int, device: str = "cpu") -> B
         from gol_brains.dreamer import DreamerBrain
 
         return DreamerBrain(cfg, seed=seed, device=device, body=body)
+    if kind == "aion":
+        from gol_brains.aion import AionBrain
+
+        return AionBrain(cfg, seed=seed, device=device, body=body)
     if kind == "plastic":
         from gol_brains.plastic import PlasticBrain
 
@@ -55,4 +61,4 @@ def build_brain(spec: str | dict[str, Any], seed: int, device: str = "cpu") -> B
 
 
 def is_learning_kind(spec: str | dict[str, Any]) -> bool:
-    return resolve_brain_config(spec).get("kind") == "dreamer"
+    return resolve_brain_config(spec).get("kind") in LEARNER_KINDS

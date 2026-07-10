@@ -82,7 +82,7 @@ def _mind_tab(rid: str) -> rrb.Vertical:
                 name=f"{rid} in the world",
                 origin="world",
                 contents=["+ world/**", "- world/rays/**", f"+ world/rays/{rid}"],
-                # Chase-cam: the view's eye follows this dreamer's body around.
+                # Chase-cam: the view's eye follows this learner's body around.
                 eye_controls=rrb.EyeControls3D(
                     kind="Orbital",
                     tracking_entity=f"world/robots/{rid}",
@@ -107,6 +107,6 @@ def _mind_tab(rid: str) -> rrb.Vertical:
     )
 
 
-def build_blueprint(dreamer_ids: list[str]) -> rrb.Blueprint:
-    tabs = [_overview_tab(), _health_tab()] + [_mind_tab(rid) for rid in sorted(dreamer_ids)]
+def build_blueprint(learner_ids: list[str]) -> rrb.Blueprint:
+    tabs = [_overview_tab(), _health_tab()] + [_mind_tab(rid) for rid in sorted(learner_ids)]
     return rrb.Blueprint(rrb.Tabs(*tabs, active_tab=0), collapse_panels=True)

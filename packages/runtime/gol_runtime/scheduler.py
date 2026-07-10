@@ -55,14 +55,16 @@ class Population:
         # price the blackout keep the gap as one visible transition instead.
         self._dormant_ids: set[str] = set()
         self._pending_wake: set[str] = set()
+        self._dormant_steps: dict[str, int] = {}
         # inherit_weights == "lineage": dead learning brains wait here for a
         # new body — weights and replay memory persist across deaths.
         self._lineage_stash: dict[str, list[Brain]] = {}
         # Deaths whose final observation hasn't reached the brain yet: the
         # learner worker may hold the brain's lock mid-update when the body
         # dies, and the sim never waits, so delivery is non-blocking with a
-        # retry each act-step. (brain, its lock, last obs, died dormant.)
-        self._pending_deaths: list[tuple[Brain, threading.Lock, Observation, bool]] = []
+        # retry each act-step. Tuple: brain, lock, last obs, died dormant,
+        # and missed perception cycles before death.
+        self._pending_deaths: list[tuple[Brain, threading.Lock, Observation, bool, int]] = []
         # Sticky per-robot last observation: last_obs holds only THIS step's
         # awake obs (the frame logger's contract), so a hibernating body —
         # the dominant death mode — vanishes from it long before it dies.
@@ -121,6 +123,9 @@ class Population:
                 self._next_idx = state["next_idx"]
                 self._respawn_queue = state["respawn_queue"]
                 self._last_bud = state.get("last_bud", {})
+                self._dormant_ids = set(state.get("dormant_ids", ()))
+                self._pending_wake = set(state.get("pending_wake", ()))
+                self._dormant_steps = dict(state.get("dormant_steps", {}))
             elif robot_id.startswith("__lineage__"):
                 kind = robot_id.split("__")[2]
                 spec = self._specs_by_kind.get(kind, {"kind": kind})
@@ -146,6 +151,9 @@ class Population:
                 "next_idx": self._next_idx,
                 "respawn_queue": self._respawn_queue,
                 "last_bud": self._last_bud,
+                "dormant_ids": tuple(self._dormant_ids),
+                "pending_wake": tuple(self._pending_wake),
+                "dormant_steps": dict(self._dormant_steps),
             }
         )
         return blobs
@@ -171,11 +179,15 @@ class Population:
                 and lock is not None
                 and self.cfg.population.inherit_weights == "lineage"
             ):
-                self._pending_deaths.append((brain, lock, last, rid in self._dormant_ids))
+                was_dormant = rid in self._dormant_ids
+                self._pending_deaths.append(
+                    (brain, lock, last, was_dormant, self._dormant_steps.get(rid, 0))
+                )
             if self.cfg.population.inherit_weights == "lineage":
                 self._lineage_stash.setdefault(kind, []).append(brain)
             self._dormant_ids.discard(rid)
             self._pending_wake.discard(rid)
+            self._dormant_steps.pop(rid, None)
             self._act_attempts.pop(rid, None)
             self._act_latched.pop(rid, None)
             self._last_bud.pop(rid, None)
@@ -269,10 +281,10 @@ class Population:
         """
         still_pending = []
         for entry in self._pending_deaths:
-            brain, lock, obs, dormant = entry
+            brain, lock, obs, dormant, dormant_steps = entry
             if lock.acquire(blocking=False):
                 try:
-                    brain.record_death(obs, dormant=dormant)
+                    brain.record_death(obs, dormant=dormant, dormant_steps=dormant_steps)
                 finally:
                     lock.release()
             else:
@@ -290,10 +302,10 @@ class Population:
         for entry in list(self._pending_deaths):
             if entry[0] is brain:
                 self._pending_deaths.remove(entry)
-                _, lock, obs, dormant = entry
+                _, lock, obs, dormant, dormant_steps = entry
                 if lock.acquire(blocking=False):
                     try:
-                        brain.record_death(obs, dormant=dormant)
+                        brain.record_death(obs, dormant=dormant, dormant_steps=dormant_steps)
                     finally:
                         lock.release()
 
@@ -349,9 +361,15 @@ class Population:
         )
         self.last_obs = obs
         self._death_obs.update(obs)
+        # Count simulated perception/action opportunities while each mind is
+        # offline. Aion uses this duration to decay persistent S5 modes by
+        # world time rather than freezing memory while reality advances.
+        dormant_now = {r.id for r in world.robots.values() if r.dormant}
+        for robot_id in dormant_now:
+            self._dormant_steps[robot_id] = self._dormant_steps.get(robot_id, 0) + 1
         # Robots observable again after a dormant spell just woke up.
         self._pending_wake |= self._dormant_ids & set(obs)
-        self._dormant_ids = {r.id for r in world.robots.values() if r.dormant}
+        self._dormant_ids = dormant_now
         for robot_id, o in obs.items():
             lock = self.locks[robot_id]
             self._act_attempts[robot_id] = self._act_attempts.get(robot_id, 0) + 1
@@ -360,7 +378,8 @@ class Population:
                 continue
             try:
                 if robot_id in self._pending_wake:
-                    self.brains[robot_id].wake()
+                    dormant_steps = self._dormant_steps.pop(robot_id, 0)
+                    self.brains[robot_id].wake(dormant_steps)
                     self._pending_wake.discard(robot_id)
                 action = self.brains[robot_id].act(o)
             finally:
@@ -373,7 +392,7 @@ class Population:
             brain.learn()
 
     def learning_ids(self) -> list[str]:
-        return [rid for rid, kind in self.kinds.items() if kind == "dreamer"]
+        return [rid for rid, brain in self.brains.items() if brain.target_train_ratio() > 0.0]
 
     def introspection(self) -> dict[str, dict[str, float]]:
         out = {}

@@ -7,7 +7,7 @@ import copy
 import torch
 import torch.nn as nn
 
-from gol_brains.dreamer.rssm import RSSM
+from gol_brains.dreamer.dynamics import CategoricalLatentDynamics
 from gol_brains.dreamer.skills import TemporalSkillPolicy
 
 
@@ -19,10 +19,12 @@ class InferenceSnapshot(nn.Module):
     touches parameters while the optimizer mutates them.
     """
 
-    def __init__(self, encoder: nn.Module, rssm: RSSM, actor: nn.Module) -> None:
+    def __init__(
+        self, encoder: nn.Module, dynamics: CategoricalLatentDynamics, actor: nn.Module
+    ) -> None:
         super().__init__()
         self.encoder = copy.deepcopy(encoder)
-        self.rssm = copy.deepcopy(rssm)
+        self.dynamics = copy.deepcopy(dynamics)
         self.actor = (
             actor.inference_controller()
             if isinstance(actor, TemporalSkillPolicy)

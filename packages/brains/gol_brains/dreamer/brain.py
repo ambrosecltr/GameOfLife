@@ -53,6 +53,7 @@ from gol_world.interface import (
 from gol_brains import feeling
 from gol_brains.base import Brain
 from gol_brains.dreamer.buffer import ReplayBuffer
+from gol_brains.dreamer.dynamics import CategoricalDynamicsConfig, CategoricalLatentDynamics
 from gol_brains.dreamer.inference import InferenceSnapshot
 from gol_brains.dreamer.interest import LearningProgress, OnlineRegions
 from gol_brains.dreamer.networks import (
@@ -101,21 +102,30 @@ AFFECT_NAMES = ("comfort", "viability", "curiosity", "boredom", "fear", "skill")
 
 
 class WorldModel(nn.Module):
-    def __init__(self, preset: dict[str, int], num_rays: int, wm_cfg: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        preset: dict[str, int],
+        num_rays: int,
+        wm_cfg: dict[str, Any],
+        dynamics: CategoricalLatentDynamics | None = None,
+    ) -> None:
         super().__init__()
         self.num_rays = num_rays
         units = preset["units"]
         obs_dim = num_rays * RAY_DIM + PROPRIO_DIM + SOUND_DIM + EVENTS_DIM
-        self.rssm_cfg = RSSMConfig(
-            deter=preset["deter"],
-            stoch_groups=preset["groups"],
-            stoch_classes=preset["classes"],
-            hidden=preset["hidden"],
-            unimix=float(wm_cfg.get("unimix", 0.01)),
-            free_bits=float(wm_cfg.get("kl_free_bits", 1.0)),
-        )
         self.encoder = mlp(obs_dim, units, units, layers=2)
-        self.rssm = RSSM(self.rssm_cfg, embed_dim=units, action_dim=ACTION_DIM)
+        if dynamics is None:
+            rssm_cfg = RSSMConfig(
+                deter=preset["deter"],
+                stoch_groups=preset["groups"],
+                stoch_classes=preset["classes"],
+                hidden=preset["hidden"],
+                unimix=float(wm_cfg.get("unimix", 0.01)),
+                free_bits=float(wm_cfg.get("kl_free_bits", 1.0)),
+            )
+            dynamics = RSSM(rssm_cfg, embed_dim=units, action_dim=ACTION_DIM)
+        self.rssm = dynamics
+        self.rssm_cfg = dynamics.cfg
         feat = self.rssm_cfg.feat_dim
         self.head_depth = mlp(feat, units, num_rays, layers=2)
         self.head_rgb = mlp(feat, units, num_rays * 3, layers=2)
@@ -130,6 +140,15 @@ class WorldModel(nn.Module):
         # checkpoints stored a ModuleList and are migrated on load.
         k = int(wm_cfg.get("ensemble_size", 8))
         self.ensemble = EnsembleMLP(k, feat + ACTION_DIM, units, units)
+
+    @property
+    def dynamics(self) -> CategoricalLatentDynamics:
+        """Architecture-neutral dynamics access; `rssm` keeps checkpoint keys stable."""
+        return self.rssm
+
+    @property
+    def dynamics_cfg(self) -> CategoricalDynamicsConfig:
+        return self.rssm_cfg
 
     def embed(self, obs: dict[str, torch.Tensor]) -> torch.Tensor:
         flat = torch.cat(
@@ -171,9 +190,13 @@ def _migrate_ensemble_state(wm_state: dict[str, torch.Tensor]) -> None:
     k = 0
     while f"ensemble.{k}.0.weight" in wm_state:
         k += 1
-    members = [{key: wm_state.pop(f"ensemble.{j}.{key}") for key in
-                ("0.weight", "0.bias", "1.weight", "1.bias", "3.weight", "3.bias")}
-               for j in range(k)]
+    members = [
+        {
+            key: wm_state.pop(f"ensemble.{j}.{key}")
+            for key in ("0.weight", "0.bias", "1.weight", "1.bias", "3.weight", "3.bias")
+        }
+        for j in range(k)
+    ]
     wm_state["ensemble.w1"] = torch.stack([m["0.weight"].T for m in members])
     wm_state["ensemble.b1"] = torch.stack([m["0.bias"] for m in members])
     wm_state["ensemble.ln_w"] = torch.stack([m["1.weight"] for m in members])
@@ -183,6 +206,13 @@ def _migrate_ensemble_state(wm_state: dict[str, torch.Tensor]) -> None:
 
 
 class DreamerBrain(Brain):
+    brain_family = "dreamer"
+
+    def _build_world_model(
+        self, preset: dict[str, int], num_rays: int, wm_cfg: dict[str, Any]
+    ) -> WorldModel:
+        return WorldModel(preset, num_rays, wm_cfg)
+
     def __init__(
         self, cfg: dict[str, Any], seed: int, device: str = "cpu", body: BodySpec | None = None
     ) -> None:
@@ -196,8 +226,8 @@ class DreamerBrain(Brain):
 
         preset = PRESETS[str(cfg.get("preset", "nano"))]
         wm_cfg = dict(cfg.get("world_model", {}))
-        self.wm = WorldModel(preset, self.body.num_rays, wm_cfg).to(self.device)
-        feat = self.wm.rssm_cfg.feat_dim
+        self.wm = self._build_world_model(preset, self.body.num_rays, wm_cfg).to(self.device)
+        feat = self.wm.dynamics_cfg.feat_dim
         units = preset["units"]
 
         ac_cfg = dict(cfg.get("actor_critic", {}))
@@ -227,9 +257,7 @@ class DreamerBrain(Brain):
                 unimix=float(skill_cfg.get("unimix", 0.01)),
             ).to(self.device)
         else:
-            self.actor = mlp(feat, units, CONT_DIM * 2 + NUM_GRIP_MODES, layers=2).to(
-                self.device
-            )
+            self.actor = mlp(feat, units, CONT_DIM * 2 + NUM_GRIP_MODES, layers=2).to(self.device)
         critic_out = 41 * self.value_channels
         self.critic = mlp(feat, units, critic_out, layers=2).to(self.device)
         self.critic_ema = mlp(feat, units, critic_out, layers=2).to(self.device)
@@ -247,9 +275,7 @@ class DreamerBrain(Brain):
         # learned reward head remains as an auditable diagnostic target.
         self.imagined_homeostasis = str(rw.get("imagined_homeostasis", "head"))
         if self.imagined_homeostasis not in ("head", "proprio"):
-            raise ValueError(
-                f"unknown reward.imagined_homeostasis: {self.imagined_homeostasis!r}"
-            )
+            raise ValueError(f"unknown reward.imagined_homeostasis: {self.imagined_homeostasis!r}")
         self.terminal_loss_weight = float(rw.get("terminal_loss_weight", 1.0))
         if self.terminal_loss_weight < 1.0:
             raise ValueError("reward.terminal_loss_weight must be at least 1")
@@ -489,6 +515,8 @@ class DreamerBrain(Brain):
         # or a cut wake): it lands in the buffer as a stream-break marker so
         # replayed windows never read a fictional drive delta across the gap.
         self._stream_first = True
+        self._stream_wake = False
+        self._step_scale = 1.0
 
         tr = dict(cfg.get("training", {}))
         model_lr = float(tr.get("model_lr", 1e-4))
@@ -499,8 +527,8 @@ class DreamerBrain(Brain):
         if self.optimizer_kind == "muon":
             # Muon conditions exactly-2D weight matrices; biases, LayerNorms,
             # and the stacked 3D ensemble stay on Adam (the standard recipe).
-            matrices = [p for p in self.wm.parameters() if p.dim() == 2]
-            rest = [p for p in self.wm.parameters() if p.dim() != 2]
+            matrices = [p for p in self.wm.parameters() if p.dim() == 2 and not p.is_complex()]
+            rest = [p for p in self.wm.parameters() if p.dim() != 2 or p.is_complex()]
             self.opt_model_muon = Muon(matrices, lr=float(tr.get("muon_lr", 0.02)))
             self.opt_model = torch.optim.Adam(rest, lr=model_lr, foreach=True)
         else:
@@ -545,7 +573,7 @@ class DreamerBrain(Brain):
             raise ValueError("training.publish_every must be at least 1")
 
         # Live recurrent state (the robot's stream of consciousness).
-        self.h, self.z = self.wm.rssm.initial(1, self.device)
+        self.h, self.z = self.wm.dynamics.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
         self._return_scale = [1.0]
         self._metrics: dict[str, float] = {}
@@ -572,12 +600,15 @@ class DreamerBrain(Brain):
             raise ValueError("training.compile is not compatible with async_inference snapshots")
         if compile_enabled:
             backend = "aot_eager" if self.device.type == "mps" else "inductor"
-            for owner, name in ((self.wm.rssm, "obs_step"), (self.wm.rssm, "img_step"),
-                                (self.wm, "embed")):
+            for owner, name in (
+                (self.wm.dynamics, "obs_step"),
+                (self.wm.dynamics, "img_step"),
+                (self.wm, "embed"),
+            ):
                 setattr(owner, name, torch.compile(getattr(owner, name), backend=backend))
             with torch.no_grad():
                 embed = torch.zeros(1, preset["units"], device=self.device)
-                self.wm.rssm.obs_step(self.h, self.z, self.last_action, embed)
+                self.wm.dynamics.obs_step(self.h, self.z, self.last_action, embed)
         if self.async_inference:
             self._publish_inference()
 
@@ -596,7 +627,7 @@ class DreamerBrain(Brain):
 
     def _publish_inference(self) -> None:
         """Atomically publish a frozen controller snapshot to the sim thread."""
-        self._inference = InferenceSnapshot(self.wm.encoder, self.wm.rssm, self.actor)
+        self._inference = InferenceSnapshot(self.wm.encoder, self.wm.dynamics, self.actor)
 
     def allows_concurrent_learning(self) -> bool:
         return self.async_inference
@@ -706,8 +737,8 @@ class DreamerBrain(Brain):
             controller = inference if inference is not None else self.wm
             policy_actor = inference.actor if inference is not None else self.actor
             embed = controller.embed(tensors)
-            self.h, self.z, _, _ = controller.rssm.obs_step(
-                self.h, self.z, self.last_action, embed
+            self.h, self.z, _, _ = controller.dynamics.obs_step(
+                self.h, self.z, self.last_action, embed, step_scale=self._step_scale
             )
             skill = -1
             if len(self.buffer) < self.warmup_steps:
@@ -716,7 +747,7 @@ class DreamerBrain(Brain):
                 )
                 grip = int(self.rng.integers(0, NUM_GRIP_MODES))
             else:
-                feat = controller.rssm.feat(self.h, self.z)
+                feat = controller.dynamics.feat(self.h, self.z)
                 skill_tensor: torch.Tensor | None = None
                 if isinstance(policy_actor, TemporalSkillController):
                     if self._skill_remaining <= 0:
@@ -741,9 +772,13 @@ class DreamerBrain(Brain):
                 action_vec,
                 salience=salience,
                 first=self._stream_first,
+                wake=self._stream_wake,
+                step_scale=self._step_scale,
                 skill=skill,
             )
         self._stream_first = False
+        self._stream_wake = False
+        self._step_scale = 1.0
         self._act_steps += 1
         self.last_action = torch.as_tensor(action_vec, device=self.device).unsqueeze(0)
         return Action(
@@ -1010,25 +1045,29 @@ class DreamerBrain(Brain):
             "events": b["events"],
         }
 
-        # --- world model: posterior unroll over the sequence. The burn-in
-        # prefix runs gradient-free purely to warm (h, z), then losses see
-        # only the seq_len suffix — the recurrent state entering the graded
-        # window is honest instead of the zero-state lie.
-        embed = self.wm.embed(obs)  # (B, burn_in + L, units)
-        h, z = self.wm.rssm.initial(B, self.device)
-        zero_action = torch.zeros(B, ACTION_DIM, device=self.device)
+        # --- world model: posterior dynamics over the replay sequence. Beta's
+        # GRU implementation unrolls recurrently; Aion's S5 implementation
+        # performs a resettable associative scan. Both return the same latent
+        # contract to the organism stack below.
         if self.burn_in > 0:
             with torch.no_grad():
-                for t in range(self.burn_in):
-                    prev_a = b["action"][:, t - 1] if t > 0 else zero_action
-                    h, z, _, _ = self.wm.rssm.obs_step(h, z, prev_a, embed[:, t])
-        feats, posts, priors = [], [], []
-        for t in range(self.burn_in, self.burn_in + self.seq_len):
-            prev_a = b["action"][:, t - 1] if t > 0 else zero_action
-            h, z, post, prior = self.wm.rssm.obs_step(h, z, prev_a, embed[:, t])
-            feats.append(self.wm.rssm.feat(h, z))
-            posts.append(post)
-            priors.append(prior)
+                burn_embed = self.wm.embed(
+                    {name: value[:, : self.burn_in] for name, value in obs.items()}
+                )
+            graded_embed = self.wm.embed(
+                {name: value[:, self.burn_in :] for name, value in obs.items()}
+            )
+            embed = torch.cat([burn_embed, graded_embed], dim=1)
+        else:
+            embed = self.wm.embed(obs)
+        sequence = self.wm.dynamics.observe_sequence(
+            embed,
+            b["action"],
+            b["first"],
+            b["wake"],
+            b["step_scale"],
+            self.burn_in,
+        )
         if self.burn_in > 0:
             # Slice every downstream target to the graded window.
             b = {k: v[:, self.burn_in :] for k, v in b.items()}
@@ -1036,9 +1075,9 @@ class DreamerBrain(Brain):
             kind_idx = kind_idx[:, self.burn_in :]
             embed = embed[:, self.burn_in :]
         L = self.seq_len
-        feat = torch.stack(feats, dim=1)  # (B, L, F)
-        post = torch.stack(posts, dim=1)
-        prior = torch.stack(priors, dim=1)
+        feat = self.wm.dynamics.feat(sequence.h, sequence.z)
+        post = sequence.post
+        prior = sequence.prior
 
         pred_depth = self.wm.head_depth(feat)
         pred_rgb = self.wm.head_rgb(feat).view(B, L, self.wm.num_rays, 3)
@@ -1081,7 +1120,7 @@ class DreamerBrain(Brain):
             cont_target = (b["proprio"][..., 5] > 0.01).float()
         cont_logits = self.wm.head_cont(feat).squeeze(-1)
         loss_cont_raw, loss_cont = self._continuation_loss(cont_logits, cont_target)
-        loss_kl = self.wm.rssm.kl_loss(post, prior)
+        loss_kl = self.wm.dynamics.kl_loss(post, prior)
 
         # --- Plan2Explore ensemble: predict the next observation embedding.
         # With curiosity_mask_agents, other robots are erased from the target
@@ -1188,14 +1227,14 @@ class DreamerBrain(Brain):
         # --- actor-critic in imagination, from a subsample of posterior states
         flat = feat.detach().flatten(0, 1)  # (B*L, F) = concat(h, z)
         starts = torch.randperm(flat.shape[0], device=self.device)[: self.imag_starts]
-        h_i = flat[starts, : self.wm.rssm_cfg.deter]
-        z_i = flat[starts, self.wm.rssm_cfg.deter :]
+        h_i = flat[starts, : self.wm.dynamics_cfg.deter]
+        z_i = flat[starts, self.wm.dynamics_cfg.deter :]
 
         img_feats, img_outcomes = [], []
         img_logps, img_ents, img_manager_ents, img_actions, img_skills = [], [], [], [], []
         imagined_skill: torch.Tensor | None = None
         for t in range(self.horizon):
-            f_i = self.wm.rssm.feat(h_i, z_i)
+            f_i = self.wm.dynamics.feat(h_i, z_i)
             manager_logp = torch.zeros(f_i.shape[0], device=self.device)
             manager_ent = torch.zeros_like(manager_logp)
             if isinstance(self.actor, TemporalSkillPolicy):
@@ -1220,8 +1259,8 @@ class DreamerBrain(Brain):
             if imagined_skill is not None:
                 img_skills.append(imagined_skill)
             with torch.no_grad():
-                h_i, z_i, _ = self.wm.rssm.img_step(h_i, z_i, a_vec)
-                img_outcomes.append(self.wm.rssm.feat(h_i, z_i))
+                h_i, z_i, _ = self.wm.dynamics.img_step(h_i, z_i, a_vec)
+                img_outcomes.append(self.wm.dynamics.feat(h_i, z_i))
         img_feat = torch.stack(img_feats)  # (H, N, F)
         img_outcome = torch.stack(img_outcomes)
         img_logp = torch.stack(img_logps)
@@ -1328,6 +1367,8 @@ class DreamerBrain(Brain):
             "act_steps": float(self._act_steps),
             "train_ratio_eff": float(self._updates / max(1, self._act_steps)),
             "learn_seconds": self._learn_seconds,
+            "graded_timepoints_per_second": float(B * L / max(elapsed, 1e-9)),
+            "context_steps": float(L),
             "buffer": float(len(self.buffer)),
         }
         with torch.no_grad():
@@ -1423,17 +1464,19 @@ class DreamerBrain(Brain):
         """The stream broke for good (respawn into a new body): reset live
         recurrent state and sever the salience chain — a newborn must not
         inherit a drive-delta spike across a gap nobody lived."""
-        self.h, self.z = self.wm.rssm.initial(1, self.device)
+        self.h, self.z = self.wm.dynamics.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
         self._prev_drive = None
         self._prev_via = None
         self._life_return_homeo = 0.0
         self._life_return_via = 0.0
         self._stream_first = True
+        self._stream_wake = False
+        self._step_scale = 1.0
         self._active_skill = -1
         self._skill_remaining = 0
 
-    def wake(self) -> None:
+    def wake(self, dormant_steps: int = 0) -> None:
         """First act after a dormant spell (see the blackout flag's contract).
 
         cut: the gap is a stream break like any other. priced: the live
@@ -1443,15 +1486,20 @@ class DreamerBrain(Brain):
         salience chain — the blackout becomes the one visible transition
         that reward-aware replay can keep feeding to the reward head.
         """
+        del dormant_steps
         if self.blackout == "cut":
             self.reset_stream()
             return
-        self.h, self.z = self.wm.rssm.initial(1, self.device)
+        self.h, self.z = self.wm.dynamics.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
         self._active_skill = -1
         self._skill_remaining = 0
 
-    def record_death(self, obs: Observation, dormant: bool = False) -> None:
+    def _death_transition_context(self, dormant: bool, dormant_steps: int) -> tuple[bool, float]:
+        del dormant, dormant_steps
+        return False, 1.0
+
+    def record_death(self, obs: Observation, dormant: bool = False, dormant_steps: int = 0) -> None:
         """The body's true end, delivered by the runtime (see Brain.record_death).
 
         Recorded only when death_terminal is on: this is the sample that gives
@@ -1485,6 +1533,7 @@ class DreamerBrain(Brain):
             events=np.zeros_like(obs["events"]),
         )
         first = self._stream_first or (dormant and self.blackout == "cut")
+        wake, step_scale = self._death_transition_context(dormant, dormant_steps)
         salience = 0.0
         with torch.no_grad():
             if self.homeostasis_mode == "drive":
@@ -1507,6 +1556,8 @@ class DreamerBrain(Brain):
                 np.zeros(ACTION_DIM, dtype=np.float32),
                 salience=salience,
                 first=first,
+                wake=wake,
+                step_scale=step_scale,
             )
         self._stream_first = False
 
@@ -1556,6 +1607,7 @@ class DreamerBrain(Brain):
         state_muon = self.opt_model_muon.state_dict() if self.opt_model_muon else None
         return {
             "obs_version": OBS_VERSION,
+            "brain_family": self.brain_family,
             "wm": self.wm.state_dict(),
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
@@ -1583,6 +1635,8 @@ class DreamerBrain(Brain):
             "life_return_homeo": self._life_return_homeo,
             "life_return_via": self._life_return_via,
             "stream_first": self._stream_first,
+            "stream_wake": self._stream_wake,
+            "step_scale": self._step_scale,
             "updates": self._updates,
             "act_steps": self._act_steps,
             "rng_state": self.rng.bit_generator.state,
@@ -1593,6 +1647,11 @@ class DreamerBrain(Brain):
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
+        stored_family = state.get("brain_family", "dreamer")
+        if stored_family != self.brain_family:
+            raise ValueError(
+                f"brain checkpoint belongs to {stored_family!r}, not {self.brain_family!r}"
+            )
         if state.get("obs_version") != OBS_VERSION:
             raise ValueError(
                 f"brain checkpoint has obs_version {state.get('obs_version')}, "
@@ -1642,6 +1701,8 @@ class DreamerBrain(Brain):
         self._life_return_homeo = float(state.get("life_return_homeo", 0.0))
         self._life_return_via = float(state.get("life_return_via", 0.0))
         self._stream_first = bool(state.get("stream_first", False))
+        self._stream_wake = bool(state.get("stream_wake", False))
+        self._step_scale = float(state.get("step_scale", 1.0))
         self._updates = int(state["updates"])
         # Guarded: pre-pacing checkpoints carry no act-step counter; seed it
         # at the stored buffer's size so the update/act-step pair stays

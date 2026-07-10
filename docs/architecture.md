@@ -41,7 +41,7 @@ GameOfLife/
 │   └── run/cloud_gpu.yaml      # 12–16 learners, CUDA, bigger model
 ├── packages/
 │   ├── world/gol_world/        # voxels, terrain, physics, entities, sensing, persistence
-│   ├── brains/gol_brains/      # Brain interface, scripted brains, dreamer/
+│   ├── brains/gol_brains/      # Brain interface; scripted, dreamer/, aion/, plastic/
 │   ├── runtime/gol_runtime/    # persistent loop, scheduler, checkpointing, CLI, control API
 │   └── obs/gol_obs/            # Rerun logging, metrics/events writers, replay export
 ├── scripts/                    # soak.sh, cloud provisioning (provision_runpod.sh)
@@ -139,6 +139,15 @@ Raycasting: Amanatides–Woo voxel DDA, vectorized across all rays of all agents
 - **Replay buffer**: per-agent ring, ~500k steps quantized (~50–100 MB at ray-fan size); samples sequences (batch 16 × length 64). Long buffer = ballast against nonstationarity.
 - **Lifelong specifics**: train on one unbroken sequence stream (no episode boundaries — DreamerV3 is already off-policy sequence-chunk training, which suits this perfectly); LayerNorm everywhere per the recipe; monitor for plasticity loss (pred-error trend per agent is a first-class logged metric).
 - **Cadence**: configurable train-ratio (updates per act-step), throttled by the learner thread. VRAM check: 16 agents × ~12M params × Adam ≈ ~4 GB + activations — fits a 4090 with room; batched multi-agent training via `torch.func.functional_call` + vmap over stacked per-agent params is the M4 perf lever.
+
+**AionBrain** (`aion/{brain,s5}.py`) is a separate checkpointed world-model
+lineage. It retains the organism mechanisms above but replaces the GRU transition
+with stable continuous-time S5 blocks. Live action and imagination use one recurrent
+transition per subjective step; replay uses an associative scan over 1,024-step
+contexts. A wake is distinct from a new life: fast sensorimotor modes reset while
+slow modes persist and decay across the runtime-measured blackout duration. See
+[proposal 005](research_proposals/005-aion-s5.md) for the architecture boundary,
+falsification gates, and the limits of treating predictive S5 state as memory.
 
 ## Runtime — `packages/runtime/gol_runtime/`
 

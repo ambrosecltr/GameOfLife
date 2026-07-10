@@ -51,8 +51,10 @@ def test_wake_from_dormancy_calls_wake_hook() -> None:
     world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
     population = Population(world, RUN)
     rid = "walker_000"
-    calls: list[str] = []
-    population.brains[rid].wake = lambda: calls.append(rid)  # type: ignore[method-assign]
+    calls: list[tuple[str, int]] = []
+    population.brains[rid].wake = (  # type: ignore[method-assign]
+        lambda dormant_steps=0: calls.append((rid, dormant_steps))
+    )
 
     population.act_step(world)  # awake baseline: no wake
     assert calls == []
@@ -63,9 +65,29 @@ def test_wake_from_dormancy_calls_wake_hook() -> None:
     robot.dormant = False
     robot.energy = 50.0
     population.act_step(world)  # first awake cycle after the gap
-    assert calls == [rid]
+    assert calls == [(rid, 1)]
     population.act_step(world)  # wake fires once, not every cycle
-    assert calls == [rid]
+    assert calls == [(rid, 1)]
+
+
+def test_dormant_duration_survives_population_checkpoint() -> None:
+    world = World.new(WorldConfig(seed=22, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, RUN)
+    rid = "walker_000"
+    world.robots[rid].dormant = True
+    population.act_step(world)
+    population.act_step(world)
+
+    restored = Population(world, RUN)
+    restored.restore_brain_states(population.brain_states())
+    calls: list[int] = []
+    restored.brains[rid].wake = (  # type: ignore[method-assign]
+        lambda dormant_steps=0: calls.append(dormant_steps)
+    )
+    world.robots[rid].dormant = False
+    world.robots[rid].energy = 50.0
+    restored.act_step(world)
+    assert calls == [2]
 
 
 def test_default_wake_is_a_stream_cut() -> None:
@@ -103,17 +125,17 @@ def test_death_delivers_final_observation_to_brain() -> None:
     world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
     population = Population(world, LINEAGE_RUN)
     rid = "walker_000"
-    calls: list[bool] = []
+    calls: list[tuple[bool, int]] = []
     brain = population.brains[rid]
     brain.record_death = (  # type: ignore[method-assign]
-        lambda obs, dormant=False: calls.append(dormant)
+        lambda obs, dormant=False, dormant_steps=0: calls.append((dormant, dormant_steps))
     )
     population.act_step(world)  # records a last observation while awake
     world.robots[rid].dormant = True
     population.act_step(world)  # dormant: unobserved, tracked as hibernating
     del world.robots[rid]  # the body dies on the hibernation clock
     population.act_step(world)
-    assert calls == [True]
+    assert calls == [(True, 1)]
 
 
 def test_death_delivery_never_blocks_on_a_busy_learner() -> None:
@@ -122,9 +144,9 @@ def test_death_delivery_never_blocks_on_a_busy_learner() -> None:
     world = World.new(WorldConfig(seed=21, size=(64, 64, 40), day_length_ticks=1000))
     population = Population(world, LINEAGE_RUN)
     rid = "walker_000"
-    calls: list[bool] = []
+    calls: list[tuple[bool, int]] = []
     population.brains[rid].record_death = (  # type: ignore[method-assign]
-        lambda obs, dormant=False: calls.append(dormant)
+        lambda obs, dormant=False, dormant_steps=0: calls.append((dormant, dormant_steps))
     )
     population.act_step(world)
     lock = population.locks[rid]
@@ -134,4 +156,4 @@ def test_death_delivery_never_blocks_on_a_busy_learner() -> None:
     assert calls == [], "delivery must not block the sim"
     lock.release()
     population.act_step(world)
-    assert calls == [False]
+    assert calls == [(False, 0)]

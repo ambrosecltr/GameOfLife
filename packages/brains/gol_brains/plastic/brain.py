@@ -323,8 +323,9 @@ class PlasticBrain(Brain):
         self._life_return_comfort = 0.0
         self._life_return_via = 0.0
 
-    def wake(self) -> None:
+    def wake(self, dormant_steps: int = 0) -> None:
         # No world model / critic here: a dormancy gap is just a stream break.
+        del dormant_steps
         self.reset_stream()
 
     # ------------------------------------------------------------- observability

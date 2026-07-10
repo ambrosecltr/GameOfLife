@@ -1,0 +1,132 @@
+# Aion 01 — continuous-time S5 organism.
+#
+# Aion is a peer lineage to beta, not a DreamerV3 rewrite. It retains beta 013's
+# endogenous drives, stochastic world state, vector critic, and unnamed temporal
+# skills while replacing the GRU transition with four resettable S5 blocks.
+# Replay consolidation sees 1,024 gradient-carrying transitions after a 256-step
+# burn-in. Live action remains one recurrent step per perception cycle.
+#
+# Dormancy is neither amnesia nor frozen time. On wake, fast sensorimotor modes
+# reset, the longest-timescale half of each S5 block persists, and those modes
+# decay across the measured number of missed perception cycles. Death/new-body
+# inheritance still clears live state; learned weights and replay are the
+# consolidated substrate that survives lineage continuation.
+#
+# Charter boundary: no externally assigned task reward, goal label,
+# demonstration, pretrained skill, or designer fitness score. Prediction,
+# bodily interoception, self-generated controllability, physical mortality,
+# and differential reproduction are mechanisms of the simulated reality.
+
+kind: aion
+preset: base
+
+reward:
+  w_curiosity: 1.0
+  w_homeostasis: 1.0
+  imagined_homeostasis: proprio
+  norm_anchor_samples: 1000000
+  curiosity: lp
+  lp:
+    partition: latent
+    regions: 32
+    ema_fast: 0.02
+    ema_slow: 0.002
+    centroid_lr: 0.05
+    relative: true
+    mix_disagreement: 0.1
+    mix_anneal_steps: 1500
+  boredom:
+    weight: 0.02
+    stim_threshold: 0.5
+    drive_threshold: 0.15
+    pressure: true
+    pressure_rise: 0.0005
+    pressure_decay: 0.001
+    gate: viability
+  homeostasis: drive
+  drive:
+    scale: 3.0
+    level_penalty: 0.01
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    energy_weight: 1.0
+    integrity_setpoint: 1.0
+    integrity_weight: 1.0
+    rested_setpoint: 1.0
+    rest_weight: 0.5
+  viability:
+    scale: 0.0
+    floor: 1.0
+    barrier_cap: 4.0
+    total_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  death_terminal: true
+  terminal_loss_weight: 32.0
+  fear_weight: 0.1
+  blackout: priced
+  spike_loss_weight: 4
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  low_energy_graded: true
+  curiosity_mask_agents: false
+
+temporal_skills:
+  enabled: true
+  num_skills: 8
+  duration: 5
+  intrinsic_weight: 0.1
+  manager_entropy: 3.0e-4
+  unimix: 0.01
+
+temperament:
+  enabled: true
+  sigma: 0.25
+  mutation_sigma: 0.1
+
+world_model:
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8
+  s5:
+    model_dim: 768
+    state_dim: 128
+    blocks: 4
+    slow_fraction: 0.5
+    # Spans modes from immediate sensorimotor context into many-thousand-step
+    # memory. These are learned continuous-time scales, not fixed delay bins.
+    dt_min: 0.0001
+    dt_max: 0.1
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  vector_critic: true
+
+replay:
+  capacity: 500000
+  batch_size: 8
+  seq_len: 1024
+  burn_in: 256
+  warmup_steps: 4096
+  recent: 2
+  prioritize: reward
+
+training:
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  skill_lr: 1.0e-4
+  grad_clip: 100.0
+  # 8 × 1024 × 0.25 = 2,048 replayed transitions per lived act: twice beta
+  # 013's nominal consolidation budget, with sixteen times its temporal reach.
+  train_ratio: 0.25
+  async_inference: true
+  publish_every: 16
