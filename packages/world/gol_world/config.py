@@ -10,7 +10,7 @@ from __future__ import annotations
 import dataclasses
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeVar, get_origin, get_type_hints
+from typing import Any, TypeVar, get_args, get_origin, get_type_hints
 
 import yaml
 
@@ -138,7 +138,10 @@ def dataclass_from_dict(cls: type[T], data: dict[str, Any]) -> T:
         ftype = hints[name]
         if isinstance(ftype, type) and dataclasses.is_dataclass(ftype) and isinstance(value, dict):
             kwargs[name] = dataclass_from_dict(ftype, value)
-        elif get_origin(ftype) is tuple and isinstance(value, list):
+        elif isinstance(value, list) and (
+            get_origin(ftype) is tuple
+            or any(get_origin(option) is tuple for option in get_args(ftype))
+        ):
             kwargs[name] = tuple(value)
         else:
             kwargs[name] = value

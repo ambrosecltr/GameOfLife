@@ -7,7 +7,12 @@ from typing import Any
 import torch
 from gol_world.interface import BodySpec
 
-from gol_brains.aion.s5 import S5Dynamics, S5DynamicsConfig
+from gol_brains.aion.s5 import (
+    S5_CHECKPOINT_FORMAT,
+    S5Dynamics,
+    S5DynamicsConfig,
+    migrate_complex_s5_state,
+)
 from gol_brains.dreamer.brain import ACTION_DIM, DreamerBrain, WorldModel
 
 
@@ -45,11 +50,48 @@ class AionBrain(DreamerBrain):
             slow_fraction=float(s5.get("slow_fraction", 0.5)),
             dt_min=float(s5.get("dt_min", 0.001)),
             dt_max=float(s5.get("dt_max", 0.1)),
+            projection_precision=str(s5.get("projection_precision", "fp32")),
             unimix=float(wm_cfg.get("unimix", 0.01)),
             free_bits=float(wm_cfg.get("kl_free_bits", 1.0)),
         )
         dynamics = S5Dynamics(cfg, embed_dim=preset["units"], action_dim=ACTION_DIM)
         return WorldModel(preset, num_rays, wm_cfg, dynamics=dynamics)
+
+    def _migrate_world_model_state(self, state: dict[str, torch.Tensor]) -> bool:
+        s5_migrated = migrate_complex_s5_state(state)
+        shared_migrated = super()._migrate_world_model_state(state)
+        return s5_migrated or shared_migrated
+
+    def _state_dict(self) -> dict[str, Any]:
+        state = super()._state_dict()
+        state["aion_s5_format"] = S5_CHECKPOINT_FORMAT
+        return state
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        stored_family = state.get("brain_family", "dreamer")
+        if stored_family != self.brain_family:
+            super().load_state_dict(state)
+            return
+        wm_state = state.get("wm", {})
+        has_complex = any(
+            key.endswith(".input_matrix") or key.endswith(".output_matrix")
+            for key in wm_state
+        )
+        has_paired = any(key.endswith(".input_matrix_real") for key in wm_state)
+        stored_format = state.get("aion_s5_format")
+        if stored_format is None:
+            if has_paired:
+                raise ValueError("paired-real Aion checkpoint is missing aion_s5_format")
+            if not has_complex:
+                raise ValueError("Aion checkpoint has no recognized S5 parameter format")
+        elif stored_format != S5_CHECKPOINT_FORMAT:
+            raise ValueError(
+                f"unsupported Aion S5 checkpoint format {stored_format!r}; "
+                f"expected {S5_CHECKPOINT_FORMAT!r}"
+            )
+        elif has_complex:
+            raise ValueError("paired-real Aion checkpoint declares native-complex parameters")
+        super().load_state_dict(state)
 
     @property
     def s5(self) -> S5Dynamics:

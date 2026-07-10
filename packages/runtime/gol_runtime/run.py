@@ -19,6 +19,7 @@ from gol_world.world import World
 
 from gol_runtime.config import load_run_config
 from gol_runtime.control import ControlServer
+from gol_runtime.governor import VirtualTimeGovernor
 from gol_runtime.loop import SimLoop
 from gol_runtime.scheduler import LearnerThread, Population
 
@@ -47,6 +48,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--rrd", type=Path, default=None, help="record to a .rrd file instead of spawning a viewer"
+    )
+    parser.add_argument(
+        "--profile",
+        type=Path,
+        default=None,
+        help="write a PyTorch Chrome trace (use with a bounded --ticks preflight)",
     )
     return parser
 
@@ -83,6 +90,21 @@ def main(argv: list[str] | None = None) -> int:
         if ckpt is not None:
             population.restore_brain_states(persistence.load_brain_states(ckpt))
 
+    learner = None
+    if not args.sync:
+        learner = LearnerThread(
+            population,
+            debt_policy=run_cfg.pacing.debt_policy,
+            max_debt=run_cfg.pacing.max_debt_updates,
+        )
+    governor = VirtualTimeGovernor(
+        population,
+        learner,
+        run_cfg.pacing,
+        nominal_tick_rate=run_cfg.tick_rate,
+        act_every=run_cfg.act_every,
+    )
+
     log_frame = None
     event_sink = None
     if run_cfg.observability.rerun and (not args.headless or args.rrd):
@@ -112,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         introspection=population.introspection,
         heatmap=heatmap,
         event_sink=event_sink,
+        runtime_metrics=governor.status,
     )
 
     def act_step(w: World) -> None:
@@ -126,16 +149,41 @@ def main(argv: list[str] | None = None) -> int:
         log_frame=log_frame,
         brain_states=population.brain_states,
         act_step=act_step,
+        after_world_step=population.on_world_tick,
         on_tick=logs.on_tick,
+        on_backpressure=logs.on_backpressure,
+        governor=governor,
+        fast_forward_ready=population.can_fast_forward_dormant,
+        fast_forward_opportunities=population.advance_dormant_opportunities,
+        on_fast_forward=logs.on_fast_forward,
+        next_lifecycle_tick=population.next_lifecycle_tick,
+        profiling=args.profile is not None,
     )
     ControlServer(loop, port=run_cfg.control_port).start()
-    learner = None
-    if not args.sync and population.learning_ids():
-        learner = LearnerThread(population)
+    if learner is not None:
         learner.start()
         print(f"learner running: one worker per brain, {len(population.learning_ids())} brain(s)")
+
+    def run_loop() -> None:
+        if args.profile is None:
+            loop.run(max_ticks=args.ticks, paced=not args.headless)
+            return
+        import torch
+
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if any(device.startswith("cuda") for device in run_cfg.devices.learning_devices()):
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        args.profile.parent.mkdir(parents=True, exist_ok=True)
+        with torch.profiler.profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=True,
+        ) as profile:
+            loop.run(max_ticks=args.ticks, paced=not args.headless)
+        profile.export_chrome_trace(str(args.profile))
+
     try:
-        loop.run(max_ticks=args.ticks, paced=not args.headless)
+        run_loop()
     except KeyboardInterrupt:
         print(f"\nstopping; checkpointing at tick {world.tick}...")
         if learner is not None:

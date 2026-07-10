@@ -102,6 +102,10 @@ world_model:
     # memory. These are learned continuous-time scales, not fixed delay bins.
     dt_min: 0.0001
     dt_max: 0.1
+    # The recurrent transition/state/scan and B/C projections remain FP32;
+    # TF32 accelerates eligible projection GEMMs. BF16 projection is gated on
+    # target-GPU long-memory and learning parity and is not silently enabled.
+    projection_precision: fp32
 
 actor_critic:
   imagination_horizon: 15
@@ -120,6 +124,9 @@ replay:
   prioritize: reward
 
 training:
+  # BF16 autocast covers eligible real dense networks. S5 recurrence remains
+  # explicitly FP32 and remaining FP32 CUDA GEMMs use TF32.
+  precision: amp_bf16
   model_lr: 1.0e-4
   actor_lr: 3.0e-5
   critic_lr: 3.0e-5

@@ -52,7 +52,7 @@ The two lineages share only mechanisms that mean the same thing:
 - replay, temperament, inheritance, and unnamed temporal skills.
 
 The deterministic transition is four nonlinear residual S5 blocks. Each block
-contains 128 complex modes, a 768-wide MIMO input/output map, stable
+contains 128 diagonal modes represented as FP32 real/imaginary pairs, a 768-wide MIMO input/output map, stable
 left-half-plane eigenvalues, HiPPO-LegS frequency initialization, and learned
 continuous-time step sizes. Real and imaginary state pairs across four blocks
 produce 1,024 deterministic features, so Aion 01 retains beta 013's total
@@ -64,6 +64,32 @@ the diagonal affine recurrence is composed with an associative scan. A
 1,024-step window therefore has ten sequential tensor stages per block rather
 than 1,024 Python-level recurrent calls. The scan uses only public PyTorch
 operations; no JAX runtime or third-party S5 package enters the deployed stack.
+
+### Numerical precision boundary
+
+Aion 01 uses `training.precision: amp_bf16`, but that does not mean every tensor
+is BF16. Eligible encoder, prediction-head, normalization/residual/gate,
+ensemble, actor, and critic forward computation is autocast. Parameters,
+optimizer state, losses/probability normalization, and reductions stay FP32.
+
+The long-timescale recurrence is always FP32-equivalent: raw decay, frequency,
+log step, continuous eigenvalues, `exp` and elapsed-time powers, persistent
+state, associative composition/accumulation, and B/C projections. The configured
+slow edge makes the reason concrete:
+
+    A = exp(-0.5 × 0.0001) ≈ 0.9999500012
+    A^1024 ≈ 0.95008863
+
+BF16 and FP16 both round the one-step value to 1.0, destroying precisely the
+slow modes this lineage tests. Paired-real storage preserves the complex
+diagonal recurrence exactly while making its large real projection GEMMs TF32
+eligible. BF16 projections are deliberately rejected until physical-GPU
+long-retention and learning-parity evidence exists.
+
+The original native-complex checkpoint format migrates one way into
+`paired_real_v1`. Model optimizer moments restart because their parameter
+mapping is ambiguous; the lineage, replay, live paired state, actor/critic
+optimizers, and wake semantics remain intact.
 
 The posterior categorical state is inferred from the current observation
 embedding in parallel. The S5 predictive prior must use the recurrent lifetime
@@ -102,6 +128,22 @@ finite predictive summary. Exact episodic recall or culture-scale external
 memory would require a later retrieval mechanism and must not be claimed from
 long state-space timescales alone.
 
+## Causal wall time and dormant time
+
+Learning credit is a function of lived eligible acts and the configured train
+ratio. A measured controller chooses wall-clock execution speed from aggregate
+learner throughput, action latency, world cost, debt, headroom, and hysteresis.
+It never changes replay, batch, sequence, update publication, or action cadence.
+At bounded lag it pauses virtual advancement rather than shedding credit.
+
+If every embodied organism is dormant, whole owed updates are paid before the
+quiet world accelerates. Exact unpaced scalar stepping handles falling bodies.
+Only settled, interaction-free intervals jump, and only to immediately before
+the earliest wake/death, spoilage, ecology, transient, lifecycle, metrics,
+checkpoint, or end boundary. The scalar boundary preserves RNG and event order;
+bulk accounting preserves virtual solar/integrity/fatigue/age and Aion blackout
+duration. An awake resting body or an awake scripted body disables the jump.
+
 ## Aion 01 operating point
 
 `configs/brain/aion_01_s5.yaml` uses:
@@ -134,19 +176,18 @@ No long-run interpretation until:
   live recurrence;
 - checkpoint identity prevents beta/Aion cross-loading;
 - old replay checkpoints default safely to no wake and unit elapsed time;
-- one full Aion update and three-worker contention are benchmarked on the
-  target RTX 3090/3090 Ti;
+- one full Aion update and three-worker contention are benchmarked in FP32,
+  TF32, and hybrid BF16 on RTX 4090, RTX 5090, and H100 SXM;
 - the selected batch/context fits with stable memory headroom;
-- achieved `train_ratio_eff` stays near 0.25 without world acceleration
-  outrunning consolidation.
+- the governor holds the configured credit budget with zero dropped credit and
+  bounded inference publication lag;
+- concurrent action p95 meets its deadline and reserved VRAM retains at least
+  15% headroom.
 
 Target commands:
 
 ```bash
-uv run python scripts/bench_learn.py \
-  --brain configs/brain/aion_01_s5.yaml --devices cuda --updates 10
-uv run python scripts/bench_contention.py \
-  --brain configs/brain/aion_01_s5.yaml --device cuda --brains 3 --updates 10
+scripts/bench_aion_preflight.sh /tmp/aion-preflight <gpu-hourly-price>
 ```
 
 ## Falsification

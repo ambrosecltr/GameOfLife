@@ -68,6 +68,7 @@ from gol_brains.dreamer.networks import (
 from gol_brains.dreamer.optim import Muon
 from gol_brains.dreamer.rssm import RSSM, RSSMConfig
 from gol_brains.dreamer.skills import TemporalSkillController, TemporalSkillPolicy
+from gol_brains.precision import PrecisionMode, PrecisionPolicy, register_process_precision
 
 PRESETS: dict[str, dict[str, int]] = {
     "nano": {"deter": 256, "groups": 16, "classes": 16, "hidden": 256, "units": 256},
@@ -213,11 +214,18 @@ class DreamerBrain(Brain):
     ) -> WorldModel:
         return WorldModel(preset, num_rays, wm_cfg)
 
+    def _migrate_world_model_state(self, state: dict[str, torch.Tensor]) -> bool:
+        migrated = "ensemble.0.0.weight" in state
+        _migrate_ensemble_state(state)
+        return migrated
+
     def __init__(
         self, cfg: dict[str, Any], seed: int, device: str = "cpu", body: BodySpec | None = None
     ) -> None:
         self.cfg = cfg
         self.device = torch.device(device)
+        tr = dict(cfg.get("training", {}))
+        self.precision = PrecisionPolicy.from_config(tr, self.device)
         self.body = body or BodySpec()
         self._learn_lock = threading.Lock()
         self._experience_lock = threading.Lock()
@@ -469,12 +477,7 @@ class DreamerBrain(Brain):
         self._apply_temperament()
 
         replay = dict(cfg.get("replay", {}))
-        self.buffer = ReplayBuffer(
-            capacity=int(replay.get("capacity", 100_000)),
-            num_rays=self.body.num_rays,
-            action_dim=ACTION_DIM,
-            seed=seed + 1,
-        )
+        capacity = int(replay.get("capacity", 100_000))
         self.batch_size = int(replay.get("batch_size", 16))
         self.seq_len = int(replay.get("seq_len", 64))
         # ~2 sim-minutes of motor babbling; long warmups starve newborns.
@@ -484,6 +487,31 @@ class DreamerBrain(Brain):
         # unroll) can shrink without every sequence starting from a zero-state
         # lie. 0 = legacy zero-init.
         self.burn_in = int(replay.get("burn_in", 0))
+        if capacity < 1 or self.batch_size < 1 or self.seq_len < 1 or self.warmup_steps < 1:
+            raise ValueError(
+                "replay capacity, batch_size, seq_len, and warmup_steps must be positive"
+            )
+        if self.burn_in < 0:
+            raise ValueError("replay.burn_in cannot be negative")
+        required_steps = self.burn_in + self.seq_len + 2
+        if self.warmup_steps < required_steps:
+            raise ValueError(
+                "replay.warmup_steps must be at least "
+                f"replay.burn_in + replay.seq_len + 2 ({required_steps})"
+            )
+        if capacity < required_steps:
+            raise ValueError(
+                "replay.capacity must be at least "
+                f"replay.burn_in + replay.seq_len + 2 ({required_steps})"
+            )
+        if capacity < self.warmup_steps:
+            raise ValueError("replay.capacity must be at least replay.warmup_steps")
+        self.buffer = ReplayBuffer(
+            capacity=capacity,
+            num_rays=self.body.num_rays,
+            action_dim=ACTION_DIM,
+            seed=seed + 1,
+        )
         # Batch rows pinned to the newest experience (DreamerV3 online-queue
         # mixing); the rest sample uniformly over the whole life. 0 = legacy.
         self.recent_slots = int(replay.get("recent", 0))
@@ -518,7 +546,6 @@ class DreamerBrain(Brain):
         self._stream_wake = False
         self._step_scale = 1.0
 
-        tr = dict(cfg.get("training", {}))
         model_lr = float(tr.get("model_lr", 1e-4))
         self.optimizer_kind = str(tr.get("optimizer", "adam"))
         if self.optimizer_kind not in ("adam", "muon"):
@@ -567,6 +594,8 @@ class DreamerBrain(Brain):
         # it paces with (_act_steps, _updates) ride state_dict, so the debt
         # math stays coherent across checkpoints and inheritance.
         self.train_ratio = float(tr.get("train_ratio", 0.25))
+        if self.train_ratio < 0.0:
+            raise ValueError("training.train_ratio cannot be negative")
         self.async_inference = bool(tr.get("async_inference", False))
         self.publish_every = int(tr.get("publish_every", 16))
         if self.publish_every < 1:
@@ -579,6 +608,8 @@ class DreamerBrain(Brain):
         self._metrics: dict[str, float] = {}
         self._updates = 0
         self._act_steps = 0
+        self._schedule_credit_origin = 0.0
+        self._dropped_update_credit = 0.0
         self._learn_seconds = 0.0  # EMA of learn() wall time
         self._gate_calm = 0.0  # boredom gate telemetry (imagination means)
         self._gate_dull = 0.0
@@ -588,13 +619,15 @@ class DreamerBrain(Brain):
         self._skill_remaining = 0
         self._skill_switches = 0
         self._inference: InferenceSnapshot | None = None
+        self._published_updates = 0
+        register_process_precision(self, self.precision)
 
         # torch.compile on the sequential hot loops (RSSM steps + encoder):
         # nano-scale unrolls are dispatch-bound, and compilation collapses the
         # per-step Python/kernel-launch overhead. The act-path shape (B=1) is
         # precompiled here so the sim thread never eats a compile stall
         # mid-life; the learn-path shapes compile lazily on the learner
-        # thread, where a one-time pause is just a skipped update.
+        # thread, where a one-time wall-clock pause leaves earned credit intact.
         compile_enabled = bool(tr.get("compile", False))
         if compile_enabled and self.async_inference:
             raise ValueError("training.compile is not compatible with async_inference snapshots")
@@ -628,9 +661,13 @@ class DreamerBrain(Brain):
     def _publish_inference(self) -> None:
         """Atomically publish a frozen controller snapshot to the sim thread."""
         self._inference = InferenceSnapshot(self.wm.encoder, self.wm.dynamics, self.actor)
+        self._published_updates = self._updates
 
     def allows_concurrent_learning(self) -> bool:
         return self.async_inference
+
+    def precision_mode(self) -> str:
+        return self.precision.mode.value
 
     def _obs_to_tensors(self, obs: Observation) -> dict[str, torch.Tensor]:
         rays = torch.as_tensor(obs["rays"], device=self.device)
@@ -654,7 +691,7 @@ class DreamerBrain(Brain):
             if skill is None:
                 raise ValueError("temporal worker requires a skill")
             return policy.action_dists(feat, skill)
-        out = policy(feat)
+        out = policy(feat).float()
         mean = out[..., :CONT_DIM]
         raw_std = out[..., CONT_DIM : 2 * CONT_DIM]
         grip_logits = out[..., 2 * CONT_DIM :]
@@ -733,37 +770,41 @@ class DreamerBrain(Brain):
                     self._prev_via = v
             else:
                 salience = float(obs["events"][0] + obs["events"][1])
-            inference = self._inference
-            controller = inference if inference is not None else self.wm
-            policy_actor = inference.actor if inference is not None else self.actor
-            embed = controller.embed(tensors)
-            self.h, self.z, _, _ = controller.dynamics.obs_step(
-                self.h, self.z, self.last_action, embed, step_scale=self._step_scale
-            )
-            skill = -1
-            if len(self.buffer) < self.warmup_steps:
-                cont = torch.as_tensor(
-                    self.rng.uniform(-1, 1, CONT_DIM).astype(np.float32), device=self.device
+            with self.precision.autocast():
+                inference = self._inference
+                controller = inference if inference is not None else self.wm
+                policy_actor = inference.actor if inference is not None else self.actor
+                embed = controller.embed(tensors)
+                self.h, self.z, _, _ = controller.dynamics.obs_step(
+                    self.h, self.z, self.last_action, embed, step_scale=self._step_scale
                 )
-                grip = int(self.rng.integers(0, NUM_GRIP_MODES))
-            else:
-                feat = controller.dynamics.feat(self.h, self.z)
-                skill_tensor: torch.Tensor | None = None
-                if isinstance(policy_actor, TemporalSkillController):
-                    if self._skill_remaining <= 0:
-                        previous = self._active_skill
-                        self._active_skill = int(policy_actor.manager_dist(feat).sample()[0])
-                        self._skill_remaining = self.skill_duration
-                        if previous >= 0 and previous != self._active_skill:
-                            self._skill_switches += 1
-                    skill = self._active_skill
-                    skill_tensor = torch.tensor([skill], device=self.device)
-                    self._skill_remaining -= 1
-                dist_cont, dist_grip = self._policy_dists(
-                    feat, actor=policy_actor, skill=skill_tensor
-                )
-                cont = dist_cont.sample()[0]
-                grip = int(dist_grip.sample()[0])
+                skill = -1
+                if len(self.buffer) < self.warmup_steps:
+                    cont = torch.as_tensor(
+                        self.rng.uniform(-1, 1, CONT_DIM).astype(np.float32),
+                        device=self.device,
+                    )
+                    grip = int(self.rng.integers(0, NUM_GRIP_MODES))
+                else:
+                    feat = controller.dynamics.feat(self.h, self.z)
+                    skill_tensor: torch.Tensor | None = None
+                    if isinstance(policy_actor, TemporalSkillController):
+                        if self._skill_remaining <= 0:
+                            previous = self._active_skill
+                            self._active_skill = int(policy_actor.manager_dist(feat).sample()[0])
+                            self._skill_remaining = self.skill_duration
+                            if previous >= 0 and previous != self._active_skill:
+                                self._skill_switches += 1
+                        skill = self._active_skill
+                        skill_tensor = torch.tensor([skill], device=self.device)
+                        self._skill_remaining -= 1
+                    dist_cont, dist_grip = self._policy_dists(
+                        feat, actor=policy_actor, skill=skill_tensor
+                    )
+                    cont = dist_cont.sample()[0]
+                    grip = int(dist_grip.sample()[0])
+            self.h = self.h.float()
+            self.z = self.z.float()
 
         action_vec = self._action_to_vec(cont, grip)
         with self._experience_lock:
@@ -776,10 +817,10 @@ class DreamerBrain(Brain):
                 step_scale=self._step_scale,
                 skill=skill,
             )
+            self._act_steps += 1
         self._stream_first = False
         self._stream_wake = False
         self._step_scale = 1.0
-        self._act_steps += 1
         self.last_action = torch.as_tensor(action_vec, device=self.device).unsqueeze(0)
         return Action(
             drive=action_vec[:2].copy(),
@@ -1015,12 +1056,31 @@ class DreamerBrain(Brain):
     def target_train_ratio(self) -> float:
         return self.train_ratio
 
+    def _raw_update_credit(self) -> float:
+        eligible_steps = max(0, self._act_steps - self.warmup_steps + 1)
+        return eligible_steps * self.train_ratio
+
+    def pending_update_credit(self) -> float:
+        scheduled = self._raw_update_credit() - self._schedule_credit_origin
+        return max(0.0, scheduled - self._dropped_update_credit - self._updates)
+
+    def drop_update_credit(self, amount: float) -> None:
+        if amount < 0.0:
+            raise ValueError("dropped update credit cannot be negative")
+        with self._learn_lock:
+            self._dropped_update_credit += min(amount, self.pending_update_credit())
+
     def learn(self) -> dict[str, float] | None:
         with self._learn_lock:
             return self._learn()
 
+    def _synchronize_learning_stream(self) -> None:
+        if self.device.type == "cuda":
+            torch.cuda.current_stream(self.device).synchronize()
+
     def _learn(self) -> dict[str, float] | None:
-        with self._experience_lock:
+        learn_began = time.monotonic()
+        with torch.profiler.record_function("learn/replay_sample"), self._experience_lock:
             batch_np = self.buffer.sample_sequences(
                 self.batch_size,
                 self.burn_in + self.seq_len,
@@ -1032,8 +1092,8 @@ class DreamerBrain(Brain):
             experience = len(self.buffer)
         if batch_np is None or experience < self.warmup_steps:
             return None
-        learn_began = time.monotonic()
-        b = {k: torch.as_tensor(v, device=self.device) for k, v in batch_np.items()}
+        with torch.profiler.record_function("learn/replay_transfer"):
+            b = {k: torch.as_tensor(v, device=self.device) for k, v in batch_np.items()}
         B = b["depth"].shape[0]
         kind_idx = b["kind"].long()
         obs = {
@@ -1049,120 +1109,114 @@ class DreamerBrain(Brain):
         # GRU implementation unrolls recurrently; Aion's S5 implementation
         # performs a resettable associative scan. Both return the same latent
         # contract to the organism stack below.
-        if self.burn_in > 0:
-            with torch.no_grad():
-                burn_embed = self.wm.embed(
-                    {name: value[:, : self.burn_in] for name, value in obs.items()}
+        with self.precision.autocast(), torch.profiler.record_function("learn/world_model_forward"):
+            if self.burn_in > 0:
+                with torch.no_grad():
+                    burn_embed = self.wm.embed(
+                        {name: value[:, : self.burn_in] for name, value in obs.items()}
+                    )
+                graded_embed = self.wm.embed(
+                    {name: value[:, self.burn_in :] for name, value in obs.items()}
                 )
-            graded_embed = self.wm.embed(
-                {name: value[:, self.burn_in :] for name, value in obs.items()}
-            )
-            embed = torch.cat([burn_embed, graded_embed], dim=1)
-        else:
-            embed = self.wm.embed(obs)
-        sequence = self.wm.dynamics.observe_sequence(
-            embed,
-            b["action"],
-            b["first"],
-            b["wake"],
-            b["step_scale"],
-            self.burn_in,
-        )
-        if self.burn_in > 0:
-            # Slice every downstream target to the graded window.
-            b = {k: v[:, self.burn_in :] for k, v in b.items()}
-            obs = {k: v[:, self.burn_in :] for k, v in obs.items()}
-            kind_idx = kind_idx[:, self.burn_in :]
-            embed = embed[:, self.burn_in :]
-        L = self.seq_len
-        feat = self.wm.dynamics.feat(sequence.h, sequence.z)
-        post = sequence.post
-        prior = sequence.prior
-
-        pred_depth = self.wm.head_depth(feat)
-        pred_rgb = self.wm.head_rgb(feat).view(B, L, self.wm.num_rays, 3)
-        pred_kind = self.wm.head_kind(feat).view(B, L, self.wm.num_rays, NUM_RAY_KINDS)
-        pred_proprio = self.wm.head_proprio(feat)
-        loss_depth = F.mse_loss(pred_depth, b["depth"], reduction="none").sum(-1)
-        loss_rgb = F.mse_loss(pred_rgb, b["rgb"], reduction="none").sum((-1, -2))
-        loss_kind = (
-            F.cross_entropy(pred_kind.flatten(0, 2), kind_idx.flatten(), reduction="none")
-            .view(B, L, -1)
-            .sum(-1)
-        )
-        loss_proprio = F.mse_loss(pred_proprio, b["proprio"], reduction="none").sum(-1)
-        homeo_drive = self._homeostasis(b["events"], b["proprio"], b["first"])
-        # The viability barrier is priced through the same reward head as the
-        # comfort drive (their sum is what the actor should maximize); the two
-        # stay separated only for the forensic channels, so we can read which
-        # drive paid for each real transition (round-011 asked for exactly this).
-        if self.via_on:
-            via = self._viability_reward(b["proprio"], b["first"])
-        else:
-            via = torch.zeros_like(homeo_drive)
-        homeo = homeo_drive + via
-        reward_logits = self.wm.head_reward(feat)
-        loss_reward = self.twohot.loss(reward_logits, homeo)
-        if self.spike_loss_weight > 0.0:
-            spike_w = (homeo.abs() > self.prioritize_threshold).float()
-            loss_reward = loss_reward * (1.0 + self.spike_loss_weight * spike_w)
-        # death_terminal: true death (integrity → lethal) is absorbing so its
-        # ~0 return backs up through the critic; recoverable dormancy is not.
-        # else cut: blackout is a termination (energy ~0 ends the imagined
-        # stream). else priced: nothing observable terminates — the crash is a
-        # survivable transition the actor must plan across, head continues
-        # everywhere.
-        if self.death_terminal:
-            cont_target = (b["proprio"][..., 6] > self.via_i_lethal + 1e-3).float()
-        elif self.blackout == "priced":
-            cont_target = torch.ones_like(homeo)
-        else:
-            cont_target = (b["proprio"][..., 5] > 0.01).float()
-        cont_logits = self.wm.head_cont(feat).squeeze(-1)
-        loss_cont_raw, loss_cont = self._continuation_loss(cont_logits, cont_target)
-        loss_kl = self.wm.dynamics.kl_loss(post, prior)
-
-        # --- Plan2Explore ensemble: predict the next observation embedding.
-        # With curiosity_mask_agents, other robots are erased from the target
-        # (their rays read as "nothing at max range"), so their unpredictability
-        # generates no curiosity.
-        with torch.no_grad():
-            if self.curiosity_mask_agents:
-                ens_target = self.wm.embed(self._mask_agents(obs))[:, 1:]
+                embed = torch.cat([burn_embed, graded_embed], dim=1)
             else:
-                ens_target = embed.detach()[:, 1:]
-        ens_in_feat = feat[:, :-1].detach()
-        # Replay stores the action taken AT each observation. The action at t,
-        # not the policy response chosen after seeing t+1, caused obs t+1.
-        ens_action = b["action"][:, :-1]
-        x = torch.cat([ens_in_feat, ens_action], dim=-1)
-        ens_preds = self.wm.ensemble(x)  # (K, B, L-1, units)
-        loss_ens = (ens_preds - ens_target).pow(2).mean(-1).mean(0)
+                embed = self.wm.embed(obs)
+            sequence = self.wm.dynamics.observe_sequence(
+                embed,
+                b["action"],
+                b["first"],
+                b["wake"],
+                b["step_scale"],
+                self.burn_in,
+            )
+            if self.burn_in > 0:
+                # Slice every downstream target to the graded window.
+                b = {k: v[:, self.burn_in :] for k, v in b.items()}
+                obs = {k: v[:, self.burn_in :] for k, v in obs.items()}
+                kind_idx = kind_idx[:, self.burn_in :]
+                embed = embed[:, self.burn_in :]
+            L = self.seq_len
+            feat = self.wm.dynamics.feat(sequence.h, sequence.z)
+            post = sequence.post
+            prior = sequence.prior
 
-        model_loss = (
-            loss_depth + loss_rgb + loss_kind + loss_proprio + loss_reward + loss_cont + loss_kl
-        ).mean() + loss_ens.mean()
-        l2_dist = 0.0
-        if self.l2_init_weight > 0:
-            reg = torch.zeros((), device=self.device)
-            for p, p0 in zip(self.wm.parameters(), self._wm_init, strict=True):
-                reg = reg + (p - p0).pow(2).sum()
-            model_loss = model_loss + self.l2_init_weight * reg
-            l2_dist = float(reg.detach())
+            pred_depth = self.wm.head_depth(feat)
+            pred_rgb = self.wm.head_rgb(feat).view(B, L, self.wm.num_rays, 3)
+            pred_kind = self.wm.head_kind(feat).view(B, L, self.wm.num_rays, NUM_RAY_KINDS)
+            pred_proprio = self.wm.head_proprio(feat)
+            loss_depth = F.mse_loss(pred_depth.float(), b["depth"], reduction="none").sum(-1)
+            loss_rgb = F.mse_loss(pred_rgb.float(), b["rgb"], reduction="none").sum((-1, -2))
+            loss_kind = (
+                F.cross_entropy(
+                    pred_kind.float().flatten(0, 2), kind_idx.flatten(), reduction="none"
+                )
+                .view(B, L, -1)
+                .sum(-1)
+            )
+            loss_proprio = F.mse_loss(pred_proprio.float(), b["proprio"], reduction="none").sum(-1)
+            homeo_drive = self._homeostasis(b["events"], b["proprio"], b["first"])
+            # The viability barrier is priced through the same reward head as
+            # the comfort drive; separate forensic channels show which paid.
+            if self.via_on:
+                via = self._viability_reward(b["proprio"], b["first"])
+            else:
+                via = torch.zeros_like(homeo_drive)
+            homeo = homeo_drive + via
+            reward_logits = self.wm.head_reward(feat)
+            loss_reward = self.twohot.loss(reward_logits, homeo)
+            if self.spike_loss_weight > 0.0:
+                spike_w = (homeo.abs() > self.prioritize_threshold).float()
+                loss_reward = loss_reward * (1.0 + self.spike_loss_weight * spike_w)
+            if self.death_terminal:
+                cont_target = (b["proprio"][..., 6] > self.via_i_lethal + 1e-3).float()
+            elif self.blackout == "priced":
+                cont_target = torch.ones_like(homeo)
+            else:
+                cont_target = (b["proprio"][..., 5] > 0.01).float()
+            cont_logits = self.wm.head_cont(feat).squeeze(-1).float()
+            loss_cont_raw, loss_cont = self._continuation_loss(cont_logits, cont_target)
+            loss_kl = self.wm.dynamics.kl_loss(post, prior)
+
+            # --- Plan2Explore ensemble: predict the next observation embedding.
+            with torch.no_grad():
+                if self.curiosity_mask_agents:
+                    ens_target = self.wm.embed(self._mask_agents(obs))[:, 1:].float()
+                else:
+                    ens_target = embed.detach()[:, 1:].float()
+            ens_in_feat = feat[:, :-1].detach()
+            ens_action = b["action"][:, :-1]
+            x = torch.cat([ens_in_feat, ens_action], dim=-1)
+            ens_preds = self.wm.ensemble(x)
+            loss_ens = (ens_preds.float() - ens_target).pow(2).mean(-1).mean(0)
+
+            model_loss = (
+                loss_depth + loss_rgb + loss_kind + loss_proprio + loss_reward + loss_cont + loss_kl
+            ).float().mean() + loss_ens.float().mean()
+            l2_dist = 0.0
+            if self.l2_init_weight > 0:
+                reg = torch.zeros((), device=self.device)
+                for p, p0 in zip(self.wm.parameters(), self._wm_init, strict=True):
+                    reg = reg + (p.float() - p0.float()).pow(2).sum()
+                model_loss = model_loss + self.l2_init_weight * reg
+                l2_dist = float(reg.detach())
         self.opt_model.zero_grad()
         if self.opt_model_muon is not None:
             self.opt_model_muon.zero_grad()
-        model_loss.backward()
-        nn.utils.clip_grad_norm_(self.wm.parameters(), self.grad_clip)
-        self.opt_model.step()
-        if self.opt_model_muon is not None:
-            self.opt_model_muon.step()
+        with torch.profiler.record_function("learn/world_model_backward"):
+            model_loss.backward()
+            nn.utils.clip_grad_norm_(self.wm.parameters(), self.grad_clip)
+        with torch.profiler.record_function("learn/world_model_optimizer"):
+            self.opt_model.step()
+            if self.opt_model_muon is not None:
+                self.opt_model_muon.step()
 
         # Curiosity statistics on real experience (keeps normalization honest).
         lp_reward_mean = 0.0
         lp_idx: torch.Tensor | None = None
-        with torch.no_grad():
-            real_disagreement = self.wm.disagreement(feat[:, :-1].detach(), b["action"][:, :-1])
+        with torch.no_grad(), self.precision.autocast():
+            real_disagreement = self.wm.disagreement(
+                feat[:, :-1].detach(), b["action"][:, :-1]
+            ).float()
             self.curiosity_norm.update(real_disagreement)
             if self.curiosity_mode == "lp":
                 # Fold this batch's per-sample model errors into their regions'
@@ -1206,15 +1260,17 @@ class DreamerBrain(Brain):
                 valid &= b["first"][:, offset : offset + span] < 0.5
             start_skill_feat = feat[:, :span].detach()
             end_skill_feat = feat[:, self.skill_duration :].detach()
-            skill_logits = self.actor.discrimination_logits(start_skill_feat, end_skill_feat)
+            with self.precision.autocast(), torch.profiler.record_function("learn/skill_forward"):
+                skill_logits = self.actor.discrimination_logits(start_skill_feat, end_skill_feat)
             if bool(valid.any()):
-                loss_skill_disc = F.cross_entropy(skill_logits[valid], labels[valid])
+                loss_skill_disc = F.cross_entropy(skill_logits.float()[valid], labels[valid])
                 if self.opt_skill is None:
                     raise RuntimeError("temporal skill discriminator has no optimizer")
                 self.opt_skill.zero_grad()
-                loss_skill_disc.backward()
-                nn.utils.clip_grad_norm_(self.actor.discriminator.parameters(), self.grad_clip)
-                self.opt_skill.step()
+                with torch.profiler.record_function("learn/skill_backward_optimizer"):
+                    loss_skill_disc.backward()
+                    nn.utils.clip_grad_norm_(self.actor.discriminator.parameters(), self.grad_clip)
+                    self.opt_skill.step()
                 with torch.no_grad():
                     skill_disc_accuracy = float(
                         (skill_logits[valid].argmax(-1) == labels[valid]).float().mean()
@@ -1230,84 +1286,92 @@ class DreamerBrain(Brain):
         h_i = flat[starts, : self.wm.dynamics_cfg.deter]
         z_i = flat[starts, self.wm.dynamics_cfg.deter :]
 
-        img_feats, img_outcomes = [], []
-        img_logps, img_ents, img_manager_ents, img_actions, img_skills = [], [], [], [], []
-        imagined_skill: torch.Tensor | None = None
-        for t in range(self.horizon):
-            f_i = self.wm.dynamics.feat(h_i, z_i)
-            manager_logp = torch.zeros(f_i.shape[0], device=self.device)
-            manager_ent = torch.zeros_like(manager_logp)
-            if isinstance(self.actor, TemporalSkillPolicy):
-                if t % self.skill_duration == 0:
-                    manager_dist = self.actor.manager_dist(f_i)
-                    imagined_skill = manager_dist.sample()
-                    manager_logp = manager_dist.log_prob(imagined_skill)
-                    manager_ent = manager_dist.entropy()
-                if imagined_skill is None:
-                    raise RuntimeError("temporal skill manager did not select an intent")
-            dist_cont, dist_grip = self._policy_dists(f_i, skill=imagined_skill)
-            a_cont = dist_cont.sample()
-            a_grip = dist_grip.sample()
-            logp = dist_cont.log_prob(a_cont) + dist_grip.log_prob(a_grip) + manager_logp
-            ent = dist_cont.entropy() + dist_grip.entropy()
-            a_vec = torch.cat([a_cont, F.one_hot(a_grip, NUM_GRIP_MODES).float()], dim=-1)
-            img_feats.append(f_i)
-            img_logps.append(logp)
-            img_ents.append(ent)
-            img_manager_ents.append(manager_ent)
-            img_actions.append(a_vec)
-            if imagined_skill is not None:
-                img_skills.append(imagined_skill)
-            with torch.no_grad():
-                h_i, z_i, _ = self.wm.dynamics.img_step(h_i, z_i, a_vec)
-                img_outcomes.append(self.wm.dynamics.feat(h_i, z_i))
-        img_feat = torch.stack(img_feats)  # (H, N, F)
-        img_outcome = torch.stack(img_outcomes)
-        img_logp = torch.stack(img_logps)
-        img_ent = torch.stack(img_ents)
-        img_manager_ent = torch.stack(img_manager_ents)
-        img_action = torch.stack(img_actions)
-
-        with torch.no_grad():
-            imagined_skill_reward = torch.zeros_like(img_logp)
-            if isinstance(self.actor, TemporalSkillPolicy):
-                skill_tensor = torch.stack(img_skills)
-                for start in range(0, self.horizon, self.skill_duration):
-                    end = start + self.skill_duration
-                    if end <= self.horizon:
-                        imagined_skill_reward[end - 1] = self.actor.intrinsic_reward(
-                            img_feat[start], img_outcome[end - 1], skill_tensor[start]
-                        )
-            components, r_cur, bored = self._imagination_affect(
-                img_feat,
-                img_outcome,
-                img_action,
-                skill_reward=imagined_skill_reward,
+        with self.precision.autocast(), torch.profiler.record_function("learn/imagination_forward"):
+            img_feats, img_outcomes = [], []
+            img_logps, img_ents, img_manager_ents, img_actions, img_skills = (
+                [],
+                [],
+                [],
+                [],
+                [],
             )
-            reward = components if self.vector_critic else components.sum(-1)
-            cont = torch.sigmoid(self.wm.head_cont(img_outcome).squeeze(-1))
-            discount = self.gamma * cont
-            value_ema = self._critic_value(self.critic_ema, img_feat)
-            # lambda-returns, backward pass
-            returns = torch.zeros_like(value_ema)
-            last = value_ema[-1]
-            for t in reversed(range(self.horizon)):
-                bootstrap = (
-                    (1 - self.lam) * value_ema[t + 1] + self.lam * last
-                    if t + 1 < self.horizon
-                    else last
-                )
-                step_discount = discount[t].unsqueeze(-1) if self.vector_critic else discount[t]
-                returns[t] = reward[t] + step_discount * bootstrap
-                last = returns[t]
+            imagined_skill: torch.Tensor | None = None
+            for t in range(self.horizon):
+                f_i = self.wm.dynamics.feat(h_i, z_i)
+                manager_logp = torch.zeros(f_i.shape[0], device=self.device)
+                manager_ent = torch.zeros_like(manager_logp)
+                if isinstance(self.actor, TemporalSkillPolicy):
+                    if t % self.skill_duration == 0:
+                        manager_dist = self.actor.manager_dist(f_i)
+                        imagined_skill = manager_dist.sample()
+                        manager_logp = manager_dist.log_prob(imagined_skill)
+                        manager_ent = manager_dist.entropy()
+                    if imagined_skill is None:
+                        raise RuntimeError("temporal skill manager did not select an intent")
+                dist_cont, dist_grip = self._policy_dists(f_i, skill=imagined_skill)
+                a_cont = dist_cont.sample()
+                a_grip = dist_grip.sample()
+                logp = dist_cont.log_prob(a_cont) + dist_grip.log_prob(a_grip) + manager_logp
+                ent = dist_cont.entropy() + dist_grip.entropy()
+                a_vec = torch.cat([a_cont, F.one_hot(a_grip, NUM_GRIP_MODES).float()], dim=-1)
+                img_feats.append(f_i)
+                img_logps.append(logp)
+                img_ents.append(ent)
+                img_manager_ents.append(manager_ent)
+                img_actions.append(a_vec)
+                if imagined_skill is not None:
+                    img_skills.append(imagined_skill)
+                with torch.no_grad():
+                    h_i, z_i, _ = self.wm.dynamics.img_step(h_i, z_i, a_vec)
+                    img_outcomes.append(self.wm.dynamics.feat(h_i.float(), z_i.float()))
+            img_feat = torch.stack(img_feats)
+            img_outcome = torch.stack(img_outcomes)
+            img_logp = torch.stack(img_logps)
+            img_ent = torch.stack(img_ents)
+            img_manager_ent = torch.stack(img_manager_ents)
+            img_action = torch.stack(img_actions)
 
-        # Critic: twohot regression to lambda-returns.
-        critic_logits = self._critic_logits(self.critic, img_feat.detach())
-        loss_critic = self.twohot.loss(critic_logits, returns.detach()).mean()
+            with torch.no_grad():
+                imagined_skill_reward = torch.zeros_like(img_logp)
+                if isinstance(self.actor, TemporalSkillPolicy):
+                    skill_tensor = torch.stack(img_skills)
+                    for start in range(0, self.horizon, self.skill_duration):
+                        end = start + self.skill_duration
+                        if end <= self.horizon:
+                            imagined_skill_reward[end - 1] = self.actor.intrinsic_reward(
+                                img_feat[start], img_outcome[end - 1], skill_tensor[start]
+                            )
+                components, r_cur, bored = self._imagination_affect(
+                    img_feat,
+                    img_outcome,
+                    img_action,
+                    skill_reward=imagined_skill_reward,
+                )
+                reward = components if self.vector_critic else components.sum(-1)
+                cont = torch.sigmoid(self.wm.head_cont(img_outcome).squeeze(-1).float())
+                discount = self.gamma * cont
+                value_ema = self._critic_value(self.critic_ema, img_feat)
+                returns = torch.zeros_like(value_ema)
+                last = value_ema[-1]
+                for t in reversed(range(self.horizon)):
+                    bootstrap = (
+                        (1 - self.lam) * value_ema[t + 1] + self.lam * last
+                        if t + 1 < self.horizon
+                        else last
+                    )
+                    step_discount = discount[t].unsqueeze(-1) if self.vector_critic else discount[t]
+                    returns[t] = reward[t].float() + step_discount * bootstrap
+                    last = returns[t]
+
+            # Critic forward/loss construction stays under autocast; twohot
+            # normalization and reduction are explicitly FP32.
+            critic_logits = self._critic_logits(self.critic, img_feat.detach())
+            loss_critic = self.twohot.loss(critic_logits, returns.detach()).float().mean()
         self.opt_critic.zero_grad()
-        loss_critic.backward()
-        nn.utils.clip_grad_norm_(self.critic.parameters(), self.grad_clip)
-        self.opt_critic.step()
+        with torch.profiler.record_function("learn/critic_backward_optimizer"):
+            loss_critic.backward()
+            nn.utils.clip_grad_norm_(self.critic.parameters(), self.grad_clip)
+            self.opt_critic.step()
         with torch.no_grad():
             for p, p_ema in zip(
                 self.critic.parameters(), self.critic_ema.parameters(), strict=True
@@ -1315,7 +1379,7 @@ class DreamerBrain(Brain):
                 p_ema.lerp_(p, 0.02)
 
         # Actor: REINFORCE on normalized advantages + entropy bonus.
-        with torch.no_grad():
+        with torch.no_grad(), self.precision.autocast():
             value_components = self._critic_value(self.critic, img_feat)
             value = value_components.sum(-1) if self.vector_critic else value_components
             total_returns = returns.sum(-1) if self.vector_critic else returns
@@ -1328,13 +1392,15 @@ class DreamerBrain(Brain):
             - self.skill_manager_entropy * img_manager_ent
         ).mean()
         self.opt_actor.zero_grad()
-        loss_actor.backward()
-        nn.utils.clip_grad_norm_(self._actor_parameters, self.grad_clip)
-        self.opt_actor.step()
+        with torch.profiler.record_function("learn/actor_backward_optimizer"):
+            loss_actor.backward()
+            nn.utils.clip_grad_norm_(self._actor_parameters, self.grad_clip)
+            self.opt_actor.step()
 
         self._updates += 1
         if self.async_inference and self._updates % self.publish_every == 0:
             self._publish_inference()
+        self._synchronize_learning_stream()
         elapsed = time.monotonic() - learn_began
         self._learn_seconds = (
             elapsed if self._learn_seconds == 0.0 else 0.95 * self._learn_seconds + 0.05 * elapsed
@@ -1370,6 +1436,9 @@ class DreamerBrain(Brain):
             "graded_timepoints_per_second": float(B * L / max(elapsed, 1e-9)),
             "context_steps": float(L),
             "buffer": float(len(self.buffer)),
+            "precision_ieee_fp32": float(self.precision.mode is PrecisionMode.IEEE_FP32),
+            "precision_tf32": float(self.precision.mode is PrecisionMode.TF32),
+            "precision_amp_bf16": float(self.precision.mode is PrecisionMode.AMP_BF16),
         }
         with torch.no_grad():
             cont_probability = torch.sigmoid(cont_logits)
@@ -1449,6 +1518,8 @@ class DreamerBrain(Brain):
 
     def introspect(self) -> dict[str, float]:
         out = dict(self._metrics)
+        out["pending_update_credit"] = self.pending_update_credit()
+        out["dropped_update_credit"] = self._dropped_update_credit
         if self.temperament_enabled:
             out.update({f"temperament_{k}": v for k, v in self.temperament.items()})
         # Exact per-life realized return (updated per lived tick in act(), so
@@ -1458,6 +1529,8 @@ class DreamerBrain(Brain):
             out["life_return_homeo"] = self._life_return_homeo
             if self.via_on:
                 out["life_return_via"] = self._life_return_via
+        if self.async_inference:
+            out["inference_lag_updates"] = float(self._updates - self._published_updates)
         return out
 
     def reset_stream(self) -> None:
@@ -1608,6 +1681,8 @@ class DreamerBrain(Brain):
         return {
             "obs_version": OBS_VERSION,
             "brain_family": self.brain_family,
+            "precision": self.precision.mode.value,
+            "learning_contract": self._learning_contract(),
             "wm": self.wm.state_dict(),
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
@@ -1638,12 +1713,28 @@ class DreamerBrain(Brain):
             "stream_wake": self._stream_wake,
             "step_scale": self._step_scale,
             "updates": self._updates,
+            "published_updates": self._published_updates,
+            "inference": self._inference.state_dict() if self._inference is not None else None,
             "act_steps": self._act_steps,
+            "schedule_credit_origin": self._schedule_credit_origin,
+            "dropped_update_credit": self._dropped_update_credit,
             "rng_state": self.rng.bit_generator.state,
             "buffer": self.buffer.state_dict(),
             "h": self.h.cpu().numpy(),
             "z": self.z.cpu().numpy(),
             "last_action": self.last_action.cpu().numpy(),
+        }
+
+    def _learning_contract(self) -> dict[str, int | float | str]:
+        return {
+            "train_ratio": self.train_ratio,
+            "batch_size": self.batch_size,
+            "seq_len": self.seq_len,
+            "burn_in": self.burn_in,
+            "warmup_steps": self.warmup_steps,
+            "recent": self.recent_slots,
+            "prioritize": self.prioritize,
+            "publish_every": self.publish_every,
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -1657,8 +1748,24 @@ class DreamerBrain(Brain):
                 f"brain checkpoint has obs_version {state.get('obs_version')}, "
                 f"world speaks {OBS_VERSION}: refusing to load across contract changes"
             )
-        migrated = "ensemble.0.0.weight" in state["wm"]
-        _migrate_ensemble_state(state["wm"])
+        stored_precision = state.get("precision")
+        if stored_precision is not None:
+            try:
+                checkpoint_precision = PrecisionMode(str(stored_precision))
+            except ValueError as exc:
+                raise ValueError(f"unknown checkpoint precision {stored_precision!r}") from exc
+            if checkpoint_precision is not self.precision.mode:
+                raise ValueError(
+                    f"brain checkpoint precision is {checkpoint_precision.value!r}, "
+                    f"but config requests {self.precision.mode.value!r}"
+                )
+        stored_contract = state.get("learning_contract")
+        if stored_contract is not None and stored_contract != self._learning_contract():
+            raise ValueError(
+                "brain checkpoint learning contract differs from the configured replay, "
+                "train-ratio, or publication schedule"
+            )
+        migrated = self._migrate_world_model_state(state["wm"])
         self.wm.load_state_dict(state["wm"])
         self.actor.load_state_dict(state["actor"])
         self.critic.load_state_dict(state["critic"])
@@ -1704,10 +1811,21 @@ class DreamerBrain(Brain):
         self._stream_wake = bool(state.get("stream_wake", False))
         self._step_scale = float(state.get("step_scale", 1.0))
         self._updates = int(state["updates"])
+        self._published_updates = int(state.get("published_updates", self._updates))
         # Guarded: pre-pacing checkpoints carry no act-step counter; seed it
         # at the stored buffer's size so the update/act-step pair stays
         # roughly coherent.
         self._act_steps = int(state.get("act_steps", len(state["buffer"]["depth"])))
+        self._dropped_update_credit = float(state.get("dropped_update_credit", 0.0))
+        if "schedule_credit_origin" in state:
+            self._schedule_credit_origin = float(state["schedule_credit_origin"])
+        else:
+            # Older schedulers discarded their process-local debt on resume.
+            # Baseline that historical checkpoint at zero debt, then preserve
+            # every newly accrued update credit from this migration onward.
+            self._schedule_credit_origin = (
+                self._raw_update_credit() - self._dropped_update_credit - self._updates
+            )
         self.rng.bit_generator.state = state["rng_state"]
         self.buffer.load_state_dict(state["buffer"])
         if "salience" not in state["buffer"]:
@@ -1717,12 +1835,21 @@ class DreamerBrain(Brain):
         self.last_action = torch.as_tensor(state["last_action"], device=self.device)
         if self.async_inference:
             self._publish_inference()
+            inference_state = state.get("inference")
+            if inference_state is not None and self._inference is not None:
+                self._inference.load_state_dict(inference_state)
+                self._published_updates = int(state.get("published_updates", self._updates))
 
     def inherit(self, state: dict[str, Any]) -> None:
         """Warm-start a newborn from a living donor: weights, memories, and
         temperament — the temperament mutated, so lineages drift through
         temperament space and transmission has something to select on."""
         self.load_state_dict(state)
+        # The donor already earned its outstanding updates. A copied newborn
+        # starts a fresh schedule while retaining the inherited replay and
+        # optimizer state; lineage respawn reuses the original brain instead.
+        self._dropped_update_credit = 0.0
+        self._schedule_credit_origin = self._raw_update_credit() - self._updates
         # A newborn is not born jaded: inherited knowledge keeps the donor's
         # boredom-relevant *scales* (normalizers ride state_dict), but the
         # accumulated mood itself resets with the new body.

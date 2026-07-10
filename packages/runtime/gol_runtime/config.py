@@ -16,7 +16,13 @@ from gol_world.config import WorldConfig, dataclass_from_dict, load_world_config
 @dataclass(frozen=True)
 class DevicesConfig:
     inference: str = "cpu"
-    learning: str = "cpu"
+    learning: str | tuple[str, ...] = "cpu"
+
+    def learning_devices(self) -> tuple[str, ...]:
+        devices = (self.learning,) if isinstance(self.learning, str) else self.learning
+        if not devices or any(not device for device in devices):
+            raise ValueError("devices.learning must contain at least one device")
+        return devices
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,55 @@ class ObservabilityConfig:
     # absolute size ("2GB") or a fraction of system RAM ("75%"). Only affects the
     # spawned viewer; file recording (--rrd) is bounded by rotation instead.
     rerun_memory_limit: str = "2GB"
+
+    def __post_init__(self) -> None:
+        if self.rerun_fps < 1 or self.metrics_every_ticks < 1:
+            raise ValueError("observability rates must be positive")
+        if self.rrd_rotate_sim_hours < 1:
+            raise ValueError("observability.rrd_rotate_sim_hours must be positive")
+
+
+@dataclass(frozen=True)
+class PacingConfig:
+    """Wall-clock execution policy; virtual-time semantics stay fixed."""
+
+    mode: str = "fixed"  # fixed | adaptive
+    debt_policy: str = "backpressure"  # backpressure | drop
+    headroom: float = 0.85
+    min_tick_rate: float = 1.0
+    max_tick_rate: float = 1000.0
+    max_debt_updates: float = 4.0
+    resume_debt_updates: float = 2.0
+    hysteresis: float = 0.1
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("fixed", "adaptive"):
+            raise ValueError("pacing.mode must be 'fixed' or 'adaptive'")
+        if self.debt_policy not in ("backpressure", "drop"):
+            raise ValueError("pacing.debt_policy must be 'backpressure' or 'drop'")
+        if not 0.0 < self.headroom <= 1.0:
+            raise ValueError("pacing.headroom must be in (0, 1]")
+        if not 0.0 < self.min_tick_rate <= self.max_tick_rate:
+            raise ValueError("pacing tick-rate bounds must satisfy 0 < min <= max")
+        if self.max_debt_updates < 1.0:
+            raise ValueError("pacing.max_debt_updates must be at least one")
+        if not 1.0 <= self.resume_debt_updates < self.max_debt_updates:
+            raise ValueError("pacing.resume_debt_updates must be in [1, max_debt_updates)")
+        if not 0.0 <= self.hysteresis < 1.0:
+            raise ValueError("pacing.hysteresis must be in [0, 1)")
+
+
+@dataclass(frozen=True)
+class DormancyAccelerationConfig:
+    exact_unpaced: bool = False
+    event_fast_forward: bool = False
+    max_jump_ticks: int = 100_000
+
+    def __post_init__(self) -> None:
+        if self.max_jump_ticks < 1:
+            raise ValueError("dormancy_acceleration.max_jump_ticks must be positive")
+        if self.event_fast_forward and not self.exact_unpaced:
+            raise ValueError("event_fast_forward requires exact_unpaced")
 
 
 @dataclass(frozen=True)
@@ -78,6 +133,16 @@ class RunConfig:
     population: PopulationConfig = field(default_factory=PopulationConfig)
     reproduction: ReproductionConfig = field(default_factory=ReproductionConfig)
     observability: ObservabilityConfig = field(default_factory=ObservabilityConfig)
+    pacing: PacingConfig = field(default_factory=PacingConfig)
+    dormancy_acceleration: DormancyAccelerationConfig = field(
+        default_factory=DormancyAccelerationConfig
+    )
+
+    def __post_init__(self) -> None:
+        if self.tick_rate < 1 or self.act_every < 1:
+            raise ValueError("tick_rate and act_every must be positive")
+        if self.checkpoint_interval_ticks < 1:
+            raise ValueError("checkpoint_interval_ticks must be positive")
 
 
 def apply_overrides(data: dict[str, Any], sets: list[str]) -> dict[str, Any]:
@@ -116,7 +181,9 @@ def load_run_config(
 
 __all__ = [
     "DevicesConfig",
+    "DormancyAccelerationConfig",
     "PopulationConfig",
+    "PacingConfig",
     "ReproductionConfig",
     "ObservabilityConfig",
     "RunConfig",

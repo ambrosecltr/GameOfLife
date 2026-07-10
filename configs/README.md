@@ -35,6 +35,8 @@ sequence even where an earlier cross-track round made the numbers differ:
   real train_ratio 1.0 on local hardware (adopted round 010)
 - `anima_` — the completed plastic-valence family: world-model-free, critic-free,
   neuromodulated plasticity (closed after anima 007)
+- `aion_` — the S5 world-model family: protected continuous-time memory,
+  long-context consolidation, explicit precision, and causal adaptive wall time
 
 Rules:
 

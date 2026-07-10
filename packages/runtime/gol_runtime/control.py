@@ -35,17 +35,7 @@ class ControlServer:
     # ------------------------------------------------------------- handlers
 
     async def _status(self, request: web.Request) -> web.Response:
-        world = self.sim.world
-        return web.json_response(
-            {
-                "tick": world.tick,
-                "day_fraction": round(world.day_fraction, 4),
-                "light_level": round(world.light_level, 3),
-                "population": len(world.robots),
-                "paused": self.sim.paused,
-                "speed": self.sim.speed,
-            }
-        )
+        return web.json_response(self.sim.status())
 
     async def _pause(self, request: web.Request) -> web.Response:
         self.sim.paused = True
@@ -62,8 +52,7 @@ class ControlServer:
         return web.json_response({"speed": self.sim.speed})
 
     async def _checkpoint(self, request: web.Request) -> web.Response:
-        self.sim.checkpoint_requested = True
-        return web.json_response({"requested": True, "tick": self.sim.world.tick})
+        return web.json_response({"requested": True, "tick": self.sim.request_checkpoint()})
 
     # --------------------------------------------------------------- server
 

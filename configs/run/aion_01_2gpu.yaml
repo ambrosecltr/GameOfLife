@@ -1,0 +1,50 @@
+# Aion 01 — two independent S5 lineages, one learner per GPU.
+#
+# This arm preserves the six-body ecology while reducing the learning
+# population from three Aions to two. Each Aion keeps the full Aion 01
+# consolidation budget; only independent replication changes.
+#
+#   scripts/bench_aion_2gpu.sh /tmp/aion-2gpu-preflight <pod-hourly-price>
+#
+#   PYTHONUNBUFFERED=1 uv run gol-run --new saves/aion_01_2gpu \
+#       --config configs/run/aion_01_2gpu.yaml --headless
+
+world_config: configs/world/beta_12_organism.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7305
+
+pacing:
+  mode: adaptive
+  debt_policy: backpressure
+  headroom: 0.85
+  min_tick_rate: 1.0
+  max_tick_rate: 1000.0
+  max_debt_updates: 4.0
+  resume_debt_updates: 2.0
+  hysteresis: 0.1
+
+dormancy_acceleration:
+  exact_unpaced: true
+  event_fast_forward: true
+  max_jump_ticks: 100000
+
+devices:
+  inference: cuda:0
+  learning: [cuda:0, cuda:1]
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: lineage
+  mix:
+    - brain: configs/brain/aion_01_s5.yaml
+      count: 2
+    - brain: { kind: scripted_forager }
+      count: 4
+
+observability:
+  rerun: false
+  metrics_every_ticks: 100

@@ -93,7 +93,11 @@ class CategoricalLatentDynamics(nn.Module):
     def _logits_to_probs(self, logits: torch.Tensor) -> torch.Tensor:
         groups = self.cfg.stoch_groups
         classes = self.cfg.stoch_classes
-        probs = torch.softmax(logits.view(*logits.shape[:-1], groups, classes), dim=-1)
+        # Categorical probabilities feed sampling, KL, and persistent latent
+        # state. Keep their normalization in FP32 even when dense logits were
+        # produced under BF16 autocast.
+        logits_fp32 = logits.float().view(*logits.shape[:-1], groups, classes)
+        probs = torch.softmax(logits_fp32, dim=-1)
         return (1.0 - self.cfg.unimix) * probs + self.cfg.unimix / classes
 
     def _sample(self, probs: torch.Tensor) -> torch.Tensor:
@@ -106,6 +110,8 @@ class CategoricalLatentDynamics(nn.Module):
         """Balanced categorical KL with free bits."""
 
         def kl(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
+            p = p.float()
+            q = q.float()
             return (p * (torch.log(p + 1e-8) - torch.log(q + 1e-8))).sum(-1).sum(-1)
 
         dynamics = kl(post.detach(), prior).clamp(min=self.cfg.free_bits)

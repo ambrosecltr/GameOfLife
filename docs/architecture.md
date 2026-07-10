@@ -20,7 +20,12 @@ Restart of `~/simulator`, realigned to the original vision: a persistent simulat
   task reward, named skill, demonstration, pretrained behavior, or designer fitness
   score. The architecture is a research variable; the closed anima track established
   that a learned expectation/critic is constitutive for valence over a mortal life.
-- **Compute tiers**: develop and run 1–2 learning agents locally on the M1 Pro; rent a single cloud GPU (RTX 4090-class, ~$0.35–0.70/hr on RunPod/Vast) for populations of 8–16. A 24–72h soak costs roughly $10–50. Whole stack runs on one machine per run (sim is CPU-cheap; brains use the GPU) — no distributed systems complexity.
+- **Compute tiers**: develop and validate locally; select the long-run pod only after
+  the synchronized five-minute gate on RTX 4090, RTX 5090, and H100 SXM. The 5090 is
+  the first Aion candidate when 32 GB fits; H100 bounds throughput. L40S/A100 enter
+  only when measured memory pressure justifies them. Pod prices are benchmark inputs,
+  not hard-coded assumptions. Multi-GPU runs assign independent brains per device and
+  need no distributed gradient system.
 - **Observability**: **Rerun** (rerun.io) as the primary viewer — a purpose-built research visualization tool (3D scene + time-series + timeline scrubbing + remote streaming + recording files), not a hand-rolled HTML viewer. A tiny control API (`gol-ctl`) handles interactivity Rerun doesn't (pause/speed/checkpoint-now).
 
 ### Stack evaluation (considered fresh, not inherited)
@@ -138,7 +143,13 @@ Raycasting: Amanatides–Woo voxel DDA, vectorized across all rays of all agents
 - **Temperament** (`temperament:` in the brain config): innate, heritable individuality — log-normal multipliers over the abstract drive knobs only (curiosity/homeostasis weights, per-drive weights, boredom weight, entropy scale), sampled at birth, persisted in checkpoints, and mutated when a newborn warm-starts from a living donor (`Brain.inherit`). Never object-specific: an agent may be born motion-hungry or damage-averse, but *what* it comes to like must emerge from its own history. Observability: `gol-stats --interests` computes per-agent activity profiles (rest/social/forage/dormant + eat/dig/place rates from `near_robots`/`near_bushes`/`resting` metrics fields), between-agent divergence (individuality) and within-agent stability (interests) — the measurement side of research questions 2 and 4.
 - **Replay buffer**: per-agent ring, ~500k steps quantized (~50–100 MB at ray-fan size); samples sequences (batch 16 × length 64). Long buffer = ballast against nonstationarity.
 - **Lifelong specifics**: train on one unbroken sequence stream (no episode boundaries — DreamerV3 is already off-policy sequence-chunk training, which suits this perfectly); LayerNorm everywhere per the recipe; monitor for plasticity loss (pred-error trend per agent is a first-class logged metric).
-- **Cadence**: configurable train-ratio (updates per act-step), throttled by the learner thread. VRAM check: 16 agents × ~12M params × Adam ≈ ~4 GB + activations — fits a 4090 with room; batched multi-agent training via `torch.func.functional_call` + vmap over stacked per-agent params is the M4 perf lever.
+- **Cadence**: configurable train ratio is checkpointed learning credit per lived
+  act-step. A measured wall-clock governor slows world execution before causal lag
+  exceeds its configured bound. Credit dropping is an explicit, metered ablation.
+  Independent learners can be assigned round-robin to `devices.learning: [cuda:0,
+  cuda:1, ...]`; there is no gradient all-reduce because organisms share no model,
+  optimizer, replay, or statistics. Cross-brain batching/vmap remains a profiler-gated
+  option, not an assumed optimization.
 
 **AionBrain** (`aion/{brain,s5}.py`) is a separate checkpointed world-model
 lineage. It retains the organism mechanisms above but replaces the GRU transition
@@ -149,13 +160,38 @@ slow modes persist and decay across the runtime-measured blackout duration. See
 [proposal 005](research_proposals/005-aion-s5.md) for the architecture boundary,
 falsification gates, and the limits of treating predictive S5 state as memory.
 
+S5 is stored and evaluated as paired FP32 real channels. The transition is the exact
+diagonal complex algebra (`a·real − b·imag`, `b·real + a·imag`) without native
+complex kernels. Decay/frequency/log-step, discretization, wake powers, persistent
+state, scan, and B/C projections are protected from BF16 autocast. This matters at
+the configured slow edge: `exp(-0.5 × 0.0001) ≈ 0.9999500012` rounds to 1.0 in
+both FP16 and BF16, erasing the intended `A^1024 ≈ 0.95009` decay. Dense encoder,
+heads, gates, actor, critic, and ensemble may use BF16 AMP; protected FP32 projection
+GEMMs may use TF32. Parameters and optimizer states stay FP32.
+
 ## Runtime — `packages/runtime/gol_runtime/`
 
-Files: `run.py`, `loop.py` (SimLoop), `scheduler.py` (LearnerThread), `checkpoint.py`, `config.py`, `control.py` (HTTP control API), `inspect.py`. Single process, three threads:
+Files: `run.py`, `loop.py` (SimLoop), `scheduler.py` (LearnerThread),
+`governor.py`, `config.py`, `control.py` (HTTP control API), and `inspect.py`.
+Single process, one sim thread plus one serial learner worker per learning brain:
 
-1. **Sim thread**: fixed timestep, 20 ticks/s sim time, wall-paced × speed multiplier (`--headless --ticks N` unpaced). Brains act every 5 ticks (4 Hz) after one vectorized raycast. Snapshot-capable brains read an immutable encoder/dynamics/controller publication, so an optimizer update cannot latch the body's last action.
-2. **Learner workers**: one serial worker per learning brain, concurrent across brains. Each pays bounded update debt on the learning device and periodically publishes inference. **Backpressure rule: the learner skips, the sim never waits.**
+1. **Sim thread**: physics always advances by the same fixed 1/20-second timestep,
+   and brains act every five ticks. Fixed pacing targets the configured wall rate;
+   adaptive pacing targets the minimum measured learner, inference, world, and
+   configured capacity with headroom/hysteresis. `--headless` removes viewer pacing,
+   not causal backpressure.
+2. **Learner workers**: each pays checkpoint-derived update credit serially while
+   sibling brains run independently. At the causal-lag ceiling the sim waits in wall
+   time; virtual state does not advance and credit is not lost. Async controllers read
+   immutable snapshots published after a fixed number of completed updates.
 3. **Observability thread**: Rerun logging + control HTTP endpoint (asyncio).
+
+When every embodied organism is truly dormant, required whole-update credit is paid
+first. Ordinary stepping then runs unpaced. Settled, event-free intervals can jump to
+the tick immediately before the earliest ecology, spoilage, sound, lifecycle, wake,
+death, metrics, checkpoint, or run-end boundary; the boundary itself uses scalar
+`World.step()`. Bulk accounting advances solar charge, hibernation damage, fatigue,
+age, heatmap visits, and Aion's missed opportunities without consuming RNG.
 
 Checkpoint every 30k ticks and on SIGINT, at a tick boundary — world + all brains saved together atomically so resume is coherent. `--sync` mode (learning inline) for determinism tests.
 
@@ -177,7 +213,10 @@ Files: `rerun_log.py`, `metrics.py`, `events.py`, `export.py`.
 - **M1 — A body lives in it.** Physics, raycasting, obs/action contract, RandomWalkerBrain, one robot, `gol-ctl` pause/speed, determinism tests. *Demo: robot wanders, climbs, falls, splashes; its ray fan renders.*
 - **M2 — An ecology.** Energy economy, gripper, hibernate/death/scrap, respawn, ScriptedForagerBrain, 8 scripted bots, metrics/events + per-agent Rerun charts. *Demo: foragers survive, walkers starve, population churns. Economy calibrated here.*
 - **M3 — One mind awakens (local).** Full DreamerBrain (RSSM + Plan2Explore + imagination AC) for 1–2 agents among scripted peers on the M1 Pro (nano preset); sync mode first, then LearnerThread; joint checkpointing; introspection charts. *Demo: kill and resume — learning visibly continues; pred error trends down; behavior differs from the random walker within hours.*
-- **M4 — A living population (cloud).** Provisioning script, CUDA path, batched/vmapped multi-agent training, 12–16 learners, perf floor test, soak.sh, `.rrd` recording rotation. *Demo: multi-day cloud run streamed to the laptop; scrub a day of world-time in Rerun.*
+- **M4 — A living population (cloud).** Provisioning script, explicit CUDA
+  precision, measured causal governor, independent multi-GPU assignment, profiler-gated
+  batching/vmap, perf floor tests, soak.sh, and `.rrd` rotation. *Demo: multi-day
+  cloud run streamed to the laptop; scrub a day of world-time in Rerun.*
 - **M5 — Social pressure & research runs.** Signal channel live, ore/dig-place material loop, night-scarcity tuning, `inherit_weights`, curiosity-masking ablation configs, `docs/research_journal/` findings log. *Demo: designed experiment runs targeting research questions 2–4; evidence (or absence) of signaling/congregation/hoarding in events + heatmaps.*
 
 ## Verification

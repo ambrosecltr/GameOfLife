@@ -27,6 +27,27 @@ class VisitHeatmap:
         if world.tick % self.stride == 0:
             self.grid *= self._decay
 
+    def advance_stationary(self, world: World, start_tick: int) -> None:
+        """Bulk-account stationary visits over ``(start_tick, world.tick]``."""
+        if world.tick < start_tick:
+            raise ValueError("heatmap interval cannot run backward")
+        positions: dict[tuple[int, int], int] = {}
+        sx, sy = self.grid.shape
+        for robot in world.robots.values():
+            position = (int(robot.pos[0]), int(robot.pos[1]))
+            if 0 <= position[0] < sx and 0 <= position[1] < sy:
+                positions[position] = positions.get(position, 0) + 1
+        tick = start_tick
+        while tick < world.tick:
+            next_decay = (tick // self.stride + 1) * self.stride
+            segment_end = min(world.tick, next_decay)
+            count = segment_end - tick
+            for (x, y), occupants in positions.items():
+                self.grid[x, y] += float(count * occupants)
+            if segment_end % self.stride == 0:
+                self.grid *= self._decay
+            tick = segment_end
+
     def image(self) -> npt.NDArray[np.uint8]:
         """Log-scaled grayscale image (y-major for image viewers)."""
         scaled = np.log1p(self.grid)

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -123,10 +124,10 @@ def m_centered(
     normal → positive. reduction is this with half_life→0; level is half_life→∞."""
     base_d = ema_prev(d, half_life_ticks)
     base_V = ema_prev(V, half_life_ticks)
-    return COMFORT_GAIN * (base_d - d) - via_gain * (V - base_V)
+    return np.asarray(COMFORT_GAIN * (base_d - d) - via_gain * (V - base_V))
 
 
-def pearson(a: list[float], b: list[float]) -> float:
+def pearson(a: Sequence[float], b: Sequence[float]) -> float:
     if len(a) < 3 or np.std(a) < 1e-9 or np.std(b) < 1e-9:
         return float("nan")
     return float(np.corrcoef(a, b)[0, 1])
@@ -182,12 +183,14 @@ def screen(save: Path, d_refs: list[float], via_gain: float) -> None:
     fed_ids = [r for r in energy if energy[r].mean() >= np.percentile(e_arr, 66)]
     starve_ids = [r for r in energy if energy[r].mean() <= np.percentile(e_arr, 33)]
     for dref in d_refs:
-        ret, me, ea = [], [], []
+        ret_values: list[float] = []
+        me: list[float] = []
+        ea: list[int] = []
         for rid in energy:
-            ret.append(float(m_level(d_by[rid], V_by[rid], dref, via_gain).sum()))
+            ret_values.append(float(m_level(d_by[rid], V_by[rid], dref, via_gain).sum()))
             me.append(float(energy[rid].mean()))
             ea.append(eats.get(rid, 0))
-        ret = np.array(ret)
+        ret = np.asarray(ret_values)
         rmap = dict(zip(energy.keys(), ret, strict=True))
         fed = np.mean([rmap[r] for r in fed_ids])
         starve = np.mean([rmap[r] for r in starve_ids])

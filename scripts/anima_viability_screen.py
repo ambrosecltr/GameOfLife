@@ -41,7 +41,7 @@ def load_recorded_life(blob_path: Path) -> tuple[np.ndarray, np.ndarray]:
     unpickling calls torch.load without map_location, so pin it to CPU (the
     conditioning_gym recipe)."""
     orig = torch.load
-    torch.load = functools.partial(orig, map_location="cpu")  # type: ignore[assignment]
+    torch.load = functools.partial(orig, map_location="cpu")
     try:
         state = pickle.loads(blob_path.read_bytes())
     finally:

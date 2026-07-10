@@ -1,6 +1,7 @@
 """Population lifecycle: deaths lead to delayed respawns with fresh brains."""
 
 import dataclasses
+import pickle
 from pathlib import Path
 
 from gol_runtime.config import PopulationConfig, RunConfig
@@ -37,7 +38,13 @@ def test_death_triggers_respawn(tmp_path: Path) -> None:
     world.robots["walker_001"].energy = 0.0
     world.robots["walker_001"].integrity = 0.5
 
-    loop = SimLoop(world, save, RUN, act_step=population.act_step)
+    loop = SimLoop(
+        world,
+        save,
+        RUN,
+        act_step=population.act_step,
+        after_world_step=population.on_world_tick,
+    )
     loop.run(max_ticks=300, paced=False)
 
     assert "walker_001" not in world.robots
@@ -88,6 +95,26 @@ def test_dormant_duration_survives_population_checkpoint() -> None:
     world.robots[rid].energy = 50.0
     restored.act_step(world)
     assert calls == [2]
+
+
+def test_dormant_terminal_observation_survives_population_checkpoint() -> None:
+    world = World.new(WorldConfig(seed=23, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, LINEAGE_RUN)
+    rid = "walker_000"
+    population.act_step(world)
+    world.robots[rid].dormant = True
+    population.act_step(world)
+
+    restored = Population(world, LINEAGE_RUN)
+    restored.restore_brain_states(population.brain_states())
+    calls: list[tuple[bool, int]] = []
+    restored.brains[rid].record_death = (  # type: ignore[method-assign]
+        lambda obs, dormant=False, dormant_steps=0: calls.append((dormant, dormant_steps))
+    )
+    del world.robots[rid]
+    restored.on_world_tick(world)
+
+    assert calls == [(True, 1)]
 
 
 def test_default_wake_is_a_stream_cut() -> None:
@@ -157,3 +184,19 @@ def test_death_delivery_never_blocks_on_a_busy_learner() -> None:
     lock.release()
     population.act_step(world)
     assert calls == [(False, 0)]
+
+
+def test_checkpoint_reconciles_death_between_act_boundaries() -> None:
+    world = World.new(WorldConfig(seed=24, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, LINEAGE_RUN)
+    rid = "walker_000"
+    population.act_step(world)
+    world.tick = 1
+    del world.robots[rid]
+
+    blobs = population.brain_states()
+
+    assert rid not in population.brains
+    assert "__lineage__random_walker__0" in blobs
+    scheduler = pickle.loads(blobs["__scheduler__"])
+    assert (55, "random_walker") in scheduler["respawn_queue"]

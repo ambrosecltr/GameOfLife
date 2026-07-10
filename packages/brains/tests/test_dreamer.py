@@ -27,6 +27,36 @@ TINY = {
 }
 
 
+@pytest.mark.parametrize(
+    ("replay", "message"),
+    [
+        (
+            {
+                "capacity": 100,
+                "batch_size": 1,
+                "seq_len": 64,
+                "burn_in": 16,
+                "warmup_steps": 32,
+            },
+            "warmup_steps must be at least",
+        ),
+        (
+            {"capacity": 64, "batch_size": 1, "seq_len": 64, "warmup_steps": 66},
+            "capacity must be at least replay.burn_in",
+        ),
+        (
+            {"capacity": 32, "batch_size": 1, "seq_len": 4, "warmup_steps": 64},
+            "capacity must be at least replay.warmup_steps",
+        ),
+    ],
+)
+def test_replay_contract_rejects_permanently_unlearnable_configs(
+    replay: dict[str, int], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        DreamerBrain({**TINY, "replay": replay}, seed=1)
+
+
 def fake_obs(rng: np.random.Generator, bias: float = 0.0) -> Observation:
     body = BodySpec()
     rays = np.zeros((body.num_rays, RAY_DIM), dtype=np.float32)
@@ -40,6 +70,27 @@ def fake_obs(rng: np.random.Generator, bias: float = 0.0) -> Observation:
         sound=rng.random(SOUND_DIM).astype(np.float32),
         events=np.zeros(EVENTS_DIM, dtype=np.float32),
     )
+
+
+def test_cuda_learning_sync_uses_the_brain_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    brain = DreamerBrain.__new__(DreamerBrain)
+    brain.device = torch.device("cuda:1")
+    requested: list[torch.device] = []
+    synchronized: list[bool] = []
+
+    class FakeStream:
+        def synchronize(self) -> None:
+            synchronized.append(True)
+
+    def current_stream(device: torch.device) -> FakeStream:
+        requested.append(device)
+        return FakeStream()
+
+    monkeypatch.setattr(torch.cuda, "current_stream", current_stream)
+    brain._synchronize_learning_stream()
+
+    assert requested == [torch.device("cuda:1")]
+    assert synchronized == [True]
 
 
 def body_obs(rng: np.random.Generator, energy: float, integrity: float) -> Observation:
@@ -696,6 +747,22 @@ def test_temperament_sampling_and_inheritance() -> None:
     assert abs(child.w_curiosity - parent.w_curiosity * ratios[0]) < 1e-9
 
 
+def test_copied_newborn_starts_without_donor_update_credit() -> None:
+    parent = DreamerBrain(TINY, seed=25)
+    parent._act_steps = 80
+    parent._updates = 2
+    parent._dropped_update_credit = 1.0
+    assert parent.pending_update_credit() == pytest.approx(1.25)
+
+    child = DreamerBrain(TINY, seed=26)
+    child.inherit(parent.state_dict())
+
+    assert child.pending_update_credit() == 0.0
+    assert child._dropped_update_credit == 0.0
+    child._act_steps += 4
+    assert child.pending_update_credit() == pytest.approx(1.0)
+
+
 def test_masked_brain_learns() -> None:
     cfg = dict(TINY, reward={"curiosity_mask_agents": True})
     brain = DreamerBrain(cfg, seed=7)
@@ -834,7 +901,7 @@ def test_terminal_examples_receive_configured_weight() -> None:
 def test_temporal_skills_and_vector_affect_learn_end_to_end() -> None:
     cfg = {
         **TINY,
-        "replay": {"capacity": 3000, "batch_size": 4, "seq_len": 16, "warmup_steps": 16},
+        "replay": {"capacity": 3000, "batch_size": 4, "seq_len": 16, "warmup_steps": 18},
         "reward": {
             "homeostasis": "drive",
             "imagined_homeostasis": "proprio",
@@ -855,10 +922,12 @@ def test_temporal_skills_and_vector_affect_learn_end_to_end() -> None:
     rng = np.random.default_rng(42)
     for _ in range(80):
         brain.act(fake_obs(rng))
-    assert (brain.buffer.skill[:16] == -1).all(), "motor babbling has no learned intent"
-    assert (brain.buffer.skill[16:80] >= 0).all()
-    for start in range(16, 80, 4):
-        assert len(set(brain.buffer.skill[start : start + 4])) == 1
+    assert (brain.buffer.skill[: brain.warmup_steps] == -1).all(), (
+        "motor babbling has no learned intent"
+    )
+    assert (brain.buffer.skill[brain.warmup_steps : 80] >= 0).all()
+    for start in range(brain.warmup_steps, 80 - brain.skill_duration + 1, brain.skill_duration):
+        assert len(set(brain.buffer.skill[start : start + brain.skill_duration])) == 1
     metrics = brain.learn()
     assert metrics is not None
     assert brain.critic(torch.randn(2, brain.wm.rssm_cfg.feat_dim)).shape == (2, 41 * 6)

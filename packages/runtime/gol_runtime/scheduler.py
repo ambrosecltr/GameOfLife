@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import pickle
 import threading
+import time
 import zlib
+from dataclasses import dataclass
 from typing import Any
 
+import torch
 from gol_brains.base import Brain
+from gol_brains.precision import PrecisionPolicy, configure_process_precision
 from gol_brains.registry import (
     body_from_config,
     build_brain,
@@ -25,6 +29,8 @@ from gol_world.sensing import observe
 from gol_world.world import World
 
 from gol_runtime.config import RunConfig
+
+PendingDeath = tuple[Brain, threading.Lock, Observation, bool, int]
 
 
 class Population:
@@ -39,6 +45,7 @@ class Population:
             str(resolve_brain_config(entry["brain"]).get("kind")): entry["brain"]
             for entry in run_cfg.population.mix
         }
+        self._configure_precision_runtime()
         self._next_idx = 0
         self._respawn_queue: list[tuple[int, str]] = []  # (due_tick, brain kind)
         # Proposal 004 — earned reproduction. Per-kind founder counts (the caps
@@ -59,18 +66,16 @@ class Population:
         # inherit_weights == "lineage": dead learning brains wait here for a
         # new body — weights and replay memory persist across deaths.
         self._lineage_stash: dict[str, list[Brain]] = {}
-        # Deaths whose final observation hasn't reached the brain yet: the
-        # learner worker may hold the brain's lock mid-update when the body
-        # dies, and the sim never waits, so delivery is non-blocking with a
-        # retry each act-step. Tuple: brain, lock, last obs, died dormant,
-        # and missed perception cycles before death.
-        self._pending_deaths: list[tuple[Brain, threading.Lock, Observation, bool, int]] = []
+        # Deaths whose final observation has not reached the brain yet. Normal
+        # tick processing retries without blocking; checkpointing waits for an
+        # in-flight update so terminal replay evidence cannot be orphaned.
+        self._pending_deaths: list[PendingDeath] = []
         # Sticky per-robot last observation: last_obs holds only THIS step's
         # awake obs (the frame logger's contract), so a hibernating body —
         # the dominant death mode — vanishes from it long before it dies.
-        # Its final pre-blackout view survives here for record_death. Not
-        # checkpointed: a resume during a dormant spell sheds that body's
-        # death record if it never wakes — skip, don't stall.
+        # Its final pre-blackout view survives here for record_death and rides
+        # the scheduler checkpoint so a dormant resume cannot lose terminal
+        # replay evidence before the body wakes or dies.
         self._death_obs: dict[str, Observation] = {}
         # Action-latch accounting: act-steps where the learner held the lock
         # and the robot repeated its previous command. The artifact grows with
@@ -78,6 +83,7 @@ class Population:
         # act_latched_frac in metrics keeps it visible instead of anecdotal.
         self._act_attempts: dict[str, int] = {}
         self._act_latched: dict[str, int] = {}
+        self._act_seconds: dict[str, float] = {}
         if world.robots:
             self._rebuild_brains()
             self._next_idx = (
@@ -91,11 +97,30 @@ class Population:
         # reseed anything derive the same stream.
         return (self.world.cfg.seed * 100003 + zlib.crc32(robot_id.encode())) % (2**31)
 
-    def _device_for(self, spec: str | dict[str, Any]) -> str:
+    def _configure_precision_runtime(self) -> None:
+        policies = []
+        for entry in self.cfg.population.mix:
+            spec = entry["brain"]
+            if not is_learning_kind(spec):
+                continue
+            brain_cfg = resolve_brain_config(spec)
+            training = dict(brain_cfg.get("training", {}))
+            for device in self.cfg.devices.learning_devices():
+                policies.append(PrecisionPolicy.from_config(training, torch.device(device)))
+        configure_process_precision(policies)
+
+    def _device_for(self, spec: str | dict[str, Any], robot_id: str) -> str:
         """Learning brains live on the learning device (act runs there too;
         a few ms of act latency at 4 Hz is nothing next to update speed).
         Benchmarked on M1 Pro: nano is fastest on cpu, small+ on mps."""
-        return self.cfg.devices.learning if is_learning_kind(spec) else self.cfg.devices.inference
+        if not is_learning_kind(spec):
+            return self.cfg.devices.inference
+        devices = self.cfg.devices.learning_devices()
+        try:
+            index = int(robot_id.rsplit("_", 1)[1])
+        except (IndexError, ValueError):
+            index = zlib.crc32(robot_id.encode())
+        return devices[index % len(devices)]
 
     def _spawn_initial(self) -> None:
         for entry in self.cfg.population.mix:
@@ -111,7 +136,7 @@ class Population:
             # this kind wears (senses must match what the brain was sized for).
             robot.body = body_from_config(resolve_brain_config(spec))
             self.brains[robot.id] = build_brain(
-                spec, seed=self._seed_for(robot.id), device=self._device_for(spec)
+                spec, seed=self._seed_for(robot.id), device=self._device_for(spec, robot.id)
             )
             self.kinds[robot.id] = robot.brain_name
             self.locks[robot.id] = threading.Lock()
@@ -126,16 +151,22 @@ class Population:
                 self._dormant_ids = set(state.get("dormant_ids", ()))
                 self._pending_wake = set(state.get("pending_wake", ()))
                 self._dormant_steps = dict(state.get("dormant_steps", {}))
+                self._death_obs = dict(state.get("death_obs", {}))
             elif robot_id.startswith("__lineage__"):
                 kind = robot_id.split("__")[2]
                 spec = self._specs_by_kind.get(kind, {"kind": kind})
-                brain = build_brain(spec, seed=0, device=self._device_for(spec))
+                brain = build_brain(spec, seed=0, device=self._device_for(spec, robot_id))
                 brain.load_state_dict(pickle.loads(blob))
                 self._lineage_stash.setdefault(kind, []).append(brain)
             elif robot_id in self.brains:
                 self.brains[robot_id].load_state_dict(pickle.loads(blob))
 
     def brain_states(self) -> dict[str, bytes]:
+        # A death can land between act boundaries. Reconcile it before the
+        # atomic world+brain snapshot so no blob remains keyed to a body that
+        # the checkpointed world has already removed.
+        self.on_world_tick(self.world)
+        self._flush_pending_deaths_for_checkpoint()
         blobs = {}
         for rid, brain in self.brains.items():
             # Block act() while the brain takes a coherent snapshot. Legacy
@@ -154,15 +185,18 @@ class Population:
                 "dormant_ids": tuple(self._dormant_ids),
                 "pending_wake": tuple(self._pending_wake),
                 "dormant_steps": dict(self._dormant_steps),
+                "death_obs": dict(self._death_obs),
             }
         )
         return blobs
 
-    def _process_lifecycle(self, world: World) -> None:
-        """Replace the dead. Legacy mode respawns on a timer; budding mode has
-        evolving lineages continue only by thriving bodies budding (proposal 004)."""
+    def _collect_deaths(self, world: World) -> None:
+        """Detach brains for bodies removed by the just-completed world tick."""
         budding = self.cfg.reproduction.mode == "budding"
         died = [rid for rid in self.brains if rid not in world.robots]
+        next_act_tick = (
+            (world.tick + self.cfg.act_every - 1) // self.cfg.act_every
+        ) * self.cfg.act_every
         for rid in died:
             kind = self.kinds.pop(rid, "random_walker")
             brain = self.brains.pop(rid)
@@ -190,14 +224,25 @@ class Population:
             self._dormant_steps.pop(rid, None)
             self._act_attempts.pop(rid, None)
             self._act_latched.pop(rid, None)
+            self._act_seconds.pop(rid, None)
             self._last_bud.pop(rid, None)
             # Evolving kinds under budding are NOT replaced on the timer — their
             # continuation is earned by a living body budding, not owed on death.
             if not (budding and self._is_evolving(kind)):
                 self._respawn_queue.append(
-                    (world.tick + self.cfg.population.respawn_delay_ticks, kind)
+                    (next_act_tick + self.cfg.population.respawn_delay_ticks, kind)
                 )
+
+    def on_world_tick(self, world: World) -> None:
+        """Reconcile deaths every tick without advancing spawn lifecycle work."""
+        self._collect_deaths(world)
         self._deliver_deaths()
+
+    def _process_lifecycle(self, world: World) -> None:
+        """Replace the dead. Legacy mode respawns on a timer; budding mode has
+        evolving lineages continue only by thriving bodies budding (proposal 004)."""
+        budding = self.cfg.reproduction.mode == "budding"
+        self.on_world_tick(world)
         if budding:
             self._maintain_budding(world)
         elif len(world.robots) < self.cfg.population.target:
@@ -254,7 +299,9 @@ class Population:
         spec = self._specs_by_kind.get(kind, {"kind": kind})
         body = body_from_config(resolve_brain_config(spec))
         world.spawn_robot(child_id, brain_name=kind, body=body)
-        brain = build_brain(spec, seed=self._seed_for(child_id), device=self._device_for(spec))
+        brain = build_brain(
+            spec, seed=self._seed_for(child_id), device=self._device_for(spec, child_id)
+        )
         parent_brain = self.brains.get(parent_id)
         if parent_brain is not None:
             brain.inherit(parent_brain.state_dict())
@@ -274,12 +321,12 @@ class Population:
         """Hand each dead body's final observation to its brain, non-blocking.
 
         The worker thread may be mid-learn() holding the brain's lock; the sim
-        never waits, so an undeliverable death stays pending and retries next
-        act-step. The worker exits once it sees the body gone, so an entry
-        outlives at most one in-flight update. (Not checkpointed: a checkpoint
-        landing inside that window sheds one death record — skip, don't stall.)
+        tick path does not wait, so an undeliverable death stays pending and
+        retries next tick. The worker exits once it sees the body gone, so an
+        entry outlives at most one in-flight update. Checkpointing flushes the
+        same entry synchronously before serializing the stashed lineage.
         """
-        still_pending = []
+        still_pending: list[PendingDeath] = []
         for entry in self._pending_deaths:
             brain, lock, obs, dormant, dormant_steps = entry
             if lock.acquire(blocking=False):
@@ -291,23 +338,27 @@ class Population:
                 still_pending.append(entry)
         self._pending_deaths = still_pending
 
+    def _flush_pending_deaths_for_checkpoint(self) -> None:
+        """Apply every terminal record before an atomic world+brain snapshot."""
+        pending, self._pending_deaths = self._pending_deaths, []
+        for brain, lock, obs, dormant, dormant_steps in pending:
+            with lock:
+                brain.record_death(obs, dormant=dormant, dormant_steps=dormant_steps)
+
     def _flush_death(self, brain: Brain) -> None:
         """Last call for a stashed brain's pending death before it respawns.
 
         The record must precede the newborn's first step or it would land out
         of order in the replay stream. After a full respawn delay the old
-        worker is long gone, so the acquire only fails if something is badly
-        wedged — then the record is shed rather than stalling the sim.
+        worker is normally long gone. If its final update is still completing,
+        wait here so the newborn cannot overtake the parent's terminal record.
         """
         for entry in list(self._pending_deaths):
             if entry[0] is brain:
                 self._pending_deaths.remove(entry)
                 _, lock, obs, dormant, dormant_steps = entry
-                if lock.acquire(blocking=False):
-                    try:
-                        brain.record_death(obs, dormant=dormant, dormant_steps=dormant_steps)
-                    finally:
-                        lock.release()
+                with lock:
+                    brain.record_death(obs, dormant=dormant, dormant_steps=dormant_steps)
 
     def _spawn(self, kind: str) -> str:
         # Ids carry the kind so every surface (labels, charts, events) reads
@@ -326,7 +377,9 @@ class Population:
             self._flush_death(brain)
             brain.reset_stream()
         else:
-            brain = build_brain(spec, seed=self._seed_for(robot_id), device=self._device_for(spec))
+            brain = build_brain(
+                spec, seed=self._seed_for(robot_id), device=self._device_for(spec, robot_id)
+            )
             if mode == "random_living":
                 donors = [
                     b
@@ -346,7 +399,7 @@ class Population:
     def act_step(self, world: World) -> None:
         """One perception-action cycle for every awake robot.
 
-        The sim never waits: legacy brains latch their previous command if the
+        The act path never waits: legacy brains latch their previous command if the
         learner holds their lock. Snapshot-capable brains learn concurrently,
         so their lock remains available for every perception-action cycle.
         """
@@ -377,22 +430,77 @@ class Population:
                 self._act_latched[robot_id] = self._act_latched.get(robot_id, 0) + 1
                 continue
             try:
+                act_began = time.monotonic()
                 if robot_id in self._pending_wake:
                     dormant_steps = self._dormant_steps.pop(robot_id, 0)
                     self.brains[robot_id].wake(dormant_steps)
                     self._pending_wake.discard(robot_id)
                 action = self.brains[robot_id].act(o)
+                elapsed = time.monotonic() - act_began
+                previous = self._act_seconds.get(robot_id, 0.0)
+                self._act_seconds[robot_id] = (
+                    elapsed if previous == 0.0 else 0.9 * previous + 0.1 * elapsed
+                )
             finally:
                 lock.release()
             world.apply_action(robot_id, action)
 
+    def can_fast_forward_dormant(self) -> bool:
+        """Whether skipped act boundaries are guaranteed to be no-ops."""
+        living_ids = set(self.world.robots)
+        if not living_ids or living_ids != set(self.brains):
+            return False
+        if self._pending_deaths or any(not robot.dormant for robot in self.world.robots.values()):
+            return False
+        if self.cfg.reproduction.mode == "budding":
+            for kind, floor in self._kind_targets.items():
+                living = sum(1 for current in self.kinds.values() if current == kind)
+                required = floor if not self._is_evolving(kind) else self.cfg.reproduction.floor
+                if living < required:
+                    return False
+        return True
+
+    def next_lifecycle_tick(self) -> int | None:
+        if not self._respawn_queue:
+            return None
+        due = min(entry[0] for entry in self._respawn_queue)
+        every = self.cfg.act_every
+        return ((max(self.world.tick + 1, due) + every - 1) // every) * every
+
+    def advance_dormant_opportunities(self, start_tick: int, end_tick: int) -> None:
+        """Account act boundaries crossed by an event-free world jump."""
+        if end_tick < start_tick:
+            raise ValueError("dormant opportunity interval cannot run backward")
+        opportunities = end_tick // self.cfg.act_every - start_tick // self.cfg.act_every
+        if opportunities < 1:
+            return
+        dormant_ids = set(self.world.robots)
+        for robot_id in dormant_ids:
+            self._dormant_steps[robot_id] = (
+                self._dormant_steps.get(robot_id, 0) + opportunities
+            )
+        self._dormant_ids = dormant_ids
+        self.last_obs = {}
+
     def sync_learn(self) -> None:
         """Inline learning (--sync): deterministic, single-threaded."""
         for brain in self.brains.values():
-            brain.learn()
+            while brain.pending_update_credit() >= 1.0:
+                if brain.learn() is None:
+                    break
 
     def learning_ids(self) -> list[str]:
         return [rid for rid, brain in self.brains.items() if brain.target_train_ratio() > 0.0]
+
+    def awake_learning_ids(self) -> list[str]:
+        return [
+            rid
+            for rid in self.learning_ids()
+            if rid in self.world.robots and not self.world.robots[rid].dormant
+        ]
+
+    def learning_precision_modes(self) -> tuple[str, ...]:
+        return tuple(sorted({self.brains[rid].precision_mode() for rid in self.learning_ids()}))
 
     def introspection(self) -> dict[str, dict[str, float]]:
         out = {}
@@ -401,6 +509,7 @@ class Population:
             attempts = self._act_attempts.get(rid, 0)
             if m and attempts:
                 m["act_latched_frac"] = self._act_latched.get(rid, 0) / attempts
+                m["action_seconds"] = self._act_seconds.get(rid, 0.0)
             out[rid] = m
         return out
 
@@ -410,6 +519,14 @@ class Population:
             "population": len(self.world.robots),
             "awake": sum(1 for r in robots if not r.dormant),
         }
+
+
+@dataclass(frozen=True)
+class LearnerSnapshot:
+    aggregate_updates_per_second: float
+    debt_by_brain: dict[str, float]
+    update_seconds_by_brain: dict[str, float]
+    dropped_credit_by_brain: dict[str, float]
 
 
 class LearnerThread:
@@ -423,30 +540,34 @@ class LearnerThread:
     taking turns. A supervisor spawns workers for newborns and reaps them on
     death (stashed lineage brains don't learn, same as before).
 
-    Backpressure rule: the learner skips, the sim never waits — debt is
-    capped, so a world outrunning the learner sheds updates instead of
-    banking an unpayable backlog, and a fast learner idles instead of
-    over-training stale data.
+    In causal research mode, owed updates remain checkpoint-coherent in each
+    brain and the world governor supplies backpressure before lag exceeds its
+    configured bound. Credit shedding exists only in explicit ``drop`` mode
+    and is exposed as a metric.
     """
 
-    # An indebted brain may owe at most this many updates; anything beyond is
-    # dropped (that's the "skip" in skip-don't-stall). Sized to hold roughly a
-    # full awake burst (~3-8k ticks ≈ 600-1600 act-steps) so that when the
-    # body hibernates, the learner works through the day's banked experience —
-    # sleep pays the day's debt, which is the Dreamer premise. Too small and
-    # dormancy-heavy lives (beta_07: ~93% dormant) starve the learner while
-    # the GPU idles; unbounded and a sprinting world banks an unpayable
-    # backlog of stale data.
-    MAX_DEBT = 1024.0
-
-    def __init__(self, population: Population, idle_seconds: float = 0.1) -> None:
+    def __init__(
+        self,
+        population: Population,
+        idle_seconds: float = 0.1,
+        debt_policy: str = "backpressure",
+        max_debt: float = 4.0,
+    ) -> None:
+        if debt_policy not in ("backpressure", "drop"):
+            raise ValueError("debt_policy must be 'backpressure' or 'drop'")
+        if max_debt < 1.0:
+            raise ValueError("max_debt must be at least one update")
         self.population = population
         self.idle_seconds = idle_seconds
+        self.debt_policy = debt_policy
+        self.max_debt = max_debt
         self._stop = threading.Event()
         self._supervisor: threading.Thread | None = None
         self._workers: dict[str, threading.Thread] = {}
         self._owed: dict[str, float] = {}
-        self._seen_acts: dict[str, int] = {}
+        self._learn_seconds: dict[str, float] = {}
+        self._dropped: dict[str, float] = {}
+        self._metrics_lock = threading.Lock()
         self.rounds = 0  # supervisor sweeps (observability/tests)
 
     def start(self) -> None:
@@ -461,20 +582,35 @@ class LearnerThread:
             worker.join(timeout=30)
 
     def _accrue(self, rid: str, brain: Brain) -> float:
-        """Fold newly lived act-steps into rid's update debt."""
-        acts = brain.experience_count()
-        prev = self._seen_acts.get(rid)
-        if prev is None:
-            # First sight (fresh spawn or resume): pace from here, no
-            # retroactive debt for experience lived before we were watching.
-            self._seen_acts[rid] = acts
-            self._owed[rid] = 0.0
-            return 0.0
-        owed = self._owed.get(rid, 0.0) + brain.target_train_ratio() * (acts - prev)
-        owed = min(owed, self.MAX_DEBT)
-        self._seen_acts[rid] = acts
-        self._owed[rid] = owed
+        """Read checkpointed credit and apply explicit drop policy if selected."""
+        owed = brain.pending_update_credit()
+        if self.debt_policy == "drop" and owed > self.max_debt:
+            dropped = owed - self.max_debt
+            brain.drop_update_credit(dropped)
+            owed = brain.pending_update_credit()
+            with self._metrics_lock:
+                self._dropped[rid] = self._dropped.get(rid, 0.0) + dropped
+        with self._metrics_lock:
+            self._owed[rid] = owed
         return owed
+
+    def snapshot(self) -> LearnerSnapshot:
+        living = self.population.learning_ids()
+        debts = {
+            rid: self.population.brains[rid].pending_update_credit()
+            for rid in living
+            if rid in self.population.brains
+        }
+        with self._metrics_lock:
+            update_seconds = {
+                rid: self._learn_seconds[rid] for rid in debts if rid in self._learn_seconds
+            }
+            dropped = {rid: self._dropped.get(rid, 0.0) for rid in debts}
+        capacity = sum(1.0 / seconds for seconds in update_seconds.values() if seconds > 0.0)
+        return LearnerSnapshot(capacity, debts, update_seconds, dropped)
+
+    def has_payable_debt(self) -> bool:
+        return any(debt >= 1.0 for debt in self.snapshot().debt_by_brain.values())
 
     def _supervise(self) -> None:
         while not self._stop.is_set():
@@ -490,10 +626,14 @@ class LearnerThread:
             for rid, worker in list(self._workers.items()):
                 if not worker.is_alive():
                     self._workers.pop(rid, None)
-            for rid in list(self._seen_acts.keys() | self._owed.keys()):
+            with self._metrics_lock:
+                tracked = set(self._owed) | set(self._learn_seconds) | set(self._dropped)
+            for rid in list(tracked):
                 if rid not in self.population.brains:
-                    self._seen_acts.pop(rid, None)
-                    self._owed.pop(rid, None)
+                    with self._metrics_lock:
+                        self._owed.pop(rid, None)
+                        self._learn_seconds.pop(rid, None)
+                        self._dropped.pop(rid, None)
             self.rounds += 1
             self._stop.wait(0.25)
 
@@ -514,18 +654,23 @@ class LearnerThread:
                 # immutable published snapshot. The brain's own lock makes
                 # checkpoints coherent; the population lock stays free, so
                 # embodied control never latches behind a long update.
+                began = time.monotonic()
                 result = brain.learn()
             else:
                 with lock:
+                    began = time.monotonic()
                     result = brain.learn()
-            # learn() runs long (0.25-0.7s on GPU); the body may have died and
-            # the supervisor pruned our pacing state in the meantime. End the
-            # watch instead of raising on (or resurrecting) the missing key.
-            owed = self._owed.get(rid)
-            if owed is None:
+            elapsed = time.monotonic() - began
+            if rid not in self.population.brains:
                 return
             if result is None:
-                # Nothing learnable yet (warmup): don't bank debt for it.
-                self._owed[rid] = 0.0
+                # Credit is scientific state; a temporarily unavailable replay
+                # sample must not silently erase it.
+                self._stop.wait(self.idle_seconds)
             else:
-                self._owed[rid] = owed - 1.0
+                with self._metrics_lock:
+                    previous = self._learn_seconds.get(rid, 0.0)
+                    self._learn_seconds[rid] = (
+                        elapsed if previous == 0.0 else 0.9 * previous + 0.1 * elapsed
+                    )
+                self._accrue(rid, brain)

@@ -12,11 +12,12 @@ import math
 from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from gol_world import physics, terrain
 from gol_world.blocks import DIGGABLE, Block
 from gol_world.config import WorldConfig
-from gol_world.entities import EV_ATE, EV_DIG_SUCCESS, EV_TOOK_DAMAGE, Robot
+from gol_world.entities import EV_ATE, EV_DIG_SUCCESS, EV_TOOK_DAMAGE, TOUCH_GROUND, Robot
 from gol_world.grid import VoxelGrid
 from gol_world.interface import (
     GAZE_DIM,
@@ -574,6 +575,118 @@ class World:
             if self.grid.in_bounds(x, y, z) and self.grid.get_block(x, y, z) == Block.AIR:
                 self.grid.set_block(x, y, z, Block.SCRAP)
                 return
+
+    # ----------------------------------------------------- dormant fast-forward
+
+    def can_fast_forward_dormant(self) -> bool:
+        """Whether per-tick physics and interaction are currently inert."""
+        robots = list(self.robots.values())
+        if not robots or self._events:
+            return False
+        for robot in robots:
+            feet_in_water = physics.feet_block(self.grid, robot) == Block.WATER
+            if (
+                not robot.dormant
+                or robot.pending_grip != GRIP_NOOP
+                or bool(np.any(np.abs(robot.vel) > physics.EPS))
+                or bool(np.any(np.abs(robot.drive) > physics.EPS))
+                or not bool(robot.touch[TOUCH_GROUND])
+                or bool(np.count_nonzero(robot.touch) != 1)
+                or robot.in_water != feet_in_water
+                or abs(robot.fall_peak_z - float(robot.pos[2])) > physics.EPS
+            ):
+                return False
+        for index, first in enumerate(robots):
+            for second in robots[index + 1 :]:
+                if physics.robot_separation(first, second) is not None:
+                    return False
+        return True
+
+    def _light_series(self, ticks: int) -> npt.NDArray[np.float64]:
+        absolute = np.arange(self.tick + 1, self.tick + ticks + 1, dtype=np.float64)
+        phase = np.remainder(absolute, self.cfg.day_length_ticks) / self.cfg.day_length_ticks
+        return np.clip(np.sin(2.0 * math.pi * phase) * 2.5, 0.0, 1.0)
+
+    def dormant_fast_forward_ticks(self, maximum: int) -> int:
+        """Largest event-free dormant interval, stopping before every boundary."""
+        if maximum < 1 or not self.can_fast_forward_dormant():
+            return 0
+        safe = maximum
+        boundary_ticks = []
+        for heap in (self.regrow_heap, self.wither_heap):
+            if heap:
+                boundary_ticks.append(heap[0][0])
+        if self.sprout_heap:
+            boundary_ticks.append(self.sprout_heap[0])
+        if self.transient_sounds:
+            boundary_ticks.append(min(sound[4] for sound in self.transient_sounds))
+        if boundary_ticks:
+            safe = min(safe, min(boundary_ticks) - self.tick - 1)
+
+        eco = self.cfg.economy
+        ecology = self.cfg.ecology
+        for robot in self.robots.values():
+            if eco.hibernate_integrity_drain > 0.0:
+                death_steps = max(
+                    1,
+                    math.ceil(robot.integrity / eco.hibernate_integrity_drain - 1e-12),
+                )
+                # Leave an extra scalar step of headroom: repeated IEEE-754
+                # subtraction can cross one tick later than the quotient.
+                safe = min(safe, death_steps - 2)
+            if (
+                robot.held is not None
+                and robot.held in BUSH_BLOCKS
+                and ecology.held_spoil_ticks > 0
+            ):
+                spoil_steps = max(1, ecology.held_spoil_ticks - robot.held_age_ticks)
+                safe = min(safe, spoil_steps - 1)
+        if safe < 1:
+            return 0
+
+        if eco.solar_trickle > 0.0:
+            cumulative_gain = np.cumsum(self._light_series(safe), dtype=np.float64)
+            cumulative_gain *= eco.solar_trickle
+            for robot in self.robots.values():
+                needed = eco.wake_energy - robot.energy
+                if needed <= 0.0:
+                    return 0
+                crossing = int(
+                    np.searchsorted(cumulative_gain, max(0.0, needed - 1e-12), side="left")
+                )
+                if crossing < safe:
+                    # Vectorized cumsum only locates the boundary. Stop one
+                    # additional tick early, then let scalar world arithmetic
+                    # decide the exact wake tick.
+                    safe = min(safe, crossing - 1)
+        return max(0, safe)
+
+    def fast_forward_dormant(self, maximum: int) -> int:
+        """Bulk-integrate an event-free, universally dormant interval."""
+        ticks = self.dormant_fast_forward_ticks(maximum)
+        if ticks < 1:
+            return 0
+        eco = self.cfg.economy
+        day = self.cfg.day_length_ticks
+        for absolute_tick in range(self.tick + 1, self.tick + ticks + 1):
+            fraction = (absolute_tick % day) / day
+            light = float(np.clip(math.sin(2.0 * math.pi * fraction) * 2.5, 0.0, 1.0))
+            for robot in self.robots.values():
+                robot.integrity = max(
+                    0.0, robot.integrity - eco.hibernate_integrity_drain
+                )
+                robot.ledger["hibernation"] += eco.hibernate_integrity_drain
+                gained = min(eco.energy_max, robot.energy + eco.solar_trickle * light)
+                robot.energy_ledger["solar"] += gained - robot.energy
+                robot.energy = gained
+                robot.fatigue = max(0.0, robot.fatigue - eco.fatigue_recover)
+                if robot.held is not None and robot.held in BUSH_BLOCKS:
+                    robot.held_age_ticks += 1
+                else:
+                    robot.held_age_ticks = 0
+                robot.age_ticks += 1
+        self.tick += ticks
+        return ticks
 
     # ------------------------------------------------------------------ step
 

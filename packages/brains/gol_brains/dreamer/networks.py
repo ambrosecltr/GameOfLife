@@ -49,12 +49,12 @@ class TwoHot:
 
     def decode(self, logits: torch.Tensor) -> torch.Tensor:
         """logits (..., bins) -> expected value (...,), back through symexp."""
-        probs = torch.softmax(logits, dim=-1)
+        probs = torch.softmax(logits.float(), dim=-1)
         return symexp((probs * self.edges).sum(-1))
 
     def loss(self, logits: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
-        target = self.encode(value)
-        return -(target * torch.log_softmax(logits, dim=-1)).sum(-1)
+        target = self.encode(value.float())
+        return -(target * torch.log_softmax(logits.float(), dim=-1)).sum(-1)
 
 
 def mlp(in_dim: int, hidden: int, out_dim: int, layers: int = 2) -> nn.Sequential:

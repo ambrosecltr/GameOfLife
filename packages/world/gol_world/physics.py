@@ -185,15 +185,25 @@ def step_robot(
     return costs
 
 
+def robot_separation(a: Robot, b: Robot) -> tuple[np.ndarray, float] | None:
+    """Return the horizontal separation vector/distance when a pair must move."""
+    min_dist = (a.body.width + b.body.width) / 2
+    delta = a.pos[:2] - b.pos[:2]
+    distance = float(np.hypot(delta[0], delta[1]))
+    if distance >= min_dist or abs(a.pos[2] - b.pos[2]) > a.body.height:
+        return None
+    return delta, distance
+
+
 def resolve_robot_overlaps(robots: list[Robot]) -> None:
     """Push overlapping robots apart horizontally (they are not ghosts)."""
     for i, a in enumerate(robots):
         for b in robots[i + 1 :]:
-            min_dist = (a.body.width + b.body.width) / 2
-            d = a.pos[:2] - b.pos[:2]
-            dist = float(np.hypot(d[0], d[1]))
-            if dist >= min_dist or abs(a.pos[2] - b.pos[2]) > a.body.height:
+            separation = robot_separation(a, b)
+            if separation is None:
                 continue
+            d, dist = separation
+            min_dist = (a.body.width + b.body.width) / 2
             a.events[EV_BUMPED_ROBOT] = 1.0
             b.events[EV_BUMPED_ROBOT] = 1.0
             if dist < EPS:

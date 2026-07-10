@@ -1,4 +1,4 @@
-"""LearnerThread pacing: updates track train_ratio; backpressure skips, never banks."""
+"""Learner pacing: checkpointed credit, causal backpressure, explicit dropping."""
 
 import threading
 import time
@@ -14,6 +14,7 @@ class CountingBrain(Brain):
         self.ratio = ratio
         self.acts = 0
         self.learned = 0
+        self.dropped = 0.0
 
     def act(self, obs: Observation) -> Action:  # pragma: no cover - learner never acts
         raise NotImplementedError
@@ -27,6 +28,12 @@ class CountingBrain(Brain):
 
     def target_train_ratio(self) -> float:
         return self.ratio
+
+    def pending_update_credit(self) -> float:
+        return max(0.0, self.acts * self.ratio - self.learned - self.dropped)
+
+    def drop_update_credit(self, amount: float) -> None:
+        self.dropped += amount
 
 
 class FakePopulation:
@@ -42,11 +49,12 @@ def _learner(brains: dict[str, Brain]) -> LearnerThread:
     return LearnerThread(cast(Population, FakePopulation(brains)), idle_seconds=0.01)
 
 
-def test_first_sight_carries_no_retroactive_debt() -> None:
+def test_debt_is_derived_from_checkpointed_brain_counters() -> None:
     brain = CountingBrain(ratio=1.0)
-    brain.acts = 5000  # lived before the learner was watching (resume)
+    brain.acts = 5000
+    brain.learned = 4997
     lt = _learner({"dreamer_000": brain})
-    assert lt._accrue("dreamer_000", brain) == 0.0
+    assert lt._accrue("dreamer_000", brain) == 3.0
 
 
 def test_debt_accrues_at_train_ratio() -> None:
@@ -59,13 +67,22 @@ def test_debt_accrues_at_train_ratio() -> None:
     assert lt._accrue("dreamer_000", brain) == 6.0
 
 
-def test_debt_is_capped_not_banked() -> None:
-    """A world outrunning the learner sheds updates (skip), it never owes them."""
+def test_backpressure_mode_never_sheds_update_credit() -> None:
     brain = CountingBrain(ratio=1.0)
     lt = _learner({"dreamer_000": brain})
-    lt._accrue("dreamer_000", brain)
     brain.acts = 100_000
-    assert lt._accrue("dreamer_000", brain) == LearnerThread.MAX_DEBT
+    assert lt._accrue("dreamer_000", brain) == 100_000
+    assert brain.dropped == 0.0
+
+
+def test_explicit_drop_mode_caps_and_records_credit() -> None:
+    brain = CountingBrain(ratio=1.0)
+    pop = FakePopulation({"dreamer_000": brain})
+    lt = LearnerThread(cast(Population, pop), debt_policy="drop", max_debt=4.0)
+    brain.acts = 10
+    assert lt._accrue("dreamer_000", brain) == 4.0
+    assert brain.dropped == 6.0
+    assert lt.snapshot().dropped_credit_by_brain["dreamer_000"] == 6.0
 
 
 def test_workers_pay_debt_exactly_then_idle() -> None:
@@ -74,20 +91,36 @@ def test_workers_pay_debt_exactly_then_idle() -> None:
     lt.start()
     try:
         deadline = time.monotonic() + 2.0
-        # Wait for every worker's first-sight baseline to land at acts=0.
-        while len(lt._seen_acts) < 3 and time.monotonic() < deadline:
+        # Wait for every worker to publish its initial debt observation.
+        while len(lt._owed) < 3 and time.monotonic() < deadline:
             time.sleep(0.01)
         for brain in brains.values():
             brain.acts = 40  # each owes exactly 20 updates
-        while (
-            any(b.learned < 20 for b in brains.values()) and time.monotonic() < deadline
-        ):
+        while any(b.learned < 20 for b in brains.values()) and time.monotonic() < deadline:
             time.sleep(0.01)
         time.sleep(0.05)  # would overshoot here if debt math were wrong
     finally:
         lt.stop()
     # Each brain's worker paid its own debt concurrently, exactly, then idled.
     assert [b.learned for b in brains.values()] == [20, 20, 20]
+
+
+def test_supervisor_discovers_a_learning_brain_spawned_after_startup() -> None:
+    population = FakePopulation({})
+    learner = LearnerThread(cast(Population, population), idle_seconds=0.01)
+    learner.start()
+    brain = CountingBrain(ratio=1.0)
+    brain.acts = 1
+    population.brains["dreamer_late"] = brain
+    population.locks["dreamer_late"] = threading.Lock()
+    try:
+        deadline = time.monotonic() + 2.0
+        while brain.learned < 1 and time.monotonic() < deadline:
+            time.sleep(0.01)
+    finally:
+        learner.stop()
+
+    assert brain.learned == 1
 
 
 class BlockingBrain(CountingBrain):
@@ -134,7 +167,6 @@ def test_worker_survives_prune_during_learn() -> None:
     brain = BlockingBrain(ratio=1.0)
     pop = FakePopulation({"dreamer_007": brain})
     lt = LearnerThread(cast(Population, pop), idle_seconds=0.01)
-    lt._accrue("dreamer_007", brain)  # first-sight baseline
     brain.acts = 10  # owes 10 updates -> worker enters learn()
     errors: list[BaseException] = []
 
@@ -149,7 +181,6 @@ def test_worker_survives_prune_during_learn() -> None:
     assert brain.entered.wait(2.0)
     # Agent dies mid-update; supervisor reaps the body and prunes pacing state.
     del pop.brains["dreamer_007"]
-    lt._seen_acts.pop("dreamer_007", None)
     lt._owed.pop("dreamer_007", None)
     brain.release.set()
     worker.join(timeout=2.0)
@@ -171,5 +202,4 @@ def test_dead_brain_pacing_state_pruned() -> None:
             time.sleep(0.01)
     finally:
         lt.stop()
-    assert "dreamer_000" not in lt._seen_acts
     assert "dreamer_000" not in lt._owed

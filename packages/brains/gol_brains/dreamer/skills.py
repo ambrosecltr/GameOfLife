@@ -41,7 +41,7 @@ class TemporalSkillController(nn.Module):
         self.worker = worker
 
     def manager_dist(self, feat: torch.Tensor) -> DiscreteDist:
-        probs = torch.softmax(self.manager(feat), dim=-1)
+        probs = torch.softmax(self.manager(feat).float(), dim=-1)
         probs = (1.0 - self.unimix) * probs + self.unimix / self.num_skills
         return DiscreteDist(probs)
 
@@ -50,6 +50,7 @@ class TemporalSkillController(nn.Module):
     ) -> tuple[TanhNormal, DiscreteDist]:
         onehot = F.one_hot(skill, self.num_skills).to(dtype=feat.dtype)
         out = self.worker(torch.cat([feat, onehot], dim=-1))
+        out = out.float()
         mean = out[..., : self.cont_dim]
         raw_std = out[..., self.cont_dim : 2 * self.cont_dim]
         grip_logits = out[..., 2 * self.cont_dim :]
@@ -98,7 +99,8 @@ class TemporalSkillPolicy(TemporalSkillController):
         self, start_feat: torch.Tensor, end_feat: torch.Tensor, skill: torch.Tensor
     ) -> torch.Tensor:
         """Variational lower-bound reward: log q(z | displacement) + log |Z|."""
-        log_probs = torch.log_softmax(self.discrimination_logits(start_feat, end_feat), dim=-1)
+        logits = self.discrimination_logits(start_feat, end_feat).float()
+        log_probs = torch.log_softmax(logits, dim=-1)
         identified = log_probs.gather(-1, skill.unsqueeze(-1)).squeeze(-1)
         return identified + math.log(self.num_skills)
 

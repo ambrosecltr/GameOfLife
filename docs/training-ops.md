@@ -4,52 +4,172 @@ How to budget, pace, and instrument a round. Written for the agent staging the
 next run, local or cloud. The learning code this describes is the post-swift
 core on `main` (journal 010 has its provenance; this doc is only how to use it).
 
-## The pacing model (read this before picking a world speed)
+## The pacing model
 
-`training.train_ratio` is a *target* of updates per lived act-step. The learner
-runs one worker per brain; each worker accrues debt as its brain acts and pays
-it one `learn()` at a time. Debt is capped (`LearnerThread.MAX_DEBT = 1024`) —
-a world outrunning its learners sheds updates rather than banking stale ones,
-and hibernating brains let workers pay down the day's debt (sleep-learning).
+`training.train_ratio` is a fixed scientific budget of optimizer updates per
+eligible lived act-step. Warmup experience creates no update credit. Thereafter
+credit is derived from checkpointed lived steps, completed updates, the target
+ratio, and any explicitly dropped credit. Restarting the process cannot erase or
+duplicate debt.
 
-The whole budget is one identity:
+The adaptive controller uses the measured identity:
 
-    updates/s needed  =  awake_brains × (tick_rate / act_every) × train_ratio
-    updates/s available = benchmark it (below); never assume
+    safe ticks / wall second =
+      awake-brain learner updates / wall second × act_every
+      ----------------------------------------------------
+          sum(train_ratio for those awake learning brains)
 
-Verification live: `updates == act_steps − warmup_steps` (exactly, ±debt cap)
-means the target ratio is truly held. `train_ratio_eff` = updates ÷ *all* acts
-including warmup, so it climbs toward the target over life instead of sitting
-at it — don't read its early value as starvation. Both are in each brain's
-metrics, with `learn_seconds` (EMA of update wall-time; first values include
-one-time warmup, trust it after ~20 updates).
+`pacing.headroom` is then applied, and measured world/inference capacity can
+become the tighter limit. Because optimizer capacity is not transferable
+between independent organisms, the slowest per-brain causal rate is also a
+ceiling; a fast sibling cannot hide another brain's debt. Physics remains one
+fixed 1/20-second transition per tick; brains still receive one action
+opportunity every `act_every` ticks;
+replay shape, optimizer-step meaning, publication cadence, and train ratio do
+not change. Faster hardware shortens wall time.
 
-Run rounds **paced** (no `--headless`). Unpaced headless sprints collapse the
-achieved ratio and test starvation, not the brain. `--sync` holds ratio by
-stalling the sim — determinism tests only.
+`pacing.debt_policy: backpressure` is the research default. At
+`max_debt_updates` the world pauses in wall time until debt falls to
+`resume_debt_updates`; no virtual event occurs during the wait. `drop` is an
+explicit throughput-ablation mode: excess credit is discarded and both
+`dropped_update_credit` and per-brain totals are logged. It is never a hidden
+fallback.
 
-## Benchmarking: do this before every round on new hardware
+Runtime metrics include `safe_ticks_per_second`,
+`actual_virtual_ticks_per_second`, measured learner capacity, maximum debt,
+inference deadline misses, precision, and the limiting subsystem. Per-brain
+metrics include `pending_update_credit`, `dropped_update_credit`,
+`inference_lag_updates`, `learn_seconds`, and `train_ratio_eff`. Async inference
+publishes every fixed `publish_every` completed updates; the exact published
+snapshot and its update number are checkpointed.
 
+`--headless` removes viewer pacing, but causal backpressure still applies.
+Adaptive mode still targets the measured safe rate. `--sync` remains the
+deterministic inline-learning path and also consumes only earned update credit.
+In adaptive mode `gol-ctl speed` may slow the controller below safe capacity;
+values above 1 cannot override the measured safety ceiling.
+
+## Precision policy
+
+`training.precision` has three fail-closed modes:
+
+- `ieee_fp32`: FP32 reference, TF32 disabled;
+- `tf32`: FP32 tensors and optimizer state, TF32 enabled for eligible CUDA real
+  GEMMs;
+- `amp_bf16`: BF16 autocast for eligible forward/loss dense computation, FP32
+  master parameters and optimizer state, plus TF32 for remaining eligible FP32
+  GEMMs. Backward is outside autocast and BF16 uses no GradScaler.
+
+TF32 controls are process-global, so a runtime validates every CUDA learning
+brain before construction. Mixed brains may use `tf32` and `amp_bf16` together
+because both request the same TF32 posture; mixing either with `ieee_fp32` in
+one process is rejected. Requested CUDA BF16/TF32 modes fail if the device lacks
+the capability; there is no silent FP32 fallback.
+
+Aion's recurrence is a protected exception. Decay, frequency, log step,
+continuous eigenvalues, transition `exp`/elapsed-time power, paired-real state,
+associative scan, and B/C projections stay FP32. Eligible projection GEMMs may
+use TF32. `world_model.s5.projection_precision` currently accepts only `fp32`;
+BF16 projection is blocked until target-GPU long-retention and learning-update
+parity pass.
+
+## Five-minute target-GPU gate
+
+Run the same checkout on RTX 4090, RTX 5090, and H100 SXM. Add L40S or A100 only
+if the 32 GB units do not fit or profiler evidence shows memory capacity, not
+compute, is limiting. Supply the current pod price:
+
+```bash
+scripts/bench_aion_preflight.sh /tmp/aion-preflight <gpu-hourly-price>
 ```
-uv run python scripts/bench_learn.py --brain configs/brain/<round>_dreamer.yaml \
-    --devices cuda --updates 30 --brains 3
+
+The script records GPU/driver/Torch capability, then runs one learner and the
+real three-brain contention case in `ieee_fp32`, `tf32`, and `amp_bf16` with
+batch 8, 1,024 graded steps, and 256 burn-in. Timers synchronize the device.
+The RunPod image must provide GNU `timeout`; the script hard-stops and rejects
+the unit when the shared five-minute deadline expires, including mid-command.
+Outputs include learn mean/p50/min, action p50/p95/max under concurrent learning,
+deadline misses, allocated/reserved VRAM, host peak memory, graded timepoints/s,
+cost per million timepoints, and raw plus 0.85-headroom sustainable ticks/s.
+The BF16 case also writes a Chrome trace with named replay-transfer, model, S5/scan kernels,
+optimizer, inference, world, log, and checkpoint regions where present.
+
+Do not launch a 24-hour run unless all of these hold:
+
+1. BF16 capability checks pass and the reported precision is the requested one.
+2. Full Aion replay fits with at least 15% reserved-VRAM headroom.
+3. Three-brain sustainable ticks/s exceeds the intended operating rate after
+   the configured 0.85 controller headroom.
+4. Concurrent action p95 is below the selected act deadline with zero misses
+   after warmup.
+5. Losses and gradients remain finite in every mode; FP32 is the reference.
+6. The profiler identifies no unexplained host transfer, serialization, or scan
+   stall. Do not add vmap, streams, pinned transfer, or compilation without this
+   evidence.
+
+No CUDA performance result is claimed by the local test suite. Preserve every
+pod output with the round journal before choosing the long-run unit.
+
+### Aion 01 two-GPU arm
+
+The two-lineage arm assigns one independent Aion to each GPU through
+`devices.learning: [cuda:0, cuda:1]`; it does not shard either organism or
+all-reduce gradients. Gate the exact pod with its total hourly cost:
+
+```bash
+scripts/bench_aion_2gpu.sh /workspace/aion-2gpu-preflight <pod-hourly-price>
 ```
 
-- It fills a buffer, times `learn()` and `act()`, and prints the sustainable
-  tick_rate for the requested ratio/brain-count. Treat that as a starting
-  point; confirm with the live identity above and adjust `gol-ctl speed`.
-- **Benchmark contention, not just solo speed.** Sibling learner workers share
-  one device. Measured on M1: solo mps beats cpu (188 vs 209 ms/update, nano),
-  but at 3 workers cpu aggregates 7.6 updates/s vs mps 4.9 — one GPU queue
-  serializes siblings, cores share. CUDA contention is **unmeasured**; time a
-  3-thread probe on the pod before trusting the solo number.
-- Reference points (M1 Pro, nano, 1024 samples/update): ~0.21s cpu / ~0.19s
-  mps solo; ~0.25s under 3-worker cpu contention. LP-mode brains speed up
-  once the trickle anneals (the imagination ensemble pass is skipped when
-  `lp_mix_eff` reaches 0) — expect `learn_seconds` to drop at that point.
-- CUDA gains vs older base-preset numbers (0.25–0.74s on a 3090) are real but
-  smaller than the local speedup — the biggest local win fixed a CPU-specific
-  pathology. Measure; don't extrapolate.
+The gate runs both full-shape BF16 learners concurrently and requires at least
+25 safe ticks/s after 0.85 headroom, zero 250 ms action-deadline misses, action
+p95 below the deadline, and at least 15% reserved-VRAM headroom on each card.
+The round config is `configs/run/aion_01_2gpu.yaml`; it keeps six bodies as two
+Aions plus four scripted foragers. Launch only through
+`scripts/start_aion_01_2gpu.sh`, which fails closed unless exactly two
+BF16-capable CUDA devices are visible and refuses to overwrite an existing
+world.
+
+### What may adapt and what may not
+
+Semantically transparent runtime changes are wall-clock pacing, universal-dormant
+event-free jumps, device assignment of independent brains, synchronized
+measurement, and the paired-real expression of the same FP32 diagonal algebra.
+They preserve the configured virtual schedule and causal work.
+
+Precision mode, S5 projection precision, batch size, sequence/burn-in length,
+train ratio, replay sampling, optimizer, publication cadence, imagination
+horizon, and any dropped credit are deliberate research variables. The governor
+and benchmark never rewrite them in response to a faster GPU. Compilation,
+pinned transfer, CUDA streams, inference batching, or vmap may be adopted only
+after profiler evidence and parity tests; they are not hidden fallback paths.
+
+## Universal-dormancy acceleration
+
+This optimization applies only when every embodied robot is dormant, including
+scripted organisms. An awake resting body still senses and acts and therefore
+disables it. Two stages are configured under `dormancy_acceleration`:
+
+1. `exact_unpaced`: once every whole owed learning update is paid, ordinary
+   `World.step()` continues without wall-clock sleep. Falling bodies and all
+   ordinary event ordering remain scalar and exact.
+2. `event_fast_forward`: once all dormant bodies are scalar-normalized, settled,
+   non-overlapping, interaction-free, and have no pending grip, bulk-integrate only the interval
+   before the next causal boundary. Solar charge, hibernation damage, fatigue,
+   held-item age, body age, heatmap occupancy, and missed act opportunities are
+   advanced in virtual time.
+
+Jumps stop before wake, integrity death, falling/settling, held-food spoilage,
+regrowth/wither/sprout heap work, transient expiration, lifecycle/respawn work,
+metrics, checkpoints, the requested run end, or any pending world event. The
+boundary itself runs through ordinary scalar stepping, preserving RNG
+consumption and same-tick event order. Aion receives the exact count of skipped
+act opportunities, then performs its FP32 elapsed-time transition at wake.
+
+If any safety predicate is false, the runtime simply uses exact ordinary steps;
+there is no approximate fallback. `metrics.ndjson`, events, and checkpoints
+retain virtual tick timestamps. Population death reconciliation runs after every
+world tick, and checkpoint serialization waits for any in-flight terminal record,
+so a death between act boundaries cannot orphan its lineage or replay evidence.
 
 ## Dreamer config flags (brain YAML), semantics and status
 
@@ -147,6 +267,9 @@ the journal entry's "What changed."
   bored while merely peckish; only true danger shuts the gate.
 
 `training:`
+- `precision: ieee_fp32 | tf32 | amp_bf16` — explicit policy described above.
+  Precision is recorded in checkpoints, benchmark output, runtime status, and
+  metrics. Changing it is a deliberate research-variable change.
 - `optimizer: adam | muon` — Muon (vendored, `dreamer/optim.py`) on the
   world model's 2D matrices, Adam elsewhere. `muon_lr` (default 0.02).
   Staged ablation; not yet run in any round.
@@ -155,11 +278,12 @@ the journal entry's "What changed."
 - `compile: true` — torch.compile on the RSSM step functions. Measured
   neutral on cpu; untested on cuda. Adds one-time compile stalls at brain
   construction (act path is pre-warmed; learn shapes compile on the learner
-  thread where a stall is just a skipped update).
+  thread; checkpointed credit remains owed during the stall).
 - `async_inference: true` — publish immutable encoder/RSSM/controller snapshots
   so `act()` never shares parameters with the optimizer and the learner need not
   hold the population action lock. `publish_every` controls update cadence.
-  Checkpoints still serialize against the brain's internal learning lock. This
+  Checkpoints serialize both training weights and the exact published snapshot
+  against the brain's internal learning lock. This
   mode is intentionally incompatible with `compile` until compiled-module
   snapshots have their own verified path.
 
@@ -198,6 +322,21 @@ Architecture flags must match the checkpoint: enabling temporal skills changes
 the actor parameter layout, and enabling the vector critic changes the critic
 output shape. Start a fresh brain or use a deliberate migration; do not resume a
 flat/scalar brain under those flags.
+
+The original Aion foundation stored S5 B/C matrices as native `complex64`.
+Loading that checkpoint into the paired-real implementation performs a one-way,
+key-validated split into FP32 real/imaginary parameters. The flat live state is
+already compatible. The world-model optimizer restarts because its complex
+moments cannot map unambiguously to the new parameter list; actor, critic,
+replay, lineage identity, wake state, and published inference state survive.
+New paired-real checkpoints carry `aion_s5_format: paired_real_v1`; missing or
+mixed format markers fail rather than guessing.
+
+Checkpointed precision must match the resume config. A different precision mode
+is a new experimental arm or an explicit future migration, not a transparent
+resume setting. The checkpoint also validates train ratio, batch/sequence/burn-in,
+warmup, replay sampling, and publication cadence as one learning contract, so
+hardware selection cannot silently rewrite the organism's consolidation budget.
 
 ## The offline gym: screen learn-side knobs before pod hours
 

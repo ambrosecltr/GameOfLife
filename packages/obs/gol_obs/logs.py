@@ -22,6 +22,7 @@ from gol_world.world import World
 from gol_obs.heatmap import VisitHeatmap
 
 IntrospectionFn = Callable[[], dict[str, dict[str, float]]]
+RuntimeMetricsFn = Callable[[], dict[str, float | str]]
 EventSink = Callable[[list[dict[str, Any]]], None]
 
 # The "engagement bubble" for interest profiles: what a robot is near is a
@@ -73,6 +74,7 @@ class RunLogs:
         introspection: IntrospectionFn | None = None,
         heatmap: VisitHeatmap | None = None,
         event_sink: EventSink | None = None,
+        runtime_metrics: RuntimeMetricsFn | None = None,
     ) -> None:
         self.events = NdjsonWriter(save_dir / "events.ndjson")
         self.metrics = NdjsonWriter(save_dir / "metrics.ndjson")
@@ -80,6 +82,7 @@ class RunLogs:
         self.introspection = introspection
         self.heatmap = heatmap
         self.event_sink = event_sink
+        self.runtime_metrics = runtime_metrics
 
     def on_tick(self, world: World) -> None:
         events = world.consume_events()
@@ -92,7 +95,7 @@ class RunLogs:
         if world.tick % self.metrics_every == 0:
             self._sample(world)
 
-    def _sample(self, world: World) -> None:
+    def _sample(self, world: World, *, backpressure_hold: bool = False) -> None:
         robots = list(world.robots.values())
         context = _interest_context(world, robots)
         rest_threshold = world.cfg.economy.rest_drive_threshold
@@ -121,6 +124,8 @@ class RunLogs:
                 for r in robots
             },
         }
+        if backpressure_hold:
+            record["backpressure_hold"] = True
         if self.introspection is not None:
             brains = {
                 rid: {k: round(v, 5) for k, v in m.items()}
@@ -129,7 +134,26 @@ class RunLogs:
             }
             if brains:
                 record["brains"] = brains
+        if self.runtime_metrics is not None:
+            record["runtime"] = {
+                key: round(value, 5) if isinstance(value, float) else value
+                for key, value in self.runtime_metrics().items()
+            }
         self.metrics.write(record)
+
+    def on_backpressure(self, world: World) -> None:
+        """Record the start of a virtual-time hold without fabricating a tick."""
+        self._sample(world, backpressure_hold=True)
+
+    def on_fast_forward(self, world: World, start_tick: int) -> None:
+        """Account an event-free interval that crosses no metrics deadline."""
+        if start_tick // self.metrics_every != world.tick // self.metrics_every:
+            raise ValueError("fast-forward crossed a metrics deadline")
+        events = world.consume_events()
+        if events:
+            raise RuntimeError("eventful world interval cannot use bulk log accounting")
+        if self.heatmap is not None:
+            self.heatmap.advance_stationary(world, start_tick)
 
     def close(self) -> None:
         self.events.close()

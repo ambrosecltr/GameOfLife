@@ -34,15 +34,28 @@ class Brain(ABC):
     def target_train_ratio(self) -> float:
         """Desired updates per recorded act-step (training.train_ratio).
 
-        A target, not a promise: when the learner can't keep up it skips —
-        the sim never waits — so the achieved ratio (logged as
-        train_ratio_eff) may run below this.
+        Runtime pacing changes wall-clock world speed to preserve this
+        scientific budget. Dropping credit is an explicit runtime mode, never
+        an implicit consequence of faster hardware.
         """
         return 0.0
+
+    def pending_update_credit(self) -> float:
+        """Checkpoint-coherent optimizer updates currently owed."""
+        return 0.0
+
+    def drop_update_credit(self, amount: float) -> None:
+        """Explicitly discard owed updates in the configured drop mode."""
+        if amount < 0.0:
+            raise ValueError("dropped update credit cannot be negative")
 
     def allows_concurrent_learning(self) -> bool:
         """Whether learn() uses an immutable controller snapshot for act()."""
         return False
+
+    def precision_mode(self) -> str:
+        """Configured compute precision, for runtime and checkpoint telemetry."""
+        return "not_applicable"
 
     def introspect(self) -> dict[str, float]:
         """Live internals for the observability layer (curiosity, losses...)."""

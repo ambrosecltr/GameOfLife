@@ -35,3 +35,26 @@ def test_unknown_key_fails_loudly() -> None:
 def test_apply_overrides_parses_yaml_values() -> None:
     data = apply_overrides({}, ["a.b=true", "a.c=1.5", "d=[1, 2]"])
     assert data == {"a": {"b": True, "c": 1.5}, "d": [1, 2]}
+
+
+def test_learning_devices_accept_explicit_multi_gpu_sequence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(REPO)
+    run_cfg, _ = load_run_config(
+        "configs/run/local_m1.yaml",
+        sets=["devices.learning=[cuda:0, cuda:1]"],
+    )
+    assert run_cfg.devices.learning_devices() == ("cuda:0", "cuda:1")
+
+
+def test_aion_two_gpu_round_has_one_learning_brain_per_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(REPO)
+    run_cfg, _ = load_run_config("configs/run/aion_01_2gpu.yaml")
+
+    assert run_cfg.devices.learning_devices() == ("cuda:0", "cuda:1")
+    assert run_cfg.population.target == 6
+    assert run_cfg.population.mix[0]["count"] == 2
+    assert run_cfg.population.mix[1]["count"] == 4

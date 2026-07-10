@@ -23,8 +23,10 @@ into "episodic RL training pipeline." These rules exist so that never happens ag
    infrastructure-only phases.
 4. **World and brains checkpoint together** at the same tick, atomically. Resume must
    always be coherent.
-5. **The sim never waits for learning.** Learner backpressure = skip updates, never
-   stall the world.
+5. **Hardware changes wall time, not the organism's learning budget.** Lived acts
+   create checkpointed update credit. Normal research runs slow or pause wall-clock
+   world advancement before causal lag grows; they never silently drop learning work.
+   Credit shedding is an explicit, logged ablation only.
 6. **The obs/action contract** (`gol_world/interface.py`) changes only by deliberate
    versioned decision (`OBS_VERSION`).
 
@@ -63,7 +65,7 @@ into "episodic RL training pipeline." These rules exist so that never happens ag
 
 - `uv sync` — install
 - `uv run gol-run --new saves/<name>` / `--resume saves/<name>` — run a world (add
-  `--headless --ticks N` for unpaced headless)
+  `--headless --ticks N` to remove viewer pacing; causal backpressure still applies)
 - `uv run gol-ctl pause|resume|speed <x>|checkpoint` — control a running world
 - `uv run gol-stats <save-dir>` — analyze metrics/events
 - `uv run pytest` (`-m "not slow"` for quick), `uv run ruff check .`, `uv run mypy packages`

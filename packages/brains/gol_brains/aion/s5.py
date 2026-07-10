@@ -10,6 +10,7 @@ discretization steps, and nonlinear residual blocks around one MIMO SSM.
 from __future__ import annotations
 
 import math
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from functools import cache
 from typing import cast
@@ -33,6 +34,7 @@ class S5DynamicsConfig:
     slow_fraction: float = 0.5
     dt_min: float = 0.001
     dt_max: float = 0.1
+    projection_precision: str = "fp32"
     unimix: float = 0.01
     free_bits: float = 1.0
     dyn_scale: float = 0.5
@@ -45,6 +47,11 @@ class S5DynamicsConfig:
             raise ValueError("S5 slow_fraction must be in (0, 1]")
         if not 0.0 < self.dt_min < self.dt_max:
             raise ValueError("S5 timescales require 0 < dt_min < dt_max")
+        if self.projection_precision != "fp32":
+            raise ValueError(
+                "Aion S5 projection_precision must remain 'fp32' until target-GPU "
+                "long-memory and learning parity gates pass"
+            )
 
     @property
     def stoch_dim(self) -> int:
@@ -72,29 +79,113 @@ def _hippo_legs_frequencies(size: int) -> torch.Tensor:
     return torch.real(frequencies).to(torch.float32)
 
 
-def _parallel_affine_scan(transition: torch.Tensor, drive: torch.Tensor) -> torch.Tensor:
-    """Inclusive scan of x[t] = A[t] * x[t-1] + b[t].
+S5_CHECKPOINT_FORMAT = "paired_real_v1"
+
+
+def migrate_complex_s5_state(state: dict[str, torch.Tensor]) -> bool:
+    """Convert the original native-complex S5 parameters to paired real keys.
+
+    The flat recurrent state was already stored as real/imaginary pairs, so
+    only parameter storage changes. Optimizer moments must be restarted by the
+    caller because the parameter list and tensor layout have changed.
+    """
+
+    complex_keys = [
+        key
+        for key in state
+        if key.endswith(".input_matrix") or key.endswith(".output_matrix")
+    ]
+    paired_keys = [
+        key
+        for key in state
+        if key.endswith(".input_matrix_real")
+        or key.endswith(".input_matrix_imag")
+        or key.endswith(".output_matrix_real")
+        or key.endswith(".output_matrix_imag")
+    ]
+    if complex_keys and paired_keys:
+        raise ValueError("Aion checkpoint mixes native-complex and paired-real S5 parameters")
+    if not complex_keys:
+        return False
+    for key in complex_keys:
+        value = state.pop(key)
+        if not value.is_complex():
+            raise ValueError(f"legacy Aion parameter {key!r} is not complex")
+        state[f"{key}_real"] = value.real.clone()
+        state[f"{key}_imag"] = value.imag.clone()
+    return True
+
+
+def _fp32_recurrence_scope(device: torch.device) -> AbstractContextManager[None]:
+    if device.type in ("cpu", "cuda"):
+        return torch.autocast(device_type=device.type, enabled=False)
+    return nullcontext()
+
+
+def _complex_multiply(
+    left_real: torch.Tensor,
+    left_imag: torch.Tensor,
+    right_real: torch.Tensor,
+    right_imag: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (
+        left_real * right_real - left_imag * right_imag,
+        left_real * right_imag + left_imag * right_real,
+    )
+
+
+def _parallel_affine_scan(
+    transition_real: torch.Tensor,
+    transition_imag: torch.Tensor,
+    drive_real: torch.Tensor,
+    drive_imag: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Inclusive paired-real scan of x[t] = A[t] * x[t-1] + b[t].
 
     Pair composition is associative, so a length-1024 sequence needs ten
     tensor stages rather than 1024 Python-level recurrent calls. This
     Hillis-Steele form intentionally uses public PyTorch operations so it
     remains portable across the project's supported PyTorch versions.
     """
-    if transition.shape != drive.shape:
-        raise ValueError("transition and drive must have identical shapes")
-    length = transition.shape[1]
+    shapes = {
+        transition_real.shape,
+        transition_imag.shape,
+        drive_real.shape,
+        drive_imag.shape,
+    }
+    if len(shapes) != 1:
+        raise ValueError("paired-real transition and drive tensors must have identical shapes")
+    length = transition_real.shape[1]
     offset = 1
-    composed_transition = transition
-    composed_drive = drive
+    composed_real = transition_real
+    composed_imag = transition_imag
+    composed_drive_real = drive_real
+    composed_drive_imag = drive_imag
     while offset < length:
-        right_transition = composed_transition[:, offset:] * composed_transition[:, :-offset]
-        right_drive = composed_drive[:, offset:] + (
-            composed_transition[:, offset:] * composed_drive[:, :-offset]
+        right_real, right_imag = _complex_multiply(
+            composed_real[:, offset:],
+            composed_imag[:, offset:],
+            composed_real[:, :-offset],
+            composed_imag[:, :-offset],
         )
-        composed_transition = torch.cat([composed_transition[:, :offset], right_transition], dim=1)
-        composed_drive = torch.cat([composed_drive[:, :offset], right_drive], dim=1)
+        carried_real, carried_imag = _complex_multiply(
+            composed_real[:, offset:],
+            composed_imag[:, offset:],
+            composed_drive_real[:, :-offset],
+            composed_drive_imag[:, :-offset],
+        )
+        right_drive_real = composed_drive_real[:, offset:] + carried_real
+        right_drive_imag = composed_drive_imag[:, offset:] + carried_imag
+        composed_real = torch.cat([composed_real[:, :offset], right_real], dim=1)
+        composed_imag = torch.cat([composed_imag[:, :offset], right_imag], dim=1)
+        composed_drive_real = torch.cat(
+            [composed_drive_real[:, :offset], right_drive_real], dim=1
+        )
+        composed_drive_imag = torch.cat(
+            [composed_drive_imag[:, :offset], right_drive_imag], dim=1
+        )
         offset *= 2
-    return composed_drive
+    return composed_drive_real, composed_drive_imag
 
 
 class S5SSM(nn.Module):
@@ -115,8 +206,9 @@ class S5SSM(nn.Module):
 
         initial_decay = torch.full((state_dim,), 0.5)
         self.raw_decay = nn.Parameter(torch.log(torch.expm1(initial_decay)))
-        # Conjugate symmetry stores one mode from each pair; the omitted half
-        # is recovered by taking twice the real output, as in S5.
+        # Conjugate symmetry stores one mode from each pair; paired real
+        # parameters retain the exact complex diagonal algebra without native
+        # complex kernels or reduced-precision complex dtypes.
         self.frequency = nn.Parameter(_hippo_legs_frequencies(2 * state_dim)[:state_dim].clone())
         self.log_step = nn.Parameter(
             torch.empty(state_dim).uniform_(math.log(dt_min), math.log(dt_max))
@@ -124,37 +216,47 @@ class S5SSM(nn.Module):
 
         input_scale = (2.0 * width) ** -0.5
         output_scale = (2.0 * state_dim) ** -0.5
-        self.input_matrix = nn.Parameter(
-            torch.complex(
-                torch.randn(state_dim, width) * input_scale,
-                torch.randn(state_dim, width) * input_scale,
-            )
-        )
-        self.output_matrix = nn.Parameter(
-            torch.complex(
-                torch.randn(width, state_dim) * output_scale,
-                torch.randn(width, state_dim) * output_scale,
-            )
-        )
+        self.input_matrix_real = nn.Parameter(torch.randn(state_dim, width) * input_scale)
+        self.input_matrix_imag = nn.Parameter(torch.randn(state_dim, width) * input_scale)
+        self.output_matrix_real = nn.Parameter(torch.randn(width, state_dim) * output_scale)
+        self.output_matrix_imag = nn.Parameter(torch.randn(width, state_dim) * output_scale)
         self.feedthrough = nn.Parameter(torch.ones(width))
 
-    def _continuous_eigenvalues(self) -> torch.Tensor:
+    def _continuous_eigenvalues(self) -> tuple[torch.Tensor, torch.Tensor]:
         # The left-half-plane parameterization keeps arbitrarily long lived
         # streams stable even after years of online optimizer updates.
-        decay = F.softplus(self.raw_decay) + 1e-4
-        return torch.complex(-decay, self.frequency)
+        decay = F.softplus(self.raw_decay.float()) + 1e-4
+        return -decay, self.frequency.float()
 
-    def _base_transition(self) -> tuple[torch.Tensor, torch.Tensor]:
-        eigenvalues = self._continuous_eigenvalues()
-        delta = torch.exp(self.log_step)
-        transition = torch.exp(eigenvalues * delta)
-        input_factor = (transition - 1.0) / eigenvalues
-        return transition, input_factor[:, None] * self.input_matrix
+    def _transition(
+        self, step_scale: float | torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        eigen_real, eigen_imag = self._continuous_eigenvalues()
+        delta = torch.exp(self.log_step.float())
+        scale = torch.as_tensor(step_scale, device=delta.device, dtype=torch.float32)
+        elapsed = delta * scale[..., None]
+        magnitude = torch.exp(eigen_real * elapsed)
+        angle = eigen_imag * elapsed
+        return magnitude * torch.cos(angle), magnitude * torch.sin(angle)
+
+    def _discretized_input(self) -> tuple[torch.Tensor, torch.Tensor]:
+        eigen_real, eigen_imag = self._continuous_eigenvalues()
+        transition_real, transition_imag = self._transition(1.0)
+        numerator_real = transition_real - 1.0
+        denominator = eigen_real.square() + eigen_imag.square()
+        factor_real = (numerator_real * eigen_real + transition_imag * eigen_imag) / denominator
+        factor_imag = (transition_imag * eigen_real - numerator_real * eigen_imag) / denominator
+        return _complex_multiply(
+            factor_real[:, None],
+            factor_imag[:, None],
+            self.input_matrix_real.float(),
+            self.input_matrix_imag.float(),
+        )
 
     def slow_mask(self) -> torch.Tensor:
         """Select the currently longest-timescale modes."""
         with torch.no_grad():
-            rate = F.softplus(self.raw_decay) * torch.exp(self.log_step)
+            rate = F.softplus(self.raw_decay.float()) * torch.exp(self.log_step.float())
             indices = torch.topk(rate, self.slow_modes, largest=False).indices
             mask = torch.zeros(self.state_dim, dtype=torch.bool, device=rate.device)
             mask[indices] = True
@@ -166,14 +268,25 @@ class S5SSM(nn.Module):
         state: torch.Tensor,
         step_scale: float | torch.Tensor = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        base_transition, input_matrix = self._base_transition()
-        scale = torch.as_tensor(step_scale, device=signal.device, dtype=signal.dtype)
-        transition = torch.pow(base_transition, scale[..., None])
-        drive = signal.to(input_matrix.dtype) @ input_matrix.T
-        next_state = transition * state + drive
-        output = 2.0 * (next_state @ self.output_matrix.T).real
-        output = output + self.feedthrough * signal
-        return output, next_state
+        with _fp32_recurrence_scope(signal.device):
+            signal_fp32 = signal.float()
+            state_fp32 = state.float()
+            state_real, state_imag = state_fp32.unbind(-1)
+            transition_real, transition_imag = self._transition(step_scale)
+            input_real, input_imag = self._discretized_input()
+            drive_real = signal_fp32 @ input_real.T
+            drive_imag = signal_fp32 @ input_imag.T
+            next_real, next_imag = _complex_multiply(
+                transition_real, transition_imag, state_real, state_imag
+            )
+            next_real = next_real + drive_real
+            next_imag = next_imag + drive_imag
+            output = 2.0 * (
+                next_real @ self.output_matrix_real.float().T
+                - next_imag @ self.output_matrix_imag.float().T
+            )
+            output = output + self.feedthrough.float() * signal_fp32
+            return output, torch.stack([next_real, next_imag], dim=-1)
 
     def sequence(
         self,
@@ -183,22 +296,48 @@ class S5SSM(nn.Module):
         wake: torch.Tensor,
         step_scale: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        base_transition, input_matrix = self._base_transition()
-        transition = torch.pow(base_transition[None, None, :], step_scale[..., None])
-        drive = torch.einsum("blh,ph->blp", signal.to(input_matrix.dtype), input_matrix)
+        with _fp32_recurrence_scope(signal.device):
+            signal_fp32 = signal.float()
+            initial_real, initial_imag = initial_state.float().unbind(-1)
+            transition_real, transition_imag = self._transition(step_scale.float())
+            input_real, input_imag = self._discretized_input()
+            with torch.profiler.record_function("s5/sequence_projection_fp32"):
+                drive_real = torch.einsum("blh,ph->blp", signal_fp32, input_real)
+                drive_imag = torch.einsum("blh,ph->blp", signal_fp32, input_imag)
 
-        first_mask = first[..., None] > 0.5
-        wake_fast_mask = (wake[..., None] > 0.5) & ~self.slow_mask()[None, None, :]
-        transition = torch.where(first_mask | wake_fast_mask, 0.0, transition)
+            first_mask = first[..., None] > 0.5
+            wake_fast_mask = (wake[..., None] > 0.5) & ~self.slow_mask()[None, None, :]
+            reset_mask = first_mask | wake_fast_mask
+            transition_real = torch.where(reset_mask, 0.0, transition_real)
+            transition_imag = torch.where(reset_mask, 0.0, transition_imag)
 
-        # Seed the scan with the state entering this chunk. A boundary at its
-        # first element has already zeroed the corresponding transition.
-        seeded_drive = drive[:, 0] + transition[:, 0] * initial_state
-        drive = torch.cat([seeded_drive[:, None], drive[:, 1:]], dim=1)
-        states = _parallel_affine_scan(transition, drive)
-        output = 2.0 * torch.einsum("blp,hp->blh", states, self.output_matrix).real
-        output = output + self.feedthrough * signal
-        return output, states
+            seeded_real, seeded_imag = _complex_multiply(
+                transition_real[:, 0],
+                transition_imag[:, 0],
+                initial_real,
+                initial_imag,
+            )
+            drive_real = torch.cat(
+                [(drive_real[:, 0] + seeded_real)[:, None], drive_real[:, 1:]], dim=1
+            )
+            drive_imag = torch.cat(
+                [(drive_imag[:, 0] + seeded_imag)[:, None], drive_imag[:, 1:]], dim=1
+            )
+            with torch.profiler.record_function("s5/associative_scan_fp32"):
+                states_real, states_imag = _parallel_affine_scan(
+                    transition_real, transition_imag, drive_real, drive_imag
+                )
+            with torch.profiler.record_function("s5/sequence_readout_fp32"):
+                output = 2.0 * (
+                    torch.einsum(
+                        "blp,hp->blh", states_real, self.output_matrix_real.float()
+                    )
+                    - torch.einsum(
+                        "blp,hp->blh", states_imag, self.output_matrix_imag.float()
+                    )
+                )
+            output = output + self.feedthrough.float() * signal_fp32
+            return output, torch.stack([states_real, states_imag], dim=-1)
 
 
 class S5Block(nn.Module):
@@ -248,25 +387,25 @@ class S5Stack(nn.Module):
         self.blocks = nn.ModuleList(S5Block(cfg) for _ in range(cfg.blocks))
 
     def initial(self, batch: int, device: torch.device) -> torch.Tensor:
-        return torch.zeros(batch, self.cfg.deter, device=device)
+        return torch.zeros(batch, self.cfg.deter, device=device, dtype=torch.float32)
 
     def _unpack(self, state: torch.Tensor) -> torch.Tensor:
-        paired = state.reshape(*state.shape[:-1], self.cfg.blocks, self.cfg.state_dim, 2)
-        return torch.view_as_complex(paired.contiguous())
+        return state.float().reshape(
+            *state.shape[:-1], self.cfg.blocks, self.cfg.state_dim, 2
+        )
 
     @staticmethod
     def _pack(state: torch.Tensor) -> torch.Tensor:
-        paired = torch.view_as_real(state)
-        leading = paired.shape[:-3]
-        return paired.reshape(*leading, -1)
+        leading = state.shape[:-3]
+        return state.reshape(*leading, -1)
 
     def reset_fast(self, state: torch.Tensor) -> torch.Tensor:
         unpacked = self._unpack(state)
         kept = []
         for index, module in enumerate(self.blocks):
             block = cast(S5Block, module)
-            kept.append(unpacked[..., index, :] * block.ssm.slow_mask())
-        return self._pack(torch.stack(kept, dim=-2))
+            kept.append(unpacked[..., index, :, :] * block.ssm.slow_mask()[..., None])
+        return self._pack(torch.stack(kept, dim=-3))
 
     def step(
         self,
@@ -278,9 +417,11 @@ class S5Stack(nn.Module):
         next_states: list[torch.Tensor] = []
         for index, module in enumerate(self.blocks):
             block = cast(S5Block, module)
-            signal, next_state = block.step(signal, layer_states[..., index, :], step_scale)
+            signal, next_state = block.step(
+                signal, layer_states[..., index, :, :], step_scale
+            )
             next_states.append(next_state)
-        return self._pack(torch.stack(next_states, dim=-2))
+        return self._pack(torch.stack(next_states, dim=-3))
 
     def sequence(
         self,
@@ -295,10 +436,10 @@ class S5Stack(nn.Module):
         for index, module in enumerate(self.blocks):
             block = cast(S5Block, module)
             signal, states = block.sequence(
-                signal, initial_layers[..., index, :], first, wake, step_scale
+                signal, initial_layers[..., index, :, :], first, wake, step_scale
             )
             state_sequences.append(states)
-        return self._pack(torch.stack(state_sequences, dim=-2))
+        return self._pack(torch.stack(state_sequences, dim=-3))
 
 
 class S5Dynamics(CategoricalLatentDynamics):
@@ -421,3 +562,13 @@ class S5Dynamics(CategoricalLatentDynamics):
         h = self.stack.sequence(projected, h, graded_first, graded_wake, graded_scale)
         prior = self._logits_to_probs(self.prior_net(h))
         return DynamicsSequence(h=h, z=z, post=post, prior=prior)
+
+
+__all__ = [
+    "S5_CHECKPOINT_FORMAT",
+    "S5Dynamics",
+    "S5DynamicsConfig",
+    "S5SSM",
+    "S5Stack",
+    "migrate_complex_s5_state",
+]
