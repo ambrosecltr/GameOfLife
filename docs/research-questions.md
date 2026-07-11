@@ -61,6 +61,9 @@ Does warm-starting newborns from living agents' weights propagate behaviors?
 - Default: fresh brains on respawn. Flag: `inherit_weights: random_living` copies a
   living agent's weights (no fitness selection — a random living agent, which is only
   survivorship-conditioned).
+- `inherit_weights: descendant` gives a dead organism's learned substrate to a
+  distinct replacement brain. Unlike `lineage`, the parent is not reincarnated;
+  the child receives a fresh live recurrent state and per-life affect.
 - Watch for: behavioral lineages (foraging routes, hoarding sites persisting across
   "generations"), divergence between inherit-on and inherit-off worlds under the same
   seed.

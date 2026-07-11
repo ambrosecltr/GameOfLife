@@ -76,10 +76,12 @@ Files: `blocks.py`, `grid.py`, `terrain.py`, `physics.py`, `entities.py`, `sensi
 - **Poison**: `toxic_fraction` of bushes are BUSH_TOXIC (purple; a distinct ray class). Eating one gives reduced energy but costs integrity, fires `took_damage`, and emits a hurt cry — avoidance must be learned from consequence. `ecology.toxic_mimic` ablation makes toxic bushes visually identical to ripe ones (consequence + place memory only).
 - **Fatigue**: 0..1 homeostat in proprio. Builds while driving, clears while still (or dormant); past `exhaustion_threshold` energy costs multiply and integrity bleeds. No hardcoded sleep — night scarcity plus fatigue should make resting at night *emerge*, or not (that's the experiment).
 - **Involuntary sounds**: death leaves a loud transient cry at the spot (~2 s, pattern (-1,-1) on the signal channel); fall damage a quieter distinct one. World physics, not vocabulary — agents can mimic them, and witnesses get cause-and-effect material (sound → body stops → scrap). Transient sounds checkpoint with the world.
-- **Population**: either developmental lineage continuity or earned budding. In
-  budding mode a physiologically thriving body pays energy/integrity to create a child
-  carrying mutated heritable state; no fitness score ranks organisms. A small extinction
-  floor is an experimental safeguard, not selection.
+- **Population**: developmental lineage continuity, distinct learned descendants,
+  or earned budding. `lineage` reincarnates one learning object across bodies;
+  `descendant` copies the dead parent's learned substrate into a distinct newborn.
+  In budding mode a physiologically thriving body pays energy/integrity to create
+  a child carrying mutated heritable state; no fitness score ranks organisms. A
+  small extinction floor is an experimental safeguard, not selection.
 
 ## Sensing/action contract — `interface.py` (the stable wall between world and brains)
 
@@ -256,6 +258,8 @@ The build followed this plan with four evidence-driven changes:
    only the recurrent state resets. Motivated by newborn dreamers starving
    before learning could accumulate. `none` / `random_living` remain for the
    cultural-transmission experiments.
+   Proposal 006 later added `descendant`: the same learned substrate can cross
+   a bodily generation without treating the newborn as the same mind.
 3. **Warmup cut 2000 → 500 act-steps** (same starvation reason).
 4. **Devices by benchmark (M1 Pro)**: nano learns fastest on cpu
    (474 vs 568 ms/update); small+ wins on mps (655 vs 1009). Learning brains

@@ -12,6 +12,13 @@ tags: [homeostasis, survival, mortality, reward-geometry, viability, boredom-dec
 
 # 003 — mortality
 
+> **Later clarification (proposal 006, 2026-07-11):** this proposal rejected a
+> constant `+1 alive` survival bonus. It did not test the later Aion 02 contract:
+> bounded positive wellbeing that varies only with fed, intact, rested bodily
+> state and falls to zero at the lethal boundary. The charter now distinguishes
+> that state-grounded interoception from rewards naming survival duration,
+> objects, actions, or desired behavior.
+
 ## The reframe: the beta arc has been fighting the reward's sign, not its reachability
 
 Rounds 004–011 each named a different binding constraint — curiosity collapse (004),

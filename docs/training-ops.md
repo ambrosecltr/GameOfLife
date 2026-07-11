@@ -110,6 +110,31 @@ Do not launch a 24-hour run unless all of these hold:
 No CUDA performance result is claimed by the local test suite. Preserve every
 pod output with the round journal before choosing the long-run unit.
 
+## Actor-semantic gate
+
+Throughput and finite losses do not establish that the configured organism is
+the organism the actor optimizes. Before any paid ecological run with a changed
+affect or policy path, all of these must pass:
+
+1. Controlled predicted body states exercise every enabled imagined affect
+   component. A configured positive wellbeing stream must produce positive
+   `affect_viability`; a finite telemetry-only `wellbeing` value is not evidence.
+2. Predicted lethal integrity and suspended-coma energy boundaries constrain
+   the continuation used by both fear and imagined return discounting.
+3. Continuous score-function actions are detached before `log_prob()`. The
+   world-model rollout is under `no_grad`; allowing the sampled action to
+   differentiate through its own likelihood is not REINFORCE.
+4. Continuous policy standard deviation stays in the fixed [0.1, 1.0] range.
+   Every learning update reports `policy_cont_std_mean`,
+   `policy_cont_std_max`, `policy_action_abs_mean`,
+   `policy_action_saturation_frac`, and `policy_rest_sample_frac`.
+5. The short closed-loop soak must show positive imagined viability, no
+   standard-deviation violation, no rising saturation/entropy runaway, finite
+   losses, and a nonzero sampled-rest probability before a long run starts.
+
+The reference DreamerV3 policy uses the same 0.1 minimum and 1.0 maximum
+standard deviation. Treat those as a correctness bound, not a round knob.
+
 ### Aion 01 two-GPU arm
 
 The two-lineage arm assigns one independent Aion to each GPU through
@@ -207,7 +232,7 @@ the journal entry's "What changed."
   imagination; the head is still trained and logged as a diagnostic. Use
   `proprio` when the body function is already known and the research question is
   behavior, not whether another network can rediscover that function.
-- `blackout: cut | priced` — how the dormancy gap enters the learned stream
+- `blackout: cut | priced | suspended` — how the dormancy gap enters the learned stream
   (round 011's reachability fix). `cut` (legacy) severs it: wake resets the
   live state and the salience chain, and near-zero energy trains the
   continuation head to 0, so imagination discount-terminates at the crash.
@@ -217,8 +242,10 @@ the journal entry's "What changed."
   can find every blackout), the live recurrent state still resets (the mind
   was off), and nothing observable terminates (cont trains to 1: a crash the
   actor can't plan across can't be avoided). Requires `homeostasis: drive`.
-  Respawn into a new body remains a hard cut in both modes; death stays
-  unexperienced.
+  `suspended` is Aion 02's emergency-coma contract: slow S5 context advances by
+  elapsed time, affect deltas sever across the unconscious interval, and the
+  continuation target contributes `gamma ** step_scale`. No reward or pain is
+  multiplied by blackout duration. Respawn into a new body remains a hard cut.
 - `spike_loss_weight: w` — multiplies the twohot reward-head loss by
   (1 + w) on |reward| > `prioritize_threshold` samples. The pre-registered
   follow-up if prioritized replay gets spikes into batches but the head
@@ -238,10 +265,13 @@ the journal entry's "What changed."
   prioritized replay: the barrier's salience is `|scale·ΔV| + floor·V`, so the
   standing tax carries the priority in the floor-only form (deltas are small
   when the drift toward the floor is slow). Motivation: the comfort drive
-  telescopes to a *negative*
-  return over any mortal life, so the reward gives no positive stake in
-  survival; the barrier's marginal value explodes toward the floor without
-  telescoping to a loss.
+  telescopes to a *negative* return over any mortal life, so the reward gives
+  no positive stake in survival; the barrier's marginal value explodes toward
+  the floor without telescoping to a loss.
+- `wellbeing:` (proposal 006) uses the viability barrier plus comfort drive to
+  give a regulated conscious body bounded positive standing valence.
+- `pain:` adds acute integrity-loss valence gated by the observed/predicted
+  damage event. It requires direct imagined proprioception and drive homeostasis.
 - `death_terminal: true` — true death (integrity → `integrity_lethal`)
   terminates the imagined stream (cont target = integrity above the floor), so
   its absorbing ~0 return backs up through the critic: a functional fear of
