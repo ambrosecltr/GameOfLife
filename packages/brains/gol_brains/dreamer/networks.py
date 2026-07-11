@@ -194,6 +194,15 @@ class RunningMeanStd:
         self.mean, self.var, self.count = state["mean"], state["var"], state["count"]
 
 
+POLICY_MIN_STD = 0.1
+POLICY_MAX_STD = 1.0
+
+
+def bounded_policy_std(raw_std: torch.Tensor) -> torch.Tensor:
+    """Map policy logits smoothly into DreamerV3's bounded standard deviation."""
+    return POLICY_MIN_STD + (POLICY_MAX_STD - POLICY_MIN_STD) * torch.sigmoid(raw_std)
+
+
 class TanhNormal:
     """Tanh-squashed diagonal Gaussian with log-probs (for REINFORCE).
 
@@ -209,6 +218,10 @@ class TanhNormal:
 
     def sample(self) -> torch.Tensor:
         return torch.tanh(self.mean + self.std * torch.randn_like(self.mean))
+
+    def sample_for_reinforce(self) -> torch.Tensor:
+        """Sample an action held constant by the score-function gradient."""
+        return self.sample().detach()
 
     def log_prob(self, action: torch.Tensor) -> torch.Tensor:
         # atanh with clamping away from the asymptotes.

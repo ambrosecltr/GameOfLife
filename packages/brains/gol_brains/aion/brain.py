@@ -27,8 +27,10 @@ class AionBrain(DreamerBrain):
         normalized = dict(cfg)
         reward = dict(cfg.get("reward", {}))
         explicit_blackout = reward.get("blackout")
-        if explicit_blackout not in (None, "priced"):
-            raise ValueError("Aion requires reward.blackout: priced for continuous identity")
+        if explicit_blackout not in (None, "priced", "suspended"):
+            raise ValueError(
+                "Aion requires reward.blackout: priced or suspended for continuous identity"
+            )
         reward.setdefault("homeostasis", "drive")
         reward.setdefault("blackout", "priced")
         normalized["reward"] = reward
@@ -117,9 +119,14 @@ class AionBrain(DreamerBrain):
         self.last_action = torch.zeros_like(self.last_action)
         self._stream_wake = True
         self._step_scale = float(dormant_steps + 1)
+        if self.blackout == "suspended":
+            self._prev_drive = None
+            self._prev_via = None
+            self._prev_integrity = None
         self._active_skill = -1
         self._skill_remaining = 0
         self._metrics["blackout_steps"] = float(dormant_steps)
+        self._metrics["blackout_discount"] = self.gamma**dormant_steps
 
     def _death_transition_context(self, dormant: bool, dormant_steps: int) -> tuple[bool, float]:
         if dormant_steps < 0:

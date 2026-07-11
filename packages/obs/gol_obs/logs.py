@@ -114,6 +114,8 @@ class RunLogs:
                     "fatigue": round(r.fatigue, 4),
                     "dormant": r.dormant,
                     "resting": bool(np.abs(r.drive).max() < rest_threshold),
+                    "signal": [round(float(value), 4) for value in r.signal],
+                    "signal_magnitude": round(float(np.abs(r.signal).max()), 4),
                     "near_robots": context[r.id][0],
                     "near_bushes": context[r.id][1],
                     "age": r.age_ticks,

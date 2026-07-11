@@ -62,6 +62,7 @@ from gol_brains.dreamer.networks import (
     RunningMeanStd,
     TanhNormal,
     TwoHot,
+    bounded_policy_std,
     mlp,
     percentile_scale,
 )
@@ -100,6 +101,7 @@ KIND_REGIONS = 4
 # Separate value functions prevent unlike endogenous signals from erasing one
 # another before the actor chooses how to trade them off.
 AFFECT_NAMES = ("comfort", "viability", "curiosity", "boredom", "fear", "skill")
+PAIN_AFFECT = "pain"
 
 
 class WorldModel(nn.Module):
@@ -134,6 +136,9 @@ class WorldModel(nn.Module):
         self.head_proprio = mlp(feat, units, PROPRIO_DIM, layers=2)
         self.head_reward = mlp(feat, units, 41, layers=2)  # twohot homeostasis
         self.head_cont = mlp(feat, units, 1, layers=2)
+        self.head_damage = (
+            mlp(feat, units, 1, layers=2) if bool(wm_cfg.get("predict_damage", False)) else None
+        )
         # Plan2Explore: each ensemble member predicts the NEXT observation
         # embedding from (state, action); their disagreement is epistemic
         # uncertainty, which is the curiosity signal. Members are stacked into
@@ -233,7 +238,17 @@ class DreamerBrain(Brain):
         self.rng = np.random.default_rng(seed)
 
         preset = PRESETS[str(cfg.get("preset", "nano"))]
+        rw = dict(cfg.get("reward", {}))
+        pain = dict(rw.get("pain", {}))
+        self.pain_weight = float(pain.get("weight", 0.0))
+        self.pain_event_loss_weight = float(pain.get("event_loss_weight", 32.0))
+        if self.pain_weight < 0.0:
+            raise ValueError("reward.pain.weight cannot be negative")
+        if self.pain_event_loss_weight < 1.0:
+            raise ValueError("reward.pain.event_loss_weight must be at least 1")
+        self.pain_on = self.pain_weight > 0.0
         wm_cfg = dict(cfg.get("world_model", {}))
+        wm_cfg["predict_damage"] = self.pain_on
         self.wm = self._build_world_model(preset, self.body.num_rays, wm_cfg).to(self.device)
         feat = self.wm.dynamics_cfg.feat_dim
         units = preset["units"]
@@ -244,7 +259,7 @@ class DreamerBrain(Brain):
         self.lam = float(ac_cfg.get("lam", 0.95))
         self.entropy_scale = float(ac_cfg.get("entropy", 3e-4))
         self.vector_critic = bool(ac_cfg.get("vector_critic", False))
-        self.affect_names = AFFECT_NAMES
+        self.affect_names = AFFECT_NAMES + ((PAIN_AFFECT,) if self.pain_on else ())
         self.value_channels = len(self.affect_names) if self.vector_critic else 1
 
         skill_cfg = dict(cfg.get("temporal_skills", {}))
@@ -274,7 +289,6 @@ class DreamerBrain(Brain):
             p.requires_grad_(False)
         self.twohot = TwoHot().to(self.device)
 
-        rw = dict(cfg.get("reward", {}))
         self.w_curiosity = float(rw.get("w_curiosity", 1.0))
         self.w_homeostasis = float(rw.get("w_homeostasis", 1.0))
         # Legacy brains ask a reward head to rediscover the body's known
@@ -295,6 +309,12 @@ class DreamerBrain(Brain):
         self.homeostasis_mode = str(rw.get("homeostasis", "events"))
         if self.homeostasis_mode not in ("drive", "events"):
             raise ValueError(f"unknown homeostasis mode: {self.homeostasis_mode!r}")
+        if self.pain_on and (
+            self.homeostasis_mode != "drive" or self.imagined_homeostasis != "proprio"
+        ):
+            raise ValueError(
+                "reward.pain requires homeostasis: drive and imagined_homeostasis: proprio"
+            )
         drv = dict(rw.get("drive", {}))
         self.drive_scale = float(drv.get("scale", 3.0))
         self.drive_level_penalty = float(drv.get("level_penalty", 0.01))
@@ -324,7 +344,8 @@ class DreamerBrain(Brain):
         # calorie explodes as you starve and being deep in the danger zone
         # carries a standing cost the comfort drive never imposes. It rewards
         # no action and names no behaviour — a pure function of internal state,
-        # like every other drive. scale 0 = off (recovers beta_10 exactly).
+        # like every other drive. With reduction, tax, and wellbeing all zero,
+        # the viability channel is off and legacy behavior is exact.
         via = dict(rw.get("viability", {}))
         self.via_scale = float(via.get("scale", 0.0))
         self.via_floor = float(via.get("floor", 0.0))  # standing cost on V (the danger-zone tax)
@@ -336,14 +357,21 @@ class DreamerBrain(Brain):
         self.via_i_safe = float(via.get("integrity_safe", 0.5))
         self.via_w_energy = float(via.get("energy_weight", 1.0))
         self.via_w_integ = float(via.get("integrity_weight", 1.0))
-        # The drive is "on" if EITHER term is active: the reduction reward
-        # (scale, HRRL-style movement away from the floor) or the standing
-        # danger tax (floor, a cost of *being* near the floor). Offline
+        wellbeing = dict(rw.get("wellbeing", {}))
+        self.wellbeing_weight = float(wellbeing.get("weight", 0.0))
+        self.wellbeing_comfort_decay = float(wellbeing.get("comfort_decay", 1.0))
+        if self.wellbeing_weight < 0.0:
+            raise ValueError("reward.wellbeing.weight cannot be negative")
+        if self.wellbeing_comfort_decay < 0.0:
+            raise ValueError("reward.wellbeing.comfort_decay cannot be negative")
+        self.wellbeing_on = self.wellbeing_weight > 0.0
+        # The drive is "on" if reduction, standing tax, or regulated-body
+        # wellbeing uses the boundary. Offline
         # calibration on dreamer_042 showed the reduction term alone recreates
         # the hibernation attractor — near-floor states become high-value
         # launchpads because escaping pays — so the standing cost carries the
         # mortality gradient; both are kept as separable knobs.
-        self.via_on = self.via_scale > 0.0 or self.via_floor > 0.0
+        self.via_on = self.via_scale > 0.0 or self.via_floor > 0.0 or self.wellbeing_on
         if self.via_on and self.homeostasis_mode != "drive":
             raise ValueError("reward.viability requires homeostasis: drive")
         # True death (integrity → lethal) terminates the imagined stream so its
@@ -372,12 +400,16 @@ class DreamerBrain(Brain):
         #      imagination discount-kills at would leave the priced crash
         #      unreachable by the actor. Death stays unexperienced (the
         #      stream just stops); that is a deliberately separate gap.
-        # Respawn into a new body remains a hard cut in both modes.
+        # "suspended" keeps elapsed S5 context but severs affect across the
+        # unconscious gap and trains gamma**elapsed continuation. Respawn into
+        # a new body remains a hard cut in every mode.
         self.blackout = str(rw.get("blackout", "cut"))
-        if self.blackout not in ("cut", "priced"):
+        if self.blackout not in ("cut", "priced", "suspended"):
             raise ValueError(f"unknown blackout mode: {self.blackout!r}")
-        if self.blackout == "priced" and self.homeostasis_mode != "drive":
-            raise ValueError("blackout: priced requires homeostasis: drive (HRRL prices the gap)")
+        if self.blackout in ("priced", "suspended") and self.homeostasis_mode != "drive":
+            raise ValueError(
+                f"blackout: {self.blackout} requires homeostasis: drive"
+            )
         # Spike-weighted reward loss (pre-registered 010/011 follow-up): the
         # twohot head sees so few |reward| spikes that even oversampled meals
         # can drown in the batch mean; weight > 0 multiplies spike samples'
@@ -534,11 +566,13 @@ class DreamerBrain(Brain):
         self.prioritize_threshold = float(replay.get("prioritize_threshold", 0.1))
         self._prev_drive: float | None = None  # act-stream drive level, for salience
         self._prev_via: float | None = None  # act-stream barrier level, for salience
+        self._prev_integrity: float | None = None
         # Exact per-life realized return, accumulated on the lived stream (the
         # replay batch mean can only infer the sign). Reset at a stream break;
         # exposed via introspect so metrics.ndjson carries the running integral.
         self._life_return_homeo = 0.0
         self._life_return_via = 0.0
+        self._life_return_pain = 0.0
         # The next recorded step has no lived predecessor (fresh mind, respawn,
         # or a cut wake): it lands in the buffer as a stream-break marker so
         # replayed windows never read a fictional drive delta across the gap.
@@ -695,7 +729,7 @@ class DreamerBrain(Brain):
         mean = out[..., :CONT_DIM]
         raw_std = out[..., CONT_DIM : 2 * CONT_DIM]
         grip_logits = out[..., 2 * CONT_DIM :]
-        std = F.softplus(raw_std) + 0.1
+        std = bounded_policy_std(raw_std)
         probs = torch.softmax(grip_logits, dim=-1)
         probs = 0.99 * probs + 0.01 / NUM_GRIP_MODES  # unimix keeps exploration alive
         return TanhNormal(torch.tanh(mean), std), DiscreteDist(probs)
@@ -767,7 +801,28 @@ class DreamerBrain(Brain):
                         salience += abs(self.via_scale * (self._prev_via - v)) + self.via_floor * v
                         self._life_return_via += self.via_scale * (self._prev_via - v)
                     self._life_return_via -= self.via_floor * v
+                    if self.wellbeing_on:
+                        wb = float(
+                            feeling.wellbeing(
+                                tensors["proprio"].new_tensor(v),
+                                tensors["proprio"].new_tensor(d),
+                                weight=self.wellbeing_weight,
+                                barrier_cap=self.via_barrier_cap,
+                                comfort_decay=self.wellbeing_comfort_decay,
+                            )
+                        )
+                        self._life_return_via += wb
                     self._prev_via = v
+                integrity = float(tensors["proprio"][0, feeling.INTEGRITY_IDX])
+                if (
+                    self.pain_on
+                    and self._prev_integrity is not None
+                    and float(tensors["events"][0, 1]) > 0.5
+                ):
+                    pain = self.pain_weight * max(0.0, self._prev_integrity - integrity)
+                    salience += pain
+                    self._life_return_pain -= pain
+                self._prev_integrity = integrity
             else:
                 salience = float(obs["events"][0] + obs["events"][1])
             with self.precision.autocast():
@@ -875,11 +930,36 @@ class DreamerBrain(Brain):
     def _viability_reward(
         self, proprio: torch.Tensor, first: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """HRRL on the barrier: reward for moving *away* from the lethal floor,
-        minus a standing tax for sitting in the danger zone. Same telescoping
-        form and stream-break mask as the comfort drive (`_homeostasis`)."""
+        """Boundary reduction/tax plus optional regulated-body wellbeing."""
         V = self._viability(proprio)
-        return self.via_scale * feeling.reduction(V, first) - self.via_floor * V
+        reward = self.via_scale * feeling.reduction(V, first) - self.via_floor * V
+        if self.wellbeing_on:
+            reward = reward + feeling.wellbeing(
+                V,
+                self._drive_level(proprio),
+                weight=self.wellbeing_weight,
+                barrier_cap=self.via_barrier_cap,
+                comfort_decay=self.wellbeing_comfort_decay,
+            )
+        return reward
+
+    def _pain_reward(
+        self,
+        events: torch.Tensor,
+        proprio: torch.Tensor,
+        discontinuity: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if not self.pain_on:
+            return torch.zeros_like(proprio[..., 0])
+        loss = feeling.acute_integrity_loss(proprio, events[..., 1], discontinuity)
+        return -self.pain_weight * loss
+
+    def _reward_discontinuity(
+        self, first: torch.Tensor, wake: torch.Tensor
+    ) -> torch.Tensor:
+        if self.blackout == "suspended":
+            return torch.maximum(first, wake)
+        return first
 
     def _homeostasis(
         self, events: torch.Tensor, proprio: torch.Tensor, first: torch.Tensor | None = None
@@ -920,6 +1000,24 @@ class DreamerBrain(Brain):
         )
         return raw, raw * weight
 
+    def _continuation_target(
+        self, proprio: torch.Tensor, step_scale: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        death = proprio[..., feeling.INTEGRITY_IDX] <= self.via_i_lethal + 1e-3
+        if self.death_terminal:
+            target = (~death).float()
+        elif self.blackout in ("priced", "suspended"):
+            target = torch.ones_like(step_scale)
+        else:
+            target = (proprio[..., feeling.ENERGY_IDX] > 0.01).float()
+        if self.blackout == "suspended":
+            elapsed_discount = torch.pow(
+                torch.full_like(step_scale, self.gamma),
+                (step_scale - 1.0).clamp_min(0.0),
+            )
+            target = target * elapsed_discount
+        return target, death
+
     def _kind_regions_obs(self, kind_onehot: torch.Tensor) -> torch.Tensor:
         """Presence-combo region from real rays: is anything alive in view?"""
         has_robot = kind_onehot[..., RAY_KIND_ROBOT].amax(-1) > 0.5
@@ -959,13 +1057,35 @@ class DreamerBrain(Brain):
                 via_after = self._viability(outcome_proprio)
                 r_viability = self.via_scale * (via_before - via_after)
                 r_viability = r_viability - self.via_floor * via_after
+                if self.wellbeing_on:
+                    r_viability = r_viability + feeling.wellbeing(
+                        via_after,
+                        drive_after,
+                        weight=self.wellbeing_weight,
+                        barrier_cap=self.via_barrier_cap,
+                        comfort_decay=self.wellbeing_comfort_decay,
+                    )
             else:
                 r_viability = torch.zeros_like(r_comfort)
+            if self.pain_on:
+                if self.wm.head_damage is None:
+                    raise RuntimeError("pain-enabled world model has no damage head")
+                damage_probability = torch.sigmoid(
+                    self.wm.head_damage(outcome_feat).squeeze(-1).float()
+                )
+                integrity_loss = (
+                    policy_proprio[..., feeling.INTEGRITY_IDX]
+                    - outcome_proprio[..., feeling.INTEGRITY_IDX]
+                ).clamp_min(0.0)
+                r_pain = -self.pain_weight * damage_probability * integrity_loss
+            else:
+                r_pain = torch.zeros_like(r_comfort)
         else:
             # Backward-compatible ablation: this head was trained on the sum
             # of comfort and viability, so keep it in one channel.
             r_comfort = self.twohot.decode(self.wm.head_reward(outcome_feat))
             r_viability = torch.zeros_like(r_comfort)
+            r_pain = torch.zeros_like(r_comfort)
         if self.curiosity_mode == "lp":
             if self.lp_partition == "latent":
                 idx = self.regions.assign(policy_feat)
@@ -1013,21 +1133,41 @@ class DreamerBrain(Brain):
                 # imagining states that shut a gate — which, lived, drains
                 # the pressure.
                 bored = bored * self._boredom_pressure
-        cont = torch.sigmoid(self.wm.head_cont(outcome_feat).squeeze(-1))
+        cont = self._imagination_continuation(outcome_feat, outcome_proprio)
         fear = self.fear_weight * torch.log(cont.clamp_min(1e-6))
         skill = torch.zeros_like(r_comfort) if skill_reward is None else skill_reward
-        components = torch.stack(
-            [
-                self.w_homeostasis * r_comfort,
-                self.w_homeostasis * r_viability,
-                self.w_curiosity * r_cur,
-                -bored,
-                fear,
-                self.skill_weight * skill,
-            ],
-            dim=-1,
-        )
+        component_values = [
+            self.w_homeostasis * r_comfort,
+            self.w_homeostasis * r_viability,
+            self.w_curiosity * r_cur,
+            -bored,
+            fear,
+            self.skill_weight * skill,
+        ]
+        if self.pain_on:
+            component_values.append(self.w_homeostasis * r_pain)
+        components = torch.stack(component_values, dim=-1)
         return components, r_cur, bored
+
+    def _imagination_continuation(
+        self,
+        outcome_feat: torch.Tensor,
+        outcome_proprio: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Learned continuation constrained by exact predicted bodily boundaries."""
+        cont = torch.sigmoid(self.wm.head_cont(outcome_feat).squeeze(-1).float())
+        proprio = (
+            self.wm.head_proprio(outcome_feat)
+            if outcome_proprio is None
+            else outcome_proprio
+        )
+        if self.death_terminal:
+            alive = proprio[..., feeling.INTEGRITY_IDX] > self.via_i_lethal + 1e-3
+            cont = cont * alive.to(cont.dtype)
+        if self.blackout == "suspended":
+            conscious = proprio[..., feeling.ENERGY_IDX] > self.via_e_lethal + 1e-3
+            cont = cont * conscious.to(cont.dtype)
+        return cont
 
     def _imagination_reward(
         self,
@@ -1154,27 +1294,41 @@ class DreamerBrain(Brain):
                 .sum(-1)
             )
             loss_proprio = F.mse_loss(pred_proprio.float(), b["proprio"], reduction="none").sum(-1)
-            homeo_drive = self._homeostasis(b["events"], b["proprio"], b["first"])
+            reward_break = self._reward_discontinuity(b["first"], b["wake"])
+            homeo_drive = self._homeostasis(b["events"], b["proprio"], reward_break)
             # The viability barrier is priced through the same reward head as
             # the comfort drive; separate forensic channels show which paid.
             if self.via_on:
-                via = self._viability_reward(b["proprio"], b["first"])
+                via = self._viability_reward(b["proprio"], reward_break)
             else:
                 via = torch.zeros_like(homeo_drive)
-            homeo = homeo_drive + via
+            pain = self._pain_reward(b["events"], b["proprio"], reward_break)
+            homeo = homeo_drive + via + pain
             reward_logits = self.wm.head_reward(feat)
             loss_reward = self.twohot.loss(reward_logits, homeo)
             if self.spike_loss_weight > 0.0:
                 spike_w = (homeo.abs() > self.prioritize_threshold).float()
                 loss_reward = loss_reward * (1.0 + self.spike_loss_weight * spike_w)
-            if self.death_terminal:
-                cont_target = (b["proprio"][..., 6] > self.via_i_lethal + 1e-3).float()
-            elif self.blackout == "priced":
-                cont_target = torch.ones_like(homeo)
-            else:
-                cont_target = (b["proprio"][..., 5] > 0.01).float()
+            cont_target, death_target = self._continuation_target(
+                b["proprio"], b["step_scale"]
+            )
             cont_logits = self.wm.head_cont(feat).squeeze(-1).float()
             loss_cont_raw, loss_cont = self._continuation_loss(cont_logits, cont_target)
+            loss_damage = torch.zeros_like(loss_cont)
+            if self.pain_on:
+                if self.wm.head_damage is None:
+                    raise RuntimeError("pain-enabled world model has no damage head")
+                damage_logits = self.wm.head_damage(feat).squeeze(-1).float()
+                damage_target = b["events"][..., 1]
+                loss_damage = F.binary_cross_entropy_with_logits(
+                    damage_logits, damage_target, reduction="none"
+                )
+                damage_weight = torch.where(
+                    damage_target > 0.5,
+                    torch.full_like(damage_target, self.pain_event_loss_weight),
+                    torch.ones_like(damage_target),
+                )
+                loss_damage = loss_damage * damage_weight
             loss_kl = self.wm.dynamics.kl_loss(post, prior)
 
             # --- Plan2Explore ensemble: predict the next observation embedding.
@@ -1190,7 +1344,14 @@ class DreamerBrain(Brain):
             loss_ens = (ens_preds.float() - ens_target).pow(2).mean(-1).mean(0)
 
             model_loss = (
-                loss_depth + loss_rgb + loss_kind + loss_proprio + loss_reward + loss_cont + loss_kl
+                loss_depth
+                + loss_rgb
+                + loss_kind
+                + loss_proprio
+                + loss_reward
+                + loss_cont
+                + loss_damage
+                + loss_kl
             ).float().mean() + loss_ens.float().mean()
             l2_dist = 0.0
             if self.l2_init_weight > 0:
@@ -1288,7 +1449,8 @@ class DreamerBrain(Brain):
 
         with self.precision.autocast(), torch.profiler.record_function("learn/imagination_forward"):
             img_feats, img_outcomes = [], []
-            img_logps, img_ents, img_manager_ents, img_actions, img_skills = (
+            img_logps, img_ents, img_manager_ents, img_actions, img_stds, img_skills = (
+                [],
                 [],
                 [],
                 [],
@@ -1309,7 +1471,7 @@ class DreamerBrain(Brain):
                     if imagined_skill is None:
                         raise RuntimeError("temporal skill manager did not select an intent")
                 dist_cont, dist_grip = self._policy_dists(f_i, skill=imagined_skill)
-                a_cont = dist_cont.sample()
+                a_cont = dist_cont.sample_for_reinforce()
                 a_grip = dist_grip.sample()
                 logp = dist_cont.log_prob(a_cont) + dist_grip.log_prob(a_grip) + manager_logp
                 ent = dist_cont.entropy() + dist_grip.entropy()
@@ -1319,6 +1481,7 @@ class DreamerBrain(Brain):
                 img_ents.append(ent)
                 img_manager_ents.append(manager_ent)
                 img_actions.append(a_vec)
+                img_stds.append(dist_cont.std)
                 if imagined_skill is not None:
                     img_skills.append(imagined_skill)
                 with torch.no_grad():
@@ -1330,6 +1493,7 @@ class DreamerBrain(Brain):
             img_ent = torch.stack(img_ents)
             img_manager_ent = torch.stack(img_manager_ents)
             img_action = torch.stack(img_actions)
+            img_std = torch.stack(img_stds)
 
             with torch.no_grad():
                 imagined_skill_reward = torch.zeros_like(img_logp)
@@ -1348,7 +1512,7 @@ class DreamerBrain(Brain):
                     skill_reward=imagined_skill_reward,
                 )
                 reward = components if self.vector_critic else components.sum(-1)
-                cont = torch.sigmoid(self.wm.head_cont(img_outcome).squeeze(-1).float())
+                cont = self._imagination_continuation(img_outcome)
                 discount = self.gamma * cont
                 value_ema = self._critic_value(self.critic_ema, img_feat)
                 returns = torch.zeros_like(value_ema)
@@ -1424,11 +1588,23 @@ class DreamerBrain(Brain):
             "homeo_spike_frac": float((homeo > 0.1).float().mean()),
             "loss_reward": float(loss_reward.detach().mean()),
             "loss_cont": float(loss_cont_raw.detach().mean()),
-            "terminal_frac": float((cont_target < 0.5).float().mean()),
+            "terminal_frac": float(death_target.float().mean()),
+            "elapsed_discount_frac": float(
+                ((cont_target < 1.0) & ~death_target).float().mean()
+            ),
             "value": float(value.mean()),
             "loss_critic": float(loss_critic.detach()),
             "loss_actor": float(loss_actor.detach()),
             "entropy": float(img_ent.detach().mean()),
+            "policy_cont_std_mean": float(img_std.detach().mean()),
+            "policy_cont_std_max": float(img_std.detach().max()),
+            "policy_action_abs_mean": float(img_action[..., :CONT_DIM].detach().abs().mean()),
+            "policy_action_saturation_frac": float(
+                (img_action[..., :CONT_DIM].detach().abs() > 0.95).float().mean()
+            ),
+            "policy_rest_sample_frac": float(
+                (img_action[..., :2].detach().abs().amax(-1) < 0.1).float().mean()
+            ),
             "updates": float(self._updates),
             "act_steps": float(self._act_steps),
             "train_ratio_eff": float(self._updates / max(1, self._act_steps)),
@@ -1442,17 +1618,36 @@ class DreamerBrain(Brain):
         }
         with torch.no_grad():
             cont_probability = torch.sigmoid(cont_logits)
-            terminal = cont_target < 0.5
-            alive = ~terminal
-            if bool(terminal.any()):
-                self._metrics["cont_terminal"] = float(cont_probability[terminal].mean())
-            if bool(alive.any()):
-                self._metrics["cont_alive"] = float(cont_probability[alive].mean())
+            if bool(death_target.any()):
+                self._metrics["cont_terminal"] = float(
+                    cont_probability[death_target].mean()
+                )
+            ordinary_alive = (~death_target) & (b["step_scale"] <= 1.0)
+            if bool(ordinary_alive.any()):
+                self._metrics["cont_alive"] = float(cont_probability[ordinary_alive].mean())
+            elapsed_transition = (~death_target) & (b["step_scale"] > 1.0)
+            if bool(elapsed_transition.any()):
+                self._metrics["cont_elapsed"] = float(
+                    cont_probability[elapsed_transition].mean()
+                )
         if self.vector_critic:
             for index, name in enumerate(self.affect_names):
                 self._metrics[f"value_{name}"] = float(value_components[..., index].mean())
                 self._metrics[f"return_{name}"] = float(returns[..., index].mean())
                 self._metrics[f"affect_{name}"] = float(components[..., index].mean())
+        if self.pain_on:
+            self._metrics["reward_pain"] = float(pain.mean())
+            self._metrics["loss_damage"] = float(loss_damage.detach().mean())
+            damage_probability = torch.sigmoid(damage_logits.detach())
+            damaged = b["events"][..., 1] > 0.5
+            if bool(damaged.any()):
+                self._metrics["damage_probability_positive"] = float(
+                    damage_probability[damaged].mean()
+                )
+            if bool((~damaged).any()):
+                self._metrics["damage_probability_negative"] = float(
+                    damage_probability[~damaged].mean()
+                )
         if isinstance(self.actor, TemporalSkillPolicy):
             self._metrics.update(
                 {
@@ -1486,6 +1681,15 @@ class DreamerBrain(Brain):
             self._metrics["reward_viability"] = float(via.mean())
             self._metrics["viability_level"] = float(self._viability(b["proprio"]).mean())
             self._metrics["viability_max"] = float(self._viability(b["proprio"]).max())
+            if self.wellbeing_on:
+                wellbeing = feeling.wellbeing(
+                    self._viability(b["proprio"]),
+                    self._drive_level(b["proprio"]),
+                    weight=self.wellbeing_weight,
+                    barrier_cap=self.via_barrier_cap,
+                    comfort_decay=self.wellbeing_comfort_decay,
+                )
+                self._metrics["wellbeing"] = float(wellbeing.mean())
         if self.curiosity_mode == "lp":
             self._metrics["lp_reward"] = lp_reward_mean
             self._metrics["lp_regions"] = float(self.lp.regions_seen())
@@ -1529,6 +1733,10 @@ class DreamerBrain(Brain):
             out["life_return_homeo"] = self._life_return_homeo
             if self.via_on:
                 out["life_return_via"] = self._life_return_via
+                if self.wellbeing_on:
+                    out["life_return_wellbeing"] = self._life_return_via
+            if self.pain_on:
+                out["life_return_pain"] = self._life_return_pain
         if self.async_inference:
             out["inference_lag_updates"] = float(self._updates - self._published_updates)
         return out
@@ -1541,8 +1749,10 @@ class DreamerBrain(Brain):
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
         self._prev_drive = None
         self._prev_via = None
+        self._prev_integrity = None
         self._life_return_homeo = 0.0
         self._life_return_via = 0.0
+        self._life_return_pain = 0.0
         self._stream_first = True
         self._stream_wake = False
         self._step_scale = 1.0
@@ -1556,15 +1766,22 @@ class DreamerBrain(Brain):
         recurrent state still resets (the mind was off) but _prev_drive
         survives and the wake step is NOT marked as a stream break, so the
         gap's real drive delta enters both the replayed reward and the
-        salience chain — the blackout becomes the one visible transition
-        that reward-aware replay can keep feeding to the reward head.
+        salience chain. suspended preserves elapsed-time context but severs
+        felt deltas: an unconscious interval earns no reward or pain.
         """
-        del dormant_steps
+        if dormant_steps < 0:
+            raise ValueError("dormant_steps cannot be negative")
         if self.blackout == "cut":
             self.reset_stream()
             return
         self.h, self.z = self.wm.dynamics.initial(1, self.device)
         self.last_action = torch.zeros(1, ACTION_DIM, device=self.device)
+        if self.blackout == "suspended":
+            self._prev_drive = None
+            self._prev_via = None
+            self._prev_integrity = None
+            self._stream_wake = True
+            self._step_scale = float(dormant_steps + 1)
         self._active_skill = -1
         self._skill_remaining = 0
 
@@ -1612,17 +1829,28 @@ class DreamerBrain(Brain):
             if self.homeostasis_mode == "drive":
                 tensors = self._obs_to_tensors(dead_obs)
                 d = float(self._drive_level(tensors["proprio"])[0])
-                prev_d = None if first else self._prev_drive
+                reward_break = first or (dormant and self.blackout == "suspended")
+                prev_d = None if reward_break else self._prev_drive
                 if prev_d is not None:
                     salience = abs(self.drive_scale * (prev_d - d))
                     self._life_return_homeo += self.drive_scale * (prev_d - d)
                 self._life_return_homeo -= self.drive_level_penalty * d
                 if self.via_on:
                     v = float(self._viability(tensors["proprio"])[0])
-                    prev_v = None if first else self._prev_via
+                    prev_v = None if reward_break else self._prev_via
                     if prev_v is not None:
                         salience += abs(self.via_scale * (prev_v - v)) + self.via_floor * v
                     self._life_return_via -= self.via_floor * v
+                    if self.wellbeing_on:
+                        self._life_return_via += float(
+                            feeling.wellbeing(
+                                tensors["proprio"].new_tensor(v),
+                                tensors["proprio"].new_tensor(d),
+                                weight=self.wellbeing_weight,
+                                barrier_cap=self.via_barrier_cap,
+                                comfort_decay=self.wellbeing_comfort_decay,
+                            )
+                        )
         with self._experience_lock:
             self.buffer.add(
                 dead_obs,
@@ -1664,8 +1892,25 @@ class DreamerBrain(Brain):
                 v_red = torch.zeros_like(V)
                 v_red[1:] = V[:-1] - V[1:]
                 spike = spike + (self.via_scale * v_red).abs() + self.via_floor * V
+            discontinuity = torch.as_tensor(
+                self.buffer.first[:n].astype(np.float32), device=self.device
+            )
+            if self.blackout == "suspended":
+                discontinuity = torch.maximum(
+                    discontinuity,
+                    torch.as_tensor(
+                        self.buffer.wake[:n].astype(np.float32), device=self.device
+                    ),
+                )
+            if self.pain_on:
+                events = torch.as_tensor(
+                    self.buffer.events[:n].astype(np.float32), device=self.device
+                )
+                spike = spike + self.pain_weight * feeling.acute_integrity_loss(
+                    proprio, events[..., 1], discontinuity
+                )
             sal = spike.cpu().numpy()
-            sal[self.buffer.first[:n] == 1] = 0.0
+            sal[discontinuity.cpu().numpy() > 0.5] = 0.0
         else:
             sal = self.buffer.events[:n, :2].astype(np.float32).sum(-1)
         self.buffer.salience[:n] = sal.astype(np.float16)
@@ -1707,8 +1952,10 @@ class DreamerBrain(Brain):
             # silently cut a blackout the priced mode should have seen.
             "prev_drive": self._prev_drive,
             "prev_via": self._prev_via,
+            "prev_integrity": self._prev_integrity,
             "life_return_homeo": self._life_return_homeo,
             "life_return_via": self._life_return_via,
+            "life_return_pain": self._life_return_pain,
             "stream_first": self._stream_first,
             "stream_wake": self._stream_wake,
             "step_scale": self._step_scale,
@@ -1805,8 +2052,11 @@ class DreamerBrain(Brain):
         # Guarded: pre-viability checkpoints carry no barrier/return state.
         prev_via = state.get("prev_via")
         self._prev_via = float(prev_via) if prev_via is not None else None
+        prev_integrity = state.get("prev_integrity")
+        self._prev_integrity = float(prev_integrity) if prev_integrity is not None else None
         self._life_return_homeo = float(state.get("life_return_homeo", 0.0))
         self._life_return_via = float(state.get("life_return_via", 0.0))
+        self._life_return_pain = float(state.get("life_return_pain", 0.0))
         self._stream_first = bool(state.get("stream_first", False))
         self._stream_wake = bool(state.get("stream_wake", False))
         self._step_scale = float(state.get("step_scale", 1.0))

@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from gol_brains.dreamer.networks import DiscreteDist, TanhNormal, mlp
+from gol_brains.dreamer.networks import DiscreteDist, TanhNormal, bounded_policy_std, mlp
 
 
 class TemporalSkillController(nn.Module):
@@ -54,7 +54,7 @@ class TemporalSkillController(nn.Module):
         mean = out[..., : self.cont_dim]
         raw_std = out[..., self.cont_dim : 2 * self.cont_dim]
         grip_logits = out[..., 2 * self.cont_dim :]
-        std = F.softplus(raw_std) + 0.1
+        std = bounded_policy_std(raw_std)
         probs = torch.softmax(grip_logits, dim=-1)
         probs = 0.99 * probs + 0.01 / self.grip_modes
         return TanhNormal(torch.tanh(mean), std), DiscreteDist(probs)

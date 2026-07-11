@@ -427,6 +427,8 @@ class World:
     def _ingest(self, robot: Robot, toxic: bool, **evdata: Any) -> None:
         """A meal lands in a robot: nourishing or poisonous, eaten or fed."""
         eco = self.cfg.economy
+        energy_before = robot.energy
+        integrity_before = robot.integrity
         if toxic:
             banked = min(eco.energy_max, robot.energy + eco.toxic_energy)
             robot.energy_ledger["eaten"] += banked - robot.energy
@@ -436,13 +438,29 @@ class World:
             robot.events[EV_ATE] = 1.0
             robot.events[EV_TOOK_DAMAGE] = 1.0
             self._cry(robot, HURT_CRY, self.cfg.sounds.hurt_cry_ticks)
-            self._emit("poisoned", robot, **evdata)
+            self._emit(
+                "poisoned",
+                robot,
+                energy_before=round(energy_before, 4),
+                energy_after=round(robot.energy, 4),
+                integrity_before=round(integrity_before, 4),
+                integrity_after=round(robot.integrity, 4),
+                **evdata,
+            )
         else:
             banked = min(eco.energy_max, robot.energy + eco.eat_energy)
             robot.energy_ledger["eaten"] += banked - robot.energy
             robot.energy = banked
             robot.events[EV_ATE] = 1.0
-            self._emit("eat", robot, **evdata)
+            self._emit(
+                "eat",
+                robot,
+                energy_before=round(energy_before, 4),
+                energy_after=round(robot.energy, 4),
+                integrity_before=round(integrity_before, 4),
+                integrity_after=round(robot.integrity, 4),
+                **evdata,
+            )
 
     # ---------------------------------------------------------------- sounds
 
@@ -526,6 +544,7 @@ class World:
             drain *= eco.exhaustion_drain_mult
             robot.integrity = max(0.0, robot.integrity - eco.exhaustion_integrity_drain)
             robot.ledger["exhaustion"] += eco.exhaustion_integrity_drain
+            robot.events[EV_TOOK_DAMAGE] = 1.0
         if robot.in_water:
             parts["water"] = drain * (eco.water_drain_mult - 1.0)
             drain *= eco.water_drain_mult
@@ -534,9 +553,16 @@ class World:
         robot.energy = max(0.0, robot.energy - drain)
         if costs["fall_damage"] > 0:
             fall = eco.fall_damage_per_block * costs["fall_damage"]
+            integrity_before = robot.integrity
             robot.integrity = max(0.0, robot.integrity - fall)
             robot.ledger["fall"] += fall
-            self._emit("fall_damage", robot, blocks=round(costs["fall_damage"], 2))
+            self._emit(
+                "fall_damage",
+                robot,
+                blocks=round(costs["fall_damage"], 2),
+                integrity_before=round(integrity_before, 4),
+                integrity_after=round(robot.integrity, 4),
+            )
             self._cry(robot, HURT_CRY, self.cfg.sounds.hurt_cry_ticks)
         # Chronic wear, and repair funded by energy surplus. Repair efficiency
         # halves per senescence half-life of age: young bodies mend, old ones
@@ -567,6 +593,8 @@ class World:
                 robot.energy_ledger["repair"] += amount * eco.repair_energy_per_point
         if robot.energy <= 0.0 and not robot.dormant:
             robot.dormant = True
+            robot.drive[:] = 0.0
+            robot.signal[:] = 0.0
             self._emit("hibernate", robot)
 
     def _drop_scrap(self, robot: Robot) -> None:

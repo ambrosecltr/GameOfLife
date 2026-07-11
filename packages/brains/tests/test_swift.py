@@ -14,9 +14,12 @@ import torch
 from gol_brains.dreamer.brain import ACTION_DIM, DreamerBrain, _migrate_ensemble_state
 from gol_brains.dreamer.buffer import ReplayBuffer
 from gol_brains.dreamer.networks import (
+    POLICY_MAX_STD,
+    POLICY_MIN_STD,
     DiscreteDist,
     EnsembleMLP,
     TanhNormal,
+    bounded_policy_std,
     mlp,
     sample_categorical,
 )
@@ -121,6 +124,28 @@ def test_tanh_normal_matches_torch_distributions() -> None:
     ref_ent = base.entropy().sum(-1)  # type: ignore[no-untyped-call]
     torch.testing.assert_close(ours.entropy(), ref_ent, atol=1e-5, rtol=1e-5)
     assert ours.sample().abs().max() <= 1.0
+
+
+def test_policy_standard_deviation_is_smoothly_bounded() -> None:
+    raw = torch.tensor([-100.0, 0.0, 100.0])
+    std = bounded_policy_std(raw)
+    assert float(std.min()) >= POLICY_MIN_STD
+    assert float(std.max()) <= POLICY_MAX_STD
+    assert std[1] == pytest.approx((POLICY_MIN_STD + POLICY_MAX_STD) / 2)
+
+
+def test_reinforce_sample_is_detached_but_log_prob_still_trains_policy() -> None:
+    torch.manual_seed(21)
+    mean = torch.tensor([[0.2]], requires_grad=True)
+    std = torch.tensor([[0.5]], requires_grad=True)
+    dist = TanhNormal(mean, std)
+    action = dist.sample_for_reinforce()
+    assert not action.requires_grad
+
+    (-dist.log_prob(action).sum()).backward()  # type: ignore[no-untyped-call]
+
+    assert mean.grad is not None and float(mean.grad.abs().sum()) > 0.0
+    assert std.grad is not None and float(std.grad.abs().sum()) > 0.0
 
 
 def test_discrete_dist_matches_torch_categorical() -> None:

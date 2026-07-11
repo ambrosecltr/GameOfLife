@@ -3,12 +3,16 @@
 import dataclasses
 import pickle
 from pathlib import Path
+from typing import Any
 
+import pytest
+from gol_brains.base import Brain
 from gol_runtime.config import PopulationConfig, RunConfig
 from gol_runtime.loop import SimLoop
 from gol_runtime.scheduler import Population
 from gol_world import persistence
 from gol_world.config import EconomyConfig, WorldConfig
+from gol_world.interface import Action
 from gol_world.world import World
 
 CFG = WorldConfig(
@@ -52,6 +56,57 @@ def test_death_triggers_respawn(tmp_path: Path) -> None:
     assert len(world.robots) == 3
     assert "walker_003" in population.brains
     assert "walker_001" not in population.brains
+
+
+def test_descendant_inheritance_creates_a_distinct_brain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InheritingBrain(Brain):
+        def __init__(self) -> None:
+            self.learned = 0
+            self.inherited_from: int | None = None
+
+        def act(self, obs: Any) -> Action:
+            del obs
+            return Action.idle()
+
+        def state_dict(self) -> dict[str, Any]:
+            return {"learned": self.learned}
+
+        def inherit(self, state: dict[str, Any]) -> None:
+            self.inherited_from = int(state["learned"])
+            self.learned = self.inherited_from
+
+    monkeypatch.setattr(
+        "gol_runtime.scheduler.build_brain", lambda spec, seed, device="cpu": InheritingBrain()
+    )
+    run = RunConfig(
+        checkpoint_interval_ticks=100_000,
+        population=PopulationConfig(
+            target=1,
+            respawn_delay_ticks=5,
+            inherit_weights="descendant",
+            mix=({"brain": {"kind": "random_walker"}, "count": 1},),
+        ),
+    )
+    world = World.new(WorldConfig(seed=25, size=(64, 64, 40), day_length_ticks=1000))
+    population = Population(world, run)
+    parent = population.brains["walker_000"]
+    assert isinstance(parent, InheritingBrain)
+    parent.learned = 73
+    population.act_step(world)
+    del world.robots["walker_000"]
+    population.on_world_tick(world)
+    world.tick = 5
+    population.act_step(world)
+
+    child = population.brains["walker_001"]
+    assert isinstance(child, InheritingBrain)
+    assert child is not parent
+    assert child.inherited_from == 73
+    inheritance = next(event for event in world.consume_events() if event["kind"] == "inherit")
+    assert inheritance["parent"] == "walker_000"
+    assert inheritance["robot"] == "walker_001"
 
 
 def test_wake_from_dormancy_calls_wake_hook() -> None:
@@ -200,3 +255,4 @@ def test_checkpoint_reconciles_death_between_act_boundaries() -> None:
     assert "__lineage__random_walker__0" in blobs
     scheduler = pickle.loads(blobs["__scheduler__"])
     assert (55, "random_walker") in scheduler["respawn_queue"]
+    assert scheduler["stash_parent_ids"] == {"random_walker": (rid,)}

@@ -29,8 +29,12 @@ class DevicesConfig:
 class PopulationConfig:
     target: int = 8
     respawn_delay_ticks: int = 1200
-    inherit_weights: str = "none"  # none | random_living | lineage
+    inherit_weights: str = "none"  # none | random_living | lineage | descendant
     mix: tuple[dict[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.inherit_weights not in ("none", "random_living", "lineage", "descendant"):
+            raise ValueError(f"unknown population.inherit_weights: {self.inherit_weights!r}")
 
 
 @dataclass(frozen=True)

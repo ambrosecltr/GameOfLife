@@ -371,6 +371,23 @@ def test_aion_wake_preserves_context_and_records_elapsed_transition() -> None:
     assert not brain._stream_wake and brain._step_scale == 1.0
 
 
+def test_suspended_aion_wake_preserves_slow_context_but_severs_affect() -> None:
+    cfg = {**TINY_AION, "reward": {"blackout": "suspended"}}
+    brain = AionBrain(cfg, seed=19)
+    rng = np.random.default_rng(19)
+    brain.act(fake_obs(rng))
+    assert brain._prev_drive is not None
+    before = brain.h.clone()
+
+    brain.wake(dormant_steps=100)
+
+    torch.testing.assert_close(brain.h, brain.s5.reset_fast(before))
+    assert brain._prev_drive is None
+    assert brain._prev_via is None
+    assert brain._prev_integrity is None
+    assert brain._stream_wake and brain._step_scale == 101.0
+
+
 def test_aion_new_body_clears_all_live_state() -> None:
     brain = AionBrain(TINY_AION, seed=11)
     rng = np.random.default_rng(11)
@@ -392,6 +409,45 @@ def test_dormant_death_replay_carries_blackout_duration() -> None:
     brain.record_death(last, dormant=True, dormant_steps=7)
     assert brain.buffer.wake[1] == 1
     assert brain.buffer.step_scale[1] == pytest.approx(8.0)
+
+
+def test_tiny_aion_02_stack_learns_and_roundtrips() -> None:
+    cfg = {
+        **TINY_AION,
+        "reward": {
+            "homeostasis": "drive",
+            "imagined_homeostasis": "proprio",
+            "blackout": "suspended",
+            "death_terminal": True,
+            "viability": {
+                "scale": 0.0,
+                "floor": 0.0,
+                "barrier_cap": 4.0,
+                "total_cap": 4.0,
+            },
+            "wellbeing": {"weight": 0.25, "comfort_decay": 1.0},
+            "pain": {"weight": 5.0, "event_loss_weight": 8.0},
+        },
+        "actor_critic": {"imagination_horizon": 3, "vector_critic": True},
+        "temporal_skills": {"enabled": False},
+    }
+    brain = AionBrain(cfg, seed=20)
+    rng = np.random.default_rng(20)
+    for index in range(24):
+        obs = fake_obs(rng)
+        if index % 6 == 0:
+            obs["events"][1] = 1.0
+        brain.act(obs)
+    metrics = brain.learn()
+    assert metrics is not None
+    assert np.isfinite(metrics["wellbeing"])
+    assert np.isfinite(metrics["affect_pain"])
+    assert np.isfinite(metrics["loss_damage"])
+
+    restored = AionBrain(cfg, seed=21)
+    restored.load_state_dict(brain.state_dict())
+    assert restored.affect_names == brain.affect_names
+    assert restored.experience_count() == brain.experience_count()
 
 
 def test_aion_learns_and_roundtrips_checkpoint() -> None:

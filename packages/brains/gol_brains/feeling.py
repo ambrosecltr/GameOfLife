@@ -104,3 +104,46 @@ def reduction(level: torch.Tensor, first: torch.Tensor | None = None) -> torch.T
     if first is not None:
         red = red * (1.0 - first)
     return red
+
+
+def wellbeing(
+    viability_level: torch.Tensor,
+    comfort_drive: torch.Tensor,
+    *,
+    weight: float,
+    barrier_cap: float,
+    comfort_decay: float,
+) -> torch.Tensor:
+    """Positive valence of a regulated living body.
+
+    Viability supplies the lethal-boundary geometry while comfort distinguishes
+    merely non-lethal states from fed, intact, rested ones. The result is bounded
+    in ``[0, weight]``: maximal at the bodily setpoint and zero at the capped
+    lethal boundary.
+    """
+    if barrier_cap <= 0.0:
+        raise ValueError("wellbeing barrier_cap must be positive")
+    safe = (1.0 - viability_level / barrier_cap).clamp(0.0, 1.0)
+    regulated = torch.exp(-comfort_decay * comfort_drive.clamp_min(0.0))
+    return weight * safe * regulated
+
+
+def acute_integrity_loss(
+    proprio: torch.Tensor,
+    damage_event: torch.Tensor,
+    discontinuity: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Integrity lost on transitions explicitly marked as acute damage.
+
+    Chronic wear and dormant decay still lower bodily wellbeing, but do not
+    become a constant pain signal. Stream starts and unconscious wake gaps have
+    no experienced predecessor and therefore cannot manufacture pain.
+    """
+    loss = torch.zeros_like(damage_event)
+    loss[..., 1:] = (
+        proprio[..., :-1, INTEGRITY_IDX] - proprio[..., 1:, INTEGRITY_IDX]
+    ).clamp_min(0.0)
+    loss = loss * (damage_event > 0.5).to(loss.dtype)
+    if discontinuity is not None:
+        loss = loss * (1.0 - discontinuity)
+    return loss

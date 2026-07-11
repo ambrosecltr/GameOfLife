@@ -42,7 +42,10 @@ def test_eating_restores_energy_and_depletes_bush() -> None:
     assert abs(robot.energy - (40.0 + CFG.economy.eat_energy)) < 0.01
     assert robot.events[EV_ATE] == 1.0
     events = world.consume_events()
-    assert any(e["kind"] == "eat" for e in events)
+    eat = next(e for e in events if e["kind"] == "eat")
+    assert eat["energy_before"] == 40.0
+    assert eat["energy_after"] == 80.0
+    assert eat["integrity_before"] == eat["integrity_after"] == 100.0
     # The bush is depleted and queued to regrow.
     assert (world.grid.blocks == Block.BUSH_RIPE).sum() >= 0
     assert any(e["kind"] == "spawn" for e in events)
@@ -66,10 +69,18 @@ def test_energy_zero_hibernates_then_dies_dropping_scrap() -> None:
     rid = world.spawn_robot("bot_000", "test").id
     robot = world.robots[rid]
     robot.energy = 0.01
-    world.apply_action(rid, drive_action())
+    world.apply_action(
+        rid,
+        Action(
+            drive=np.array([1.0, 0.0], dtype=np.float32),
+            signal=np.array([1.0, -1.0], dtype=np.float32),
+        ),
+    )
     for _ in range(5):
         world.step()
     assert robot.dormant
+    np.testing.assert_array_equal(robot.drive, np.zeros(2))
+    np.testing.assert_array_equal(robot.signal, np.zeros(2))
     kinds = [e["kind"] for e in world.consume_events()]
     assert "hibernate" in kinds
     # Integrity decays at 1/tick -> death within ~100 more ticks.
@@ -182,7 +193,11 @@ def test_eating_toxic_bush_poisons() -> None:
     assert abs(robot.energy - (40.0 + CFG.economy.toxic_energy)) < 0.01
     assert abs(robot.integrity - (100.0 - CFG.economy.toxic_integrity_damage)) < 0.01
     assert robot.events[EV_ATE] == 1.0 and robot.events[EV_TOOK_DAMAGE] == 1.0
-    assert any(e["kind"] == "poisoned" for e in world.consume_events())
+    poisoned = next(e for e in world.consume_events() if e["kind"] == "poisoned")
+    assert poisoned["energy_before"] == 40.0
+    assert poisoned["energy_after"] == 50.0
+    assert poisoned["integrity_before"] == 100.0
+    assert poisoned["integrity_after"] == 88.0
     assert world.active_sounds()  # the hurt cry is audible
 
 
@@ -295,6 +310,7 @@ def test_exhaustion_bleeds_integrity_and_multiplies_drain() -> None:
         world.step()
     assert robot.fatigue > CFG.economy.exhaustion_threshold
     assert robot.integrity <= start_integrity - 99 * CFG.economy.exhaustion_integrity_drain
+    assert robot.events[EV_TOOK_DAMAGE] == 1.0
     assert any(e["kind"] == "exhausted" for e in world.consume_events())
 
 

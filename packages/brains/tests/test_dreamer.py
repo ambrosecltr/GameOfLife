@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn as nn
+from gol_brains import feeling
 from gol_brains.dreamer.brain import ACTION_DIM, CONT_DIM, DreamerBrain
 from gol_brains.dreamer.networks import TwoHot, symexp, symlog
 from gol_brains.dreamer.rssm import RSSM, RSSMConfig
@@ -216,6 +217,76 @@ VIA = {"scale": 1.0, "energy_safe": 0.25, "integrity_safe": 0.5, "barrier_cap": 
 # The STAGED round-012 operating point: reduction off, the standing tax alone
 # carries the mortality gradient (offline calibration, proposal 003).
 VIA_STAGED = {**VIA, "scale": 0.0, "floor": 1.0}
+
+
+def test_wellbeing_is_bounded_and_tracks_regulation() -> None:
+    viability = torch.tensor([0.0, 1.0, 4.0])
+    drive = torch.tensor([0.0, 0.5, 1.0])
+    value = feeling.wellbeing(
+        viability,
+        drive,
+        weight=0.25,
+        barrier_cap=4.0,
+        comfort_decay=1.0,
+    )
+    assert value[0] == pytest.approx(0.25)
+    assert 0.0 < float(value[1]) < 0.25
+    assert value[2] == pytest.approx(0.0)
+
+
+def test_acute_pain_requires_damage_and_an_experienced_predecessor() -> None:
+    proprio = torch.zeros(1, 4, PROPRIO_DIM)
+    proprio[..., 6] = torch.tensor([1.0, 0.88, 0.76, 0.64])
+    damage = torch.tensor([[0.0, 1.0, 0.0, 1.0]])
+    discontinuity = torch.tensor([[1.0, 0.0, 0.0, 1.0]])
+    loss = feeling.acute_integrity_loss(proprio, damage, discontinuity)
+    torch.testing.assert_close(loss, torch.tensor([[0.0, 0.12, 0.0, 0.0]]))
+
+
+def test_suspended_blackout_discounts_future_by_elapsed_time() -> None:
+    cfg = {
+        **TINY,
+        "reward": {
+            **DRIVE,
+            "blackout": "suspended",
+            "death_terminal": True,
+            "viability": dict(VIA_STAGED),
+        },
+    }
+    brain = DreamerBrain(cfg, seed=17)
+    proprio = torch.zeros(1, 3, PROPRIO_DIM)
+    proprio[..., 6] = torch.tensor([1.0, 1.0, 0.0])
+    scale = torch.tensor([[1.0, 101.0, 1.0]])
+    target, death = brain._continuation_target(proprio, scale)
+    assert target[0, 0] == pytest.approx(1.0)
+    assert float(target[0, 1]) == pytest.approx(brain.gamma**100, rel=1e-5)
+    assert target[0, 2] == pytest.approx(0.0)
+    assert death.tolist() == [[False, False, True]]
+
+
+def test_pain_enabled_brain_has_separate_affect_and_damage_head() -> None:
+    cfg = {
+        **TINY,
+        "reward": {
+            **DRIVE,
+            "imagined_homeostasis": "proprio",
+            "pain": {"weight": 5.0, "event_loss_weight": 8.0},
+        },
+        "actor_critic": {"imagination_horizon": 5, "vector_critic": True},
+    }
+    brain = DreamerBrain(cfg, seed=18)
+    assert brain.affect_names[-1] == "pain"
+    assert brain.wm.head_damage is not None
+    rng = np.random.default_rng(18)
+    for index in range(80):
+        obs = fake_obs(rng)
+        if index % 10 == 0:
+            obs["events"][1] = 1.0
+        brain.act(obs)
+    metrics = brain.learn()
+    assert metrics is not None
+    assert np.isfinite(metrics["loss_damage"])
+    assert np.isfinite(metrics["affect_pain"])
 
 
 def test_viability_barrier_zero_when_safe_rises_toward_floor() -> None:
@@ -473,8 +544,16 @@ def test_learn_returns_metrics_and_updates() -> None:
         "homeo_max",
         "homeo_spike_frac",
         "learn_seconds",
+        "policy_cont_std_mean",
+        "policy_cont_std_max",
+        "policy_action_abs_mean",
+        "policy_action_saturation_frac",
+        "policy_rest_sample_frac",
     ):
         assert key in metrics and np.isfinite(metrics[key])
+    assert 0.1 <= metrics["policy_cont_std_mean"] <= metrics["policy_cont_std_max"] <= 1.0
+    assert 0.0 <= metrics["policy_action_saturation_frac"] <= 1.0
+    assert 0.0 <= metrics["policy_rest_sample_frac"] <= 1.0
     # Pacing counters: 80 acts recorded, 1 update done.
     assert brain.experience_count() == 80
     assert metrics["act_steps"] == 80.0
@@ -868,6 +947,11 @@ class _ProprioFromFeature(nn.Module):
         return feat[..., :PROPRIO_DIM]
 
 
+class _ConstantContinuation(nn.Module):
+    def forward(self, feat: torch.Tensor) -> torch.Tensor:
+        return torch.full((*feat.shape[:-1], 1), 20.0, device=feat.device)
+
+
 def test_imagination_reads_predicted_body_state_directly() -> None:
     cfg = dict(
         TINY,
@@ -888,6 +972,55 @@ def test_imagination_reads_predicted_body_state_directly() -> None:
         affect, _, _ = brain._imagination_affect(before, after, action)
     comfort = affect[..., brain.affect_names.index("comfort")]
     assert float(comfort) > 0.0, "a predicted reduction in hunger must feel beneficial"
+
+
+def test_imagination_includes_regulated_wellbeing_in_viability_affect() -> None:
+    cfg = dict(
+        TINY,
+        reward={
+            "homeostasis": "drive",
+            "imagined_homeostasis": "proprio",
+            "w_curiosity": 0.0,
+            "viability": {"scale": 0.0, "floor": 0.0, "barrier_cap": 4.0},
+            "wellbeing": {"weight": 0.25, "comfort_decay": 1.0},
+        },
+        actor_critic={"imagination_horizon": 5, "vector_critic": True},
+    )
+    brain = DreamerBrain(cfg, seed=47)
+    brain.wm.head_proprio = nn.Sequential(_ProprioFromFeature())
+    regulated = torch.zeros(1, brain.wm.rssm_cfg.feat_dim)
+    regulated[..., 5] = 0.85
+    regulated[..., 6] = 1.0
+    action = torch.zeros(1, ACTION_DIM)
+
+    with torch.no_grad():
+        affect, _, _ = brain._imagination_affect(regulated, regulated, action)
+
+    viability = affect[..., brain.affect_names.index("viability")]
+    assert viability == pytest.approx(torch.tensor([0.25]))
+
+
+def test_imagination_continuation_obeys_predicted_coma_and_death_boundaries() -> None:
+    cfg = dict(
+        TINY,
+        reward={
+            "homeostasis": "drive",
+            "imagined_homeostasis": "proprio",
+            "blackout": "suspended",
+            "death_terminal": True,
+        },
+    )
+    brain = DreamerBrain(cfg, seed=48)
+    brain.wm.head_proprio = nn.Sequential(_ProprioFromFeature())
+    brain.wm.head_cont = nn.Sequential(_ConstantContinuation())
+    states = torch.zeros(3, brain.wm.rssm_cfg.feat_dim)
+    states[:, 5] = torch.tensor([0.8, 0.0, 0.8])
+    states[:, 6] = torch.tensor([1.0, 1.0, 0.0])
+
+    continuation = brain._imagination_continuation(states)
+
+    assert continuation[0] > 0.999
+    assert continuation[1:].tolist() == [0.0, 0.0]
 
 
 def test_terminal_examples_receive_configured_weight() -> None:

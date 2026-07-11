@@ -1,0 +1,44 @@
+# Aion 03 — valid replacement for the invalid Aion 02 implementation run.
+# Two fresh S5 organisms share the matched ecology with four scripted anchors.
+# The scientific configuration is unchanged; only the repaired actor contract
+# distinguishes this run from the intended Aion 02 design.
+
+world_config: configs/world/beta_12_organism.yaml
+
+tick_rate: 20
+act_every: 5
+checkpoint_interval_ticks: 30000
+control_port: 7307
+
+pacing:
+  mode: adaptive
+  debt_policy: backpressure
+  headroom: 0.85
+  min_tick_rate: 1.0
+  max_tick_rate: 1000.0
+  max_debt_updates: 4.0
+  resume_debt_updates: 2.0
+  hysteresis: 0.1
+
+dormancy_acceleration:
+  exact_unpaced: true
+  event_fast_forward: true
+  max_jump_ticks: 100000
+
+devices:
+  inference: cuda:0
+  learning: [cuda:0, cuda:1]
+
+population:
+  target: 6
+  respawn_delay_ticks: 1200
+  inherit_weights: descendant
+  mix:
+    - brain: configs/brain/aion_03_economy.yaml
+      count: 2
+    - brain: { kind: scripted_forager }
+      count: 4
+
+observability:
+  rerun: false
+  metrics_every_ticks: 100

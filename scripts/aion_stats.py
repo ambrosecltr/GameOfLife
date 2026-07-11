@@ -19,6 +19,8 @@ from pathlib import Path
 from statistics import mean
 from typing import Any
 
+import numpy as np
+
 JsonObject = dict[str, Any]
 TEMPERAMENT_KEYS = (
     "w_curiosity",
@@ -78,6 +80,19 @@ def _trend(samples: list[JsonObject], key: str) -> tuple[float, float] | None:
         return None
     width = max(1, len(values) // 4)
     return mean(values[:width]), mean(values[-width:])
+
+
+def _signal_entropy(samples: list[JsonObject], channel: int, bins: int = 16) -> float | None:
+    values = [
+        float(signal[channel])
+        for sample in samples
+        if isinstance((signal := sample.get("signal")), list) and len(signal) > channel
+    ]
+    if not values:
+        return None
+    counts, _ = np.histogram(values, bins=bins, range=(-1.0, 1.0))
+    probabilities = counts[counts > 0] / counts.sum()
+    return float(-(probabilities * np.log(probabilities)).sum() / np.log(bins))
 
 
 def _checkpoint_tick(save: Path) -> int | None:
@@ -163,6 +178,37 @@ def build_report(save: Path, window_ticks: int) -> str:
         )
     if any(float(brains.get(rid, {}).get("act_latched_frac", 0.0)) > 0.0 for rid in aion_ids):
         warnings.append("WATCH: at least one Aion has latched actions")
+    invalid_policy_std = [
+        rid
+        for rid in aion_ids
+        if float(brains.get(rid, {}).get("policy_cont_std_max", 0.0)) > 1.00001
+    ]
+    if invalid_policy_std:
+        warnings.append(
+            "ALERT: continuous policy standard deviation exceeds 1.0 for "
+            + ", ".join(invalid_policy_std)
+        )
+    saturated_policies = [
+        rid
+        for rid in aion_ids
+        if float(brains.get(rid, {}).get("policy_action_saturation_frac", 0.0)) > 0.5
+    ]
+    if saturated_policies:
+        warnings.append(
+            "WATCH: more than half of imagined continuous actions are saturated for "
+            + ", ".join(saturated_policies)
+        )
+    missing_imagined_wellbeing = [
+        rid
+        for rid in aion_ids
+        if float(brains.get(rid, {}).get("wellbeing", 0.0)) > 1e-6
+        and abs(float(brains.get(rid, {}).get("affect_viability", 0.0))) < 1e-8
+    ]
+    if missing_imagined_wellbeing:
+        warnings.append(
+            "ALERT: wellbeing is logged but absent from imagined viability affect for "
+            + ", ".join(missing_imagined_wellbeing)
+        )
     if tick >= 100_000 and not any(event.get("kind") == "eat" for event in aion_events):
         warnings.append("WATCH: no Aion has eaten yet")
     low_vitality = [
@@ -236,6 +282,46 @@ def build_report(save: Path, window_ticks: int) -> str:
             f"pending={_number(brain.get('pending_update_credit'))}  "
             f"inference_lag={_number(brain.get('inference_lag_updates'), 0)} updates"
         )
+        if "policy_cont_std_max" in brain:
+            saturated = float(brain.get("policy_action_saturation_frac", 0.0)) * 100
+            rest_sample = float(brain.get("policy_rest_sample_frac", 0.0)) * 100
+            lines.append(
+                f"    policy std={_number(brain.get('policy_cont_std_mean'), 3)}/"
+                f"{_number(brain.get('policy_cont_std_max'), 3)} mean/max  "
+                f"abs={_number(brain.get('policy_action_abs_mean'), 3)}  "
+                f"saturated={_number(saturated, 1)}%  "
+                f"rest-sample={_number(rest_sample, 1)}%"
+            )
+        if "wellbeing" in brain:
+            lines.append(
+                f"    wellbeing={_number(brain.get('wellbeing'), 4)}  "
+                f"imagined-viability={_number(brain.get('affect_viability'), 4)}  "
+                f"pain={_number(brain.get('reward_pain'), 4)}  "
+                f"cont(alive/wake/death)={_number(brain.get('cont_alive'), 3)}/"
+                f"{_number(brain.get('cont_elapsed'), 3)}/"
+                f"{_number(brain.get('cont_terminal'), 3)}"
+            )
+
+    economy_trends = []
+    for key, label in (
+        ("wellbeing", "wellbeing"),
+        ("affect_viability", "imag viability"),
+        ("affect_curiosity", "imag curiosity"),
+        ("reward_pain", "pain"),
+        ("damage_probability_positive", "damage p+"),
+        ("damage_probability_negative", "damage p-"),
+        ("cont_elapsed", "wake cont"),
+        ("cont_terminal", "death cont"),
+    ):
+        change = _trend(aion_metric_samples, key)
+        if change is not None:
+            economy_trends.append((label, *change))
+    if economy_trends:
+        lines.extend(["", "FELT ECONOMY", "  lifetime trend (first -> last quartile)"])
+        lines.extend(
+            f"  {label:12s}: {first:,.5f} -> {last:,.5f}"
+            for label, first, last in economy_trends
+        )
 
     lines.extend(["", "SURVIVAL & BODIES"])
     events_by_robot: dict[str, Counter[str]] = defaultdict(Counter)
@@ -274,6 +360,8 @@ def build_report(save: Path, window_ticks: int) -> str:
         lines.append(
             "  temperaments, not genetic selection or generational gene drift."
         )
+    elif inheritance == "descendant" and reproduction == "respawn":
+        lines.append("  Each body is one organism; learned state passes to a distinct descendant.")
     elif reproduction == "budding":
         lines.append("  Budding is active; temperament mutation can create heritable drift.")
     else:
@@ -297,6 +385,16 @@ def build_report(save: Path, window_ticks: int) -> str:
         for event in recent_events
         if spawn_kinds.get(str(event.get("robot", ""))) == "aion"
     ]
+    recent_safe_meals = sum(event.get("kind") == "eat" for event in recent_aion_events)
+    recent_toxic_meals = sum(event.get("kind") == "poisoned" for event in recent_aion_events)
+    recent_meals = recent_safe_meals + recent_toxic_meals
+    standing_food = int(latest.get("ripe_bushes", 0)) + int(latest.get("toxic_bushes", 0))
+    if recent_meals > 0 and standing_food > 0:
+        lines.append(
+            f"  toxin discrimination: ingested={recent_toxic_meals / recent_meals:.1%}  "
+            f"available={int(latest.get('toxic_bushes', 0)) / standing_food:.1%}  "
+            f"n={recent_meals}"
+        )
     recent_by_robot: dict[str, Counter[str]] = defaultdict(Counter)
     for event in recent_aion_events:
         recent_by_robot[str(event.get("robot", "?"))][str(event.get("kind", "?"))] += 1
@@ -313,6 +411,20 @@ def build_report(save: Path, window_ticks: int) -> str:
         )
         social = mean(float(sample.get("near_robots", 0) > 0) for sample in samples)
         forage = mean(float(sample.get("near_bushes", 0) > 0) for sample in samples)
+        signal_magnitude = (
+            mean(float(sample.get("signal_magnitude", 0.0)) for sample in awake_samples)
+            if awake_samples
+            else 0.0
+        )
+        signal_active = (
+            mean(
+                float(float(sample.get("signal_magnitude", 0.0)) > 0.05)
+                for sample in awake_samples
+            )
+            if awake_samples
+            else 0.0
+        )
+        signal_entropy = [_signal_entropy(awake_samples, channel) for channel in range(2)]
         counts = recent_by_robot[rid]
         lines.append(
             f"  {rid}: dormant={dormant:.1%}  awake-rest={awake_rest:.1%}  "
@@ -321,6 +433,11 @@ def build_report(save: Path, window_ticks: int) -> str:
         lines.append(
             "    " + "  ".join(f"{kind}={counts[kind]}" for kind in ACTIVITY_EVENTS)
         )
+        if all(value is not None for value in signal_entropy):
+            lines.append(
+                f"    signal mean={signal_magnitude:.3f}  active={signal_active:.1%}  "
+                f"entropy=({signal_entropy[0]:.3f}, {signal_entropy[1]:.3f})"
+            )
 
     lines.extend(
         [

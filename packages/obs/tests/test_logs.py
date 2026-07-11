@@ -28,6 +28,8 @@ def test_metrics_carry_interest_fields(tmp_path: Path) -> None:
     assert bot["near_robots"] == 1
     assert bot["near_bushes"] >= 0
     assert bot["resting"] is True  # no drive commanded
+    assert bot["signal"] == [0.0, 0.0]
+    assert bot["signal_magnitude"] == 0.0
     assert record["runtime"] == {
         "precision": "amp_bf16",
         "safe_ticks_per_second": 42.0,

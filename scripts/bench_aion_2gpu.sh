@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "usage: $0 OUTPUT_DIR POD_HOURLY_COST" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "usage: $0 OUTPUT_DIR POD_HOURLY_COST [BRAIN_CONFIG]" >&2
   exit 2
 fi
 
 output_dir=$1
 pod_hourly_cost=$2
+brain_config=${3:-configs/brain/aion_01_s5.yaml}
 mkdir -p "$output_dir"
 
 uv run python - <<'PY' | tee "$output_dir/hardware.txt"
@@ -35,7 +36,7 @@ nvidia-smi --query-gpu=index,name,uuid,memory.total,driver_version \
   --format=csv,noheader | tee "$output_dir/gpu.csv"
 
 uv run python scripts/bench_contention.py \
-  --brain configs/brain/aion_01_s5.yaml \
+  --brain "$brain_config" \
   --devices cuda:0 cuda:1 \
   --precision amp_bf16 \
   --brains 2 \
@@ -79,6 +80,14 @@ for index in range(2):
     total = float(result[f"total_vram_mb_cuda_{index}"])
     if reserved > total * 0.85:
         failures.append(f"cuda:{index} reserved {reserved:.0f} MiB, leaving under 15% headroom")
+    policy_std_max = float(result.get(f"brain_{index}_policy_cont_std_max", float("inf")))
+    if policy_std_max > 1.00001:
+        failures.append(f"brain {index} policy std {policy_std_max:.3f} exceeds 1.0")
+    saturation = float(
+        result.get(f"brain_{index}_policy_action_saturation_frac", float("inf"))
+    )
+    if saturation > 0.5:
+        failures.append(f"brain {index} policy saturation {saturation:.1%} exceeds 50%")
 
 if failures:
     raise SystemExit("two-GPU preflight failed: " + "; ".join(failures))

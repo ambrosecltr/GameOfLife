@@ -175,8 +175,20 @@ def main() -> None:
         "burn_in": float(replay.get("burn_in", 0)),
         "train_ratio": train_ratio,
     }
+    policy_metric_names = (
+        "policy_cont_std_mean",
+        "policy_cont_std_max",
+        "policy_action_abs_mean",
+        "policy_action_saturation_frac",
+        "policy_rest_sample_frac",
+        "affect_viability",
+    )
     for index, per_brain in enumerate(learn_times):
         result[f"brain_{index}_updates_per_second"] = 1.0 / statistics.mean(per_brain)
+        metrics = brains[index].introspect()
+        for name in policy_metric_names:
+            if name in metrics:
+                result[f"brain_{index}_{name}"] = float(metrics[name])
     slowest_brain_rate = min(
         float(result[f"brain_{index}_updates_per_second"]) for index in range(len(brains))
     )

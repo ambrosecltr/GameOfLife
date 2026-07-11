@@ -49,6 +49,13 @@ def test_aion_report_is_human_readable_and_semantically_honest(tmp_path: Path) -
         "pending_update_credit": 0.5,
         "inference_lag_updates": 1,
         "act_latched_frac": 0.0,
+        "policy_cont_std_mean": 0.5,
+        "policy_cont_std_max": 1.1,
+        "policy_action_abs_mean": 0.3,
+        "policy_action_saturation_frac": 0.6,
+        "policy_rest_sample_frac": 0.2,
+        "wellbeing": 0.1,
+        "affect_viability": 0.0,
         **{f"temperament_{key}": 1.0 for key in TEMPERAMENT_KEYS_FOR_TEST},
     }
     metrics = []
@@ -75,6 +82,8 @@ def test_aion_report_is_human_readable_and_semantically_honest(tmp_path: Path) -
                         "age": tick,
                         "dormant": index % 2 == 0,
                         "resting": index % 2 == 0,
+                        "signal": [(-1.0) ** index * 0.5, index / 10.0],
+                        "signal_magnitude": max(0.5, index / 10.0),
                         "near_robots": 0,
                         "near_bushes": 1,
                     }
@@ -116,6 +125,12 @@ def test_aion_report_is_human_readable_and_semantically_honest(tmp_path: Path) -
     assert "fixed founder" in result.stdout
     assert "not genetic selection" in result.stdout
     assert "WATCH: low current vitality for aion_000" in result.stdout
+    assert "ALERT: continuous policy standard deviation exceeds 1.0" in result.stdout
+    assert "WATCH: more than half of imagined continuous actions are saturated" in result.stdout
+    assert "ALERT: wellbeing is logged but absent from imagined viability affect" in result.stdout
+    assert "policy std=0.500/1.100 mean/max" in result.stdout
+    assert "signal mean=" in result.stdout
+    assert "entropy=(" in result.stdout
 
 
 def test_aion_report_rejects_non_save_directory(tmp_path: Path) -> None:

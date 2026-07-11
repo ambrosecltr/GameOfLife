@@ -63,9 +63,11 @@ class Population:
         self._dormant_ids: set[str] = set()
         self._pending_wake: set[str] = set()
         self._dormant_steps: dict[str, int] = {}
-        # inherit_weights == "lineage": dead learning brains wait here for a
-        # new body — weights and replay memory persist across deaths.
+        # Stateful inheritance modes keep a dead learning brain here until its
+        # replacement is born. "lineage" reuses the same mind; "descendant"
+        # copies its learned substrate into a distinct newborn brain.
         self._lineage_stash: dict[str, list[Brain]] = {}
+        self._stash_parent_ids: dict[str, list[str]] = {}
         # Deaths whose final observation has not reached the brain yet. Normal
         # tick processing retries without blocking; checkpointing waits for an
         # in-flight update so terminal replay evidence cannot be orphaned.
@@ -152,6 +154,10 @@ class Population:
                 self._pending_wake = set(state.get("pending_wake", ()))
                 self._dormant_steps = dict(state.get("dormant_steps", {}))
                 self._death_obs = dict(state.get("death_obs", {}))
+                self._stash_parent_ids = {
+                    kind: list(parent_ids)
+                    for kind, parent_ids in state.get("stash_parent_ids", {}).items()
+                }
             elif robot_id.startswith("__lineage__"):
                 kind = robot_id.split("__")[2]
                 spec = self._specs_by_kind.get(kind, {"kind": kind})
@@ -186,6 +192,10 @@ class Population:
                 "pending_wake": tuple(self._pending_wake),
                 "dormant_steps": dict(self._dormant_steps),
                 "death_obs": dict(self._death_obs),
+                "stash_parent_ids": {
+                    kind: tuple(parent_ids)
+                    for kind, parent_ids in self._stash_parent_ids.items()
+                },
             }
         )
         return blobs
@@ -211,14 +221,15 @@ class Population:
             if (
                 last is not None
                 and lock is not None
-                and self.cfg.population.inherit_weights == "lineage"
+                and self.cfg.population.inherit_weights in ("lineage", "descendant")
             ):
                 was_dormant = rid in self._dormant_ids
                 self._pending_deaths.append(
                     (brain, lock, last, was_dormant, self._dormant_steps.get(rid, 0))
                 )
-            if self.cfg.population.inherit_weights == "lineage":
+            if self.cfg.population.inherit_weights in ("lineage", "descendant"):
                 self._lineage_stash.setdefault(kind, []).append(brain)
+                self._stash_parent_ids.setdefault(kind, []).append(rid)
             self._dormant_ids.discard(rid)
             self._pending_wake.discard(rid)
             self._dormant_steps.pop(rid, None)
@@ -371,11 +382,31 @@ class Population:
         self.world.spawn_robot(robot_id, brain_name=kind, body=body)
         mode = self.cfg.population.inherit_weights
         stash = self._lineage_stash.get(kind, [])
+        parent_ids = self._stash_parent_ids.get(kind, [])
         if mode == "lineage" and stash:
             # Reincarnation: same mind, new body.
             brain = stash.pop(0)
+            if parent_ids:
+                parent_ids.pop(0)
             self._flush_death(brain)
             brain.reset_stream()
+        elif mode == "descendant" and stash:
+            # A body is one organism. Its learned weights, replay, optimizer,
+            # and temperament seed a distinct descendant; live recurrent state
+            # and per-life affect reset through inherit().
+            parent = stash.pop(0)
+            parent_id = parent_ids.pop(0) if parent_ids else "unknown"
+            self._flush_death(parent)
+            brain = build_brain(
+                spec, seed=self._seed_for(robot_id), device=self._device_for(spec, robot_id)
+            )
+            brain.inherit(parent.state_dict())
+            self.world._emit(
+                "inherit",
+                self.world.robots[robot_id],
+                parent=parent_id,
+                mode="descendant",
+            )
         else:
             brain = build_brain(
                 spec, seed=self._seed_for(robot_id), device=self._device_for(spec, robot_id)

@@ -1,0 +1,116 @@
+# Aion 03 — repaired coherent felt economy on the retained S5 substrate.
+#
+# This is the fresh replacement for invalid Aion 02. The bodily hypothesis and
+# learning budget are unchanged; the actor contract now has imagined-wellbeing
+# parity, bounded continuous variance, detached score-function samples, and
+# physical coma/death continuation boundaries.
+
+kind: aion
+preset: base
+
+reward:
+  w_curiosity: 1.0
+  w_homeostasis: 1.0
+  imagined_homeostasis: proprio
+  norm_anchor_samples: 1000000
+  curiosity: lp
+  lp:
+    partition: latent
+    regions: 32
+    ema_fast: 0.02
+    ema_slow: 0.002
+    centroid_lr: 0.05
+    relative: true
+    mix_disagreement: 0.1
+    mix_anneal_steps: 1500
+  boredom:
+    weight: 0.0
+    stim_threshold: 0.5
+    drive_threshold: 0.15
+    pressure: false
+    gate: viability
+  homeostasis: drive
+  drive:
+    scale: 3.0
+    level_penalty: 0.01
+    pow_m: 3.0
+    pow_n: 2.0
+    energy_setpoint: 0.85
+    energy_weight: 1.0
+    integrity_setpoint: 1.0
+    integrity_weight: 1.0
+    rested_setpoint: 1.0
+    rest_weight: 0.5
+  viability:
+    scale: 0.0
+    floor: 0.0
+    barrier_cap: 4.0
+    total_cap: 4.0
+    energy_lethal: 0.0
+    energy_safe: 0.25
+    integrity_lethal: 0.0
+    integrity_safe: 0.5
+    energy_weight: 1.0
+    integrity_weight: 1.0
+  wellbeing:
+    weight: 0.25
+    comfort_decay: 1.0
+  pain:
+    weight: 5.0
+    event_loss_weight: 32.0
+  death_terminal: true
+  terminal_loss_weight: 32.0
+  fear_weight: 0.1
+  blackout: suspended
+  spike_loss_weight: 4
+  low_energy_threshold: 0.25
+  low_energy_penalty: 0.02
+  low_energy_graded: true
+  curiosity_mask_agents: false
+
+temporal_skills:
+  enabled: false
+
+temperament:
+  enabled: true
+  sigma: 0.25
+  mutation_sigma: 0.1
+
+world_model:
+  kl_free_bits: 1.0
+  unimix: 0.01
+  ensemble_size: 8
+  s5:
+    model_dim: 768
+    state_dim: 128
+    blocks: 4
+    slow_fraction: 0.5
+    dt_min: 0.0001
+    dt_max: 0.1
+    projection_precision: fp32
+
+actor_critic:
+  imagination_horizon: 15
+  gamma: 0.997
+  lam: 0.95
+  entropy: 3.0e-4
+  vector_critic: true
+
+replay:
+  capacity: 500000
+  batch_size: 8
+  seq_len: 1024
+  burn_in: 256
+  warmup_steps: 4096
+  recent: 2
+  prioritize: reward
+
+training:
+  precision: amp_bf16
+  model_lr: 1.0e-4
+  actor_lr: 3.0e-5
+  critic_lr: 3.0e-5
+  grad_clip: 100.0
+  train_ratio: 0.25
+  async_inference: true
+  publish_every: 16
