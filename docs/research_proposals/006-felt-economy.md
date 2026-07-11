@@ -2,8 +2,8 @@
 proposal: 006
 title: the felt economy — a coherent bodily basis for Aion
 date: 2026-07-11
-status: invalidated, actor-contract-repair-required
-targets_round: aion_02
+status: active, aion-003-running
+targets_round: aion_03
 question: Aion 01 learned a usable food-manipulation phenotype but remained mostly unconscious, ate toxic food indiscriminately, never learned deliberate rest, and collapsed its temporal manager. Can a coherent bodily economy — positive regulated wellbeing, acute injury pain, honest unconscious-time discounting, represented bodily death, and distinct descendant inheritance — turn learned world structure into a body-preserving policy without naming or rewarding a target behavior?
 depends_on: [003, 005, aion-001]
 baselines: [aion-001, beta-013]
@@ -18,9 +18,10 @@ The first implementation run was invalidated at tick 3,778,200. Wellbeing was
 present in replay reward and telemetry but absent from direct imagined affect;
 continuous policy variance was unbounded; and continuous actions were not
 detached for the stated REINFORCE update. Consequently, that run did not test
-this proposal. The bodily contract below remains the hypothesis, while any
-replacement run must first pass the actor-level repair gates recorded in
-`docs/research_journal/aion/002-felt-economy.md`.
+this proposal. Aion 03 preserves the bodily contract and scientific
+configuration while repairing those actor defects. Its target-hardware and
+closed-loop gates passed before the official world launched; the authoritative
+running record is `docs/research_journal/aion/003-felt-economy-repair.md`.
 
 This is a **foundation-alignment round**, not a one-knob causal ablation. Earlier
 rounds repeatedly repaired one mechanism while leaving the rest of the
@@ -285,12 +286,13 @@ variance, and never checked the score-function gradient boundary. No replacement
 ecological run launches until those actor-level gates and a short closed-loop
 soak pass.
 
-Target commands:
+Replacement commands:
 
 ```bash
-scripts/bench_aion_2gpu.sh /tmp/aion-02-preflight <pod-hourly-cost> \
-  configs/brain/aion_02_economy.yaml
-scripts/start_aion_02_2gpu.sh saves/aion_02_economy_soak 100000
+scripts/bench_aion_2gpu.sh /tmp/aion-03-preflight <pod-hourly-cost> \
+  configs/brain/aion_03_economy.yaml
+scripts/start_aion_2gpu.sh configs/run/aion_03_economy.yaml \
+  saves/aion_03_economy 7012204
 ```
 
 ## Pre-registered live predictions
@@ -314,9 +316,12 @@ Compared with Aion 01 at matched world and learning budget:
 
 - `configs/brain/aion_02_economy.yaml`
 - `configs/run/aion_02_economy.yaml`
+- `configs/brain/aion_03_economy.yaml`
+- `configs/run/aion_03_economy.yaml`
 - `scripts/aion_economy_screen.py`
-- `scripts/bench_aion_2gpu.sh` with the Aion 02 brain config argument
-- `scripts/start_aion_02_2gpu.sh`
+- `scripts/bench_aion_2gpu.sh` with the round brain config argument
+- `scripts/start_aion_2gpu.sh`
 
-The Aion 01 archive is calibration evidence only. Aion 02 begins with fresh
-brains and does not load the selected Aion 01 artifact into the live population.
+The Aion 01 and invalid Aion 02 archives are calibration/forensic evidence only.
+Aion 03 begins with fresh brains and loads neither artifact into the live
+population.

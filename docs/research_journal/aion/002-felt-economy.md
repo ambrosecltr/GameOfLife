@@ -2,7 +2,7 @@
 round: aion-002
 title: coherent felt economy
 date: 2026-07-11
-status: invalidated, actor-contract-defects
+status: complete, invalidated
 question: does a coherent body-valued economy convert Aion 01's learned food-manipulation competence into toxin discrimination, deliberate rest, and bodily preservation without naming a target behavior?
 headline: "INVALIDATED AT 3,778,200 TICKS: wellbeing was logged but omitted from imagined actor affect, continuous policy variance was unbounded, and continuous REINFORCE actions were not detached. The run does not test the felt-economy hypothesis."
 runs:
@@ -128,3 +128,21 @@ The reproducible command and full table live in proposal 006.
 - these gates were insufficient: they checked finite execution and logged
   wellbeing, not whether the actor actually received wellbeing or had a valid
   bounded action-gradient path.
+
+## Closeout and archive
+
+The process was stopped after the invalidity was established, the last metrics
+and events were synced off the non-persistent pod, and the paid pod was deleted.
+There is no resumable Aion 02 world.
+
+The durable cold archive is `saves/archive/aion_02_economy_invalid`. It contains
+the exact manifest, lossless-compressed metrics and events, process log/PID,
+final check-in, and the deployed source snapshot. Decompressed stream hashes
+match the original files:
+
+- metrics: `38f5cabf802a2d58232e777c351908392de01745315bb409be0313778588059a`;
+- events: `063736f0239c6cadbae4e0525aa9a74c92174cc4a08c18c1fa0630763013cd2d`.
+
+There are no learned brain or checkpoint files in the archive. The replacement
+is Aion 03, which starts fresh from the repaired actor contract; Aion 02 never
+becomes its ancestor or baseline brain.
